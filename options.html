@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DICO 채널 알림 설정</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body class="options-page" data-page="options">
+    <main class="options-shell" aria-labelledby="page-title">
+      <header class="options-header">
+        <div class="brand-lockup">
+          <div class="brand-mark brand-mark-large" aria-hidden="true">D</div>
+          <div><p class="eyebrow">DISCORD ANNOUNCER</p><h1 id="page-title">DICO 채널 알림 설정</h1><p class="header-copy">여러 Discord 채널의 메시지, 간격, 실행 상태를 각각 관리합니다.</p></div>
+        </div>
+        <span id="run-badge" class="status-badge" data-tone="idle">모두 중지</span>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section class="card" aria-labelledby="notification-title">
+        <h2 id="notification-title">오류 알림</h2>
+        <label><input id="error-notifications-enabled" type="checkbox" checked> 모든 채널의 오류 알림 받기</label>
+        <p id="notification-status" class="field-help" role="status">알림 설정 확인 중…</p>
+        <button id="test-notification" class="button button-secondary button-small" type="button">테스트 알림</button>
+      </section>
+      <section id="conflict-card" class="notice conflict-notice" role="alert" hidden>
+        <p id="conflict-message">다른 화면에서 이 채널의 설정이 변경되었습니다.</p>
+        <button id="reload-button" class="button button-secondary button-small" type="button">최신 설정 불러오기</button>
+      </section>
+
+      <div class="workspace-grid">
+        <aside class="channel-sidebar">
+          <section class="card channel-card" aria-labelledby="channel-list-title">
+            <div class="section-heading compact-heading">
+              <div><p class="section-kicker">채널별 일정</p><h2 id="channel-list-title">등록한 채널</h2></div>
+              <button id="add-channel-button" class="button button-secondary button-small" type="button">+ 추가</button>
+            </div>
+            <div id="channel-list" class="channel-list" role="list"></div>
+            <div class="bulk-actions" aria-label="전체 채널 제어">
+              <button id="start-all-button" class="button button-primary button-small" type="button">모두 시작</button>
+              <button id="stop-all-button" class="button button-danger button-small" type="button">모두 중지</button>
+            </div>
+          </section>
+
+          <section class="card safety-card" aria-labelledby="safety-title">
+            <p class="section-kicker">사용 전 확인</p>
+            <h2 id="safety-title">채널마다 탭 하나가 필요합니다</h2>
+            <ul class="plain-list">
+              <li>각 설정은 연결한 Discord 탭에서 독립적으로 실행됩니다.</li>
+              <li>탭이 닫히거나 절전 처리되면 해당 채널 일정이 멈출 수 있습니다.</li>
+              <li>Chrome이 실행 중이고 기기가 깨어 있어야 합니다.</li>
+              <li>Discord 사용자 자동화 관련 약관을 확인하세요.</li>
+            </ul>
+          </section>
+        </aside>
+
+        <div class="options-content">
+          <section class="card target-card" aria-labelledby="target-title">
+            <div class="section-heading compact-heading">
+              <div><p class="section-kicker">전송 위치</p><h2 id="target-title">Discord 탭 연결</h2></div>
+              <button id="refresh-tabs-button" class="text-button" type="button">탭 새로고침</button>
+            </div>
+            <div class="target-picker">
+              <select id="target-tab-select" aria-label="연결할 Discord 탭"><option value="">열린 Discord 채널 탭 선택</option></select>
+              <button id="bind-button" class="button button-secondary" type="button">선택한 탭 연결</button>
+            </div>
+            <div id="target-summary" class="target-summary muted">연결된 Discord 채널이 없습니다.</div>
+            <p class="field-help">설정 페이지는 현재 탭을 자동으로 알 수 없습니다. 열린 Discord 채널을 직접 선택하면 주소를 저장합니다. 실행할 때는 채널마다 별도 전송용 창을 포커스 전환 없이 열고, 재시작하면 재사용합니다. 전송용 창은 최소화하지 마세요. 입력 중인 설정은 먼저 저장하세요.</p>
+          </section>
+
+          <section id="pending-card" class="card pending-card" aria-labelledby="pending-title" hidden>
+            <p class="section-kicker warning-kicker">확인이 필요해요</p>
+            <h2 id="pending-title">전송 결과가 불확실합니다</h2>
+            <p id="pending-summary" class="body-copy"></p>
+            <p class="assist-copy">Discord에서 실제 게시 여부를 확인하세요. ‘전송 안 됨’을 선택하기 전에는 입력창에 남은 초안을 지워야 합니다.</p>
+            <div class="button-row two-columns">
+              <button id="resolve-sent-button" class="button button-primary" type="button">전송됨</button>
+              <button id="resolve-not-sent-button" class="button button-danger" type="button">초안을 지웠고 전송 안 됨</button>
+            </div>
+          </section>
+
+          <section class="card settings-card options-main" aria-labelledby="settings-title">
+            <div class="section-heading">
+              <div><p class="section-kicker">선택한 채널</p><h2 id="settings-title">메시지와 전송 간격</h2></div>
+              <div class="heading-actions"><span id="next-message-chip" class="next-chip">다음 A</span><button id="remove-channel-button" class="text-button danger-text" type="button">채널 삭제</button></div>
+            </div>
+
+            <form id="settings-form" novalidate>
+              <label class="field-label" for="channel-name">설정 이름</label>
+              <input id="channel-name" name="name" type="text" maxlength="80" autocomplete="off" placeholder="예: 공지 채널">
+              <p id="channel-name-error" class="field-error" hidden></p>
+
+              <div class="message-grid">
+                <div class="field-group">
+                  <label class="field-label" for="message-a">메시지 A <span id="message-a-count" class="char-count">0 / 2000</span></label>
+                  <textarea id="message-a" name="messageA" rows="8" maxlength="2000" placeholder="첫 번째 알림 메시지"></textarea>
+                  <p id="message-a-error" class="field-error" hidden></p>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="message-b">메시지 B <span id="message-b-count" class="char-count">0 / 2000</span></label>
+                  <textarea id="message-b" name="messageB" rows="8" maxlength="2000" placeholder="두 번째 알림 메시지"></textarea>
+                  <p id="message-b-error" class="field-error" hidden></p>
+                </div>
+              </div>
+              <p class="format-note">일반 텍스트와 일반 URL을 지원합니다. 서식이 있는 Markdown이나 커스텀 이모지는 전송 결과 확인을 위해 일시 중지될 수 있습니다.</p>
+
+              <div class="settings-footer">
+                <div class="settings-meta-grid">
+                  <div class="interval-field">
+                    <label class="field-label" for="interval-seconds">전송 간격</label>
+                    <div class="interval-input"><input id="interval-seconds" name="intervalSeconds" type="number" min="30" max="86400" step="1" inputmode="numeric" aria-describedby="interval-help interval-error"><span>초</span></div>
+                    <p id="interval-help" class="field-help">30초–86,400초. 시작하면 다음 메시지를 바로 전송하고, 성공한 뒤부터 이 간격으로 반복합니다.</p>
+                    <p id="interval-error" class="field-error" hidden></p>
+                  </div>
+                  <div class="own-user-field">
+                    <label class="field-label" for="own-user-id">내 Discord 사용자 ID <span class="optional-label">선택 사항</span></label>
+                    <input id="own-user-id" name="ownUserId" type="text" inputmode="numeric" autocomplete="off" maxlength="20" placeholder="예: 123456789012345678" aria-describedby="own-user-id-help own-user-id-error">
+                    <p id="own-user-id-help" class="field-help">자동 인식이 안 될 때 개발자 모드에서 복사한 사용자 ID를 입력하세요.</p>
+                    <p id="own-user-id-error" class="field-error" hidden></p>
+                  </div>
+                </div>
+                <button id="save-button" class="button button-primary save-wide" type="submit">이 채널 설정 저장</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="card status-card" aria-labelledby="status-title">
+            <div class="section-heading compact-heading"><div><p class="section-kicker">현재 상태</p><h2 id="status-title">선택한 채널 일정</h2></div></div>
+            <div class="schedule-box"><p id="schedule-label" class="schedule-label">일정이 중지되어 있습니다</p><p id="schedule-detail" class="schedule-detail">설정을 저장한 뒤 시작할 수 있어요.</p></div>
+            <div class="button-row"><button id="start-button" class="button button-primary button-full" type="button">시작</button><button id="stop-button" class="button button-danger button-full" type="button" hidden>중지</button></div>
+          </section>
+
+          <section class="history-section history-card" aria-labelledby="history-title">
+            <div class="section-heading compact-heading"><div><p class="section-kicker">활동</p><h2 id="history-title">선택한 채널의 최근 기록</h2></div><span class="muted small-copy">최대 30개</span></div>
+            <ol id="history-list" class="history-list history-list-wide"></ol>
+          </section>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="ui.js"></script>
+    <script type="module" src="notification-settings.js"></script>
+  </body>
+</html>
