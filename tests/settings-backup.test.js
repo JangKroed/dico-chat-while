@@ -21,3 +21,11 @@ test('초기 미설정 채널도 백업 복원 가능',()=>{
  const backup=exportSettings({channels:[{...initialState(),name:'채널 1'}]});
  assert.deepEqual(importSettings(backup)[0].messages,['','']);
 });
+
+test('채널별 슬로우 모드 최소값을 백업·복원하고 이전 형식도 지원한다',()=>{
+ const backup=exportSettings({channels:[{...channel,slowmodeSeconds:600,intervalSeconds:603}]});
+ assert.equal(importSettings(backup)[0].slowmodeSeconds,600);
+ assert.equal(importSettings(backup)[0].intervalSeconds,603);
+ delete backup.channels[0].slowmodeSeconds;
+ assert.equal(importSettings(backup)[0].slowmodeSeconds,null);
+});

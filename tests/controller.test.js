@@ -326,3 +326,17 @@ test('초안 재시도 전 늦게 게시된 현재 공지는 원래 전송과 A/
  assert.equal(r.state.enabled,true);assert.equal(r.state.pending,null);
  assert.equal(r.state.draftRetryPending,null);
 });
+
+test('연결한 채널의 최소 주기를 적용하고 최소 미만 저장을 차단한다',async()=>{
+ const r=await configured();await r.controller.bind({...target,slowmodeSeconds:600});
+ assert.equal(r.state.intervalSeconds,603);assert.equal(r.state.slowmodeSeconds,600);
+ await assert.rejects(r.controller.updateSettings({messages:['A','B'],intervalSeconds:602}),/603/);
+ await r.controller.updateSettings({messages:['A','B'],intervalSeconds:700});assert.equal(r.state.intervalSeconds,700);
+});
+test('실행 도중 더 긴 슬로우 모드를 발견하면 마지막 발송 기준으로 다음 예약을 미룬다',async()=>{
+ const r=await configured();await r.controller.start();r.advance(30);
+ r.io.inspect=async()=>({ok:true,slowmodeSeconds:600,cooldownMs:0});
+ await r.controller.tick();assert.equal(r.sent.length,1);assert.equal(r.state.intervalSeconds,603);
+ assert.equal(r.alarm,1603000);assert.equal(r.state.nextIndex,1);
+ r.advance(573);await r.controller.tick();assert.deepEqual(r.sent,['공지 A','공지 B']);
+});

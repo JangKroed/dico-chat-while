@@ -1,3 +1,4 @@
+import { minimumInterval } from "./controller.js";
 import { draftMatchesBase, normalizeRootState, selectExistingChannel, settingsBase } from "./ui-state.js";
 
 const isPopup = document.body.dataset.page === "popup";
@@ -171,8 +172,8 @@ function validateDraft({ showErrors = true } = {}) {
   const intervalNumber = Number(intervalText);
   const intervalError = !/^\d+$/.test(intervalText) || !Number.isInteger(intervalNumber)
     ? "간격은 정수로 입력하세요."
-    : intervalNumber < 30 || intervalNumber > 86400
-      ? "30초 이상 86,400초 이하로 입력하세요."
+    : intervalNumber < minimumInterval(selectedChannel()) || intervalNumber > 86400
+      ? `이 채널은 ${minimumInterval(selectedChannel())}초 이상 86,400초 이하로 입력하세요.`
       : "";
   const ownUserId = elements.ownUserId.value.trim();
   const ownUserIdError = ownUserId && !/^\d{17,20}$/.test(ownUserId) ? "Discord 사용자 ID는 숫자 17~20자리로 입력하세요." : "";
@@ -374,6 +375,10 @@ function renderControls() {
 }
 
 function render() {
+  const channel=selectedChannel();
+  elements.interval.min = String(minimumInterval(channel));
+  document.querySelector('#interval-help').textContent = channel?.slowmodeSeconds ? `슬로우 모드 ${channel?.slowmodeSeconds}초 + 여유 3초 · 이 채널 최소 ${minimumInterval(channel)}초` : '최소 30초 · 슬로우 모드 시간을 읽으면 채널별 최소 주기가 자동 적용됩니다.';
+
   const runningCount = rootState.channels.filter(channel => channel.enabled).length;
   const pendingCount = rootState.channels.filter(channel => channel.pending && !channel.enabled).length;
   elements.runBadge.textContent = pendingCount ? `${pendingCount}개 확인 필요` : runningCount ? `${runningCount}개 실행 중` : "모두 중지";

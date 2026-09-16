@@ -42,7 +42,7 @@ async function inspect(target) {
     catch { return {ok:false,code:'TAB_MISSING',error:'전송용 탭이 닫혔습니다.'}; }
     const readiness = tabReadiness(tab, target);
     if (!readiness.ok) return readiness;
-    try { return await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),1000); }
+    try { return await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),5000); }
     catch {
       try { await chrome.scripting.executeScript({target:{tabId:target.tabId},files:['content.js']}); } catch {}
       return {ok:false,code:'CONNECTING',retryable:true,error:'Discord 입력창 연결을 기다리고 있습니다.'};
@@ -204,7 +204,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (Number.isInteger(message.tabId)) tab = await chrome.tabs.get(message.tabId);
         else [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab) throw new Error('Discord 탭을 먼저 열고 선택해 주세요.');
-        return manager.bind(message.channelId, { tabId: tab.id, url: tab.url, title: tab.title });
+        let slowmodeSeconds=null;
+        const target=parseChannel(tab.url);
+        if(target) {
+          const probe=()=>withTimeout(chrome.tabs.sendMessage(tab.id,{type:'DICO_CHANNEL_LIMIT',target}),5000);
+          try { slowmodeSeconds=(await probe())?.slowmodeSeconds; }
+          catch {
+            try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']}); slowmodeSeconds=(await probe())?.slowmodeSeconds; } catch {}
+          }
+        }
+        return manager.bind(message.channelId, { tabId: tab.id, url: tab.url, title: tab.title, slowmodeSeconds });
       }
       case 'DICO_START':
         try { return await startChannel(message.channelId); }

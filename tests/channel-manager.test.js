@@ -258,3 +258,12 @@ test('서로 다른 설정에서 동시에 같은 채팅방을 연결해도 하�
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
   assert.equal(r.state.channels.filter(channel => channel.target.channelId === '999').length, 1);
 });
+
+test('채널별로 10분과 2분 슬로우 모드 최소값을 독립 저장한다',async()=>{
+ const {r,first,second}=await pair();
+ await Promise.all([r.manager.bind(first,{...target(7),slowmodeSeconds:600}),r.manager.bind(second,{...target(8),slowmodeSeconds:120})]);
+ const a=r.state.channels.find(c=>c.id===first),b=r.state.channels.find(c=>c.id===second);
+ assert.equal(a.intervalSeconds,603);assert.equal(b.intervalSeconds,123);
+ assert.equal(a.slowmodeSeconds,600);assert.equal(b.slowmodeSeconds,120);
+ await assert.rejects(r.manager.updateSettings(first,settings('수정',602),a.settingsRevision),/603/);
+});

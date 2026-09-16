@@ -3,6 +3,7 @@ export const initialState = () => ({
   messages: ['', ''],
   ownUserId: '',
   intervalSeconds: 300,
+  slowmodeSeconds: null,
   enabled: false,
   target: null,
   nextIndex: 0,
@@ -25,6 +26,8 @@ export function parseChannel(value) {
     return match ? { guildId: match[1], channelId: match[2] } : null;
   } catch { return null; }
 }
+
+export const minimumInterval = channel => Number.isInteger(channel?.slowmodeSeconds) && channel.slowmodeSeconds>0 && channel.slowmodeSeconds<=21600 ? Math.max(30,channel.slowmodeSeconds+3) : 30;
 
 export function validateSettings(settings) {
   if (settings?.ownUserId && !/^\d{17,20}$/.test(settings.ownUserId)) throw new Error('내 Discord 사용자 ID는 17~20자리 숫자로 입력해 주세요.');
@@ -78,6 +81,16 @@ export function createController(io) {
     try { return await io.inspect(target); }
     catch { return { ok: false, error: '대상 탭에 연결할 수 없습니다. Discord 페이지를 확인해 주세요.' }; }
   };
+  const applySlowmode = (state, seconds) => {
+    if (!Number.isInteger(seconds) || seconds<=0 || seconds>21600) return;
+    state.slowmodeSeconds=seconds;
+    const minimum=minimumInterval(state);
+    if (state.enabled && Number.isFinite(state.lastSentAt) && state.lastSentAt>0) state.nextRunAt=Math.max(state.nextRunAt || 0,state.lastSentAt+minimum*1000);
+    if(state.intervalSeconds<minimum) {
+      state.intervalSeconds=minimum;
+      log(state,'info',`슬로우 모드 ${seconds}초에 여유 3초를 더해 주기를 ${minimum}초로 조정했습니다.`);
+    }
+  };
   const confirmed = async state => {
     state.draftRetries = 0;
     state.draftRetrySince = null;
@@ -109,6 +122,7 @@ export function createController(io) {
       validateSettings(settings);
       const state = await read();
       requireEditable(state);
+      if (settings.intervalSeconds<minimumInterval(state)) throw new Error(`이 채널은 슬로우 모드 때문에 최소 ${minimumInterval(state)}초 이상으로 설정해야 합니다.`);
       state.messages = [...settings.messages];
       state.ownUserId = settings.ownUserId || '';
       state.intervalSeconds = settings.intervalSeconds;
@@ -122,6 +136,8 @@ export function createController(io) {
       if (!channel || !Number.isInteger(target.tabId) || target.tabId < 0) {
         throw new Error('Discord 서버의 텍스트 채널을 열고 팝업에서 선택해 주세요. DM은 지원하지 않습니다.');
       }
+      if (state.target?.guildId!==channel.guildId || state.target?.channelId!==channel.channelId) { state.slowmodeSeconds=null; state.lastSentAt=null; }
+      applySlowmode(state,target.slowmodeSeconds);
       // Reconnecting the same room from an ordinary tab must not lose its sender.
       if (!target.managed && state.target?.managed &&
           state.target.guildId === channel.guildId && state.target.channelId === channel.channelId) {
@@ -139,6 +155,7 @@ export function createController(io) {
       validateSettings(state);
       if (!state.target) throw new Error('현재 Discord 채널을 먼저 선택해 주세요.');
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
           state.pending = state.draftRetryPending; await persist(state);
@@ -175,12 +192,19 @@ export function createController(io) {
         return state;
       }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
           state.pending = state.draftRetryPending; await persist(state);
           if (await recheck(state)) return confirmed(state);
         }
         return pause(state, result.error);
+      }
+      if (state.nextRunAt>io.now()) {
+        state.slowmodeUntil=state.nextRunAt;
+        await persist(state);
+        try { await io.schedule(state.nextRunAt); } catch { return pause(state,'슬로우 모드 최소 주기 예약에 실패했습니다.'); }
+        return state;
       }
       if (Number.isFinite(result.cooldownMs) && result.cooldownMs > 0) return deferSlowmode(state, result.cooldownMs);
       state.slowmodeUntil = null;
@@ -242,6 +266,7 @@ export function createController(io) {
       if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
       if (!state.enabled) { await io.cancel(); return state; }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
           state.pending = state.draftRetryPending; await persist(state);
@@ -249,6 +274,7 @@ export function createController(io) {
         }
         return pause(state, result.error);
       }
+      await persist(state);
       // Never replay every missed interval after sleep or browser restart.
       if (!state.nextRunAt || (!preserveDue && state.nextRunAt < io.now())) {
         state.nextRunAt = io.now() + state.intervalSeconds * 1000;

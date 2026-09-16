@@ -62,6 +62,52 @@
   }
   // Read only the composer countdown, never message text or the channel's
   // configured slowmode duration (which may not apply to this member).
+  function parseSlowmodeSetting(text) {
+    const value = String(text || '').replace(/\s+/g,' ').trim();
+    if (!/슬로우\s*모드|slow\s*mode/i.test(value)) return null;
+    const ko = value.match(/(?:멤버는|사용자는)\s*(.*?)\s*에\s*한\s*번/);
+    const en = value.match(/(?:one|a) message every\s+([\d\s.,a-z]+)/i);
+    const duration = ko?.[1] || en?.[1];
+    if (!duration) return null;
+    let seconds=0, found=false;
+    for (const match of duration.matchAll(/(\d+)\s*(시간|분|초|hours?|minutes?|seconds?)/gi)) {
+      const unit=match[2].toLowerCase();
+      seconds+=Number(match[1])*(unit==='시간'||unit.startsWith('hour')?3600:unit==='분'||unit.startsWith('minute')?60:1);found=true;
+    }
+    return found && seconds>0 && seconds<=21600 ? seconds : null;
+  }
+  let slowmodeSetting = {path:null,seconds:null,checkedAt:0};
+  async function detectSlowmodeSetting(target) {
+    if (!target || !matchesTarget(target)) return null;
+    const path=location.pathname;
+    if (slowmodeSetting.path===path && Date.now()-slowmodeSetting.checkedAt<30000) return slowmodeSetting.seconds;
+    const editor=editors()[0], form=editor?.closest('form') || editor?.parentElement;
+    const icons=[...(form?.querySelectorAll?.('[class*="slowMode"], [class*="slowmode"]') || [])].filter(node=>node.getClientRects().length>0);
+    let seconds=null;
+    const read = node => {
+      const labels=[node.textContent,node.getAttribute('aria-label'),node.getAttribute('title')];
+      for(const id of (node.getAttribute('aria-describedby')||'').split(/\s+/)) if(id) labels.push(document.getElementById(id)?.textContent);
+      return labels.map(parseSlowmodeSetting).find(value=>value!==null) ?? null;
+    };
+    for (const icon of icons.slice(0,3)) {
+      seconds=read(icon);
+      if(seconds!==null) break;
+      try {
+        icon.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));
+        await new Promise(resolve=>setTimeout(resolve,250));
+        seconds=read(icon);
+        if(seconds===null) for(const tooltip of document.querySelectorAll('[role="tooltip"]')) {
+          if(tooltip.getClientRects().length>0) seconds=parseSlowmodeSetting(tooltip.textContent);
+          if(seconds!==null) break;
+        }
+      } finally {icon.dispatchEvent(new MouseEvent('mouseout',{bubbles:true}));}
+      if(seconds!==null) break;
+    }
+    if (!matchesTarget(target) || location.pathname!==path) return null;
+    if(seconds===null && slowmodeSetting.path===path) seconds=slowmodeSetting.seconds;
+    slowmodeSetting={path,seconds,checkedAt:Date.now()};
+    return seconds;
+  }
   function slowmode(editor) {
     const form = editor?.closest('form') || editor?.parentElement;
     const nodes = [...(form?.querySelectorAll?.('[class*="slowModeCooldown"], [class*="slowmodeCooldown"]') || [])]
@@ -73,7 +119,7 @@
       if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) continue;
       seconds = Math.max(seconds, Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     }
-    return {slowmodeDetected:nodes.length > 0, cooldownMs:Math.min(seconds,21600)*1000};
+    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0, cooldownMs:Math.min(seconds,21600)*1000};
   }
   function inspect(target) {
     if (!target || !matchesTarget(target)) return { ok: false, error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
@@ -98,7 +144,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.17';
+  const CONTENT_VERSION = '0.2.18';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -343,7 +389,8 @@
       reportTrace(message.delivery, 'reconcile', {result:result.status,draftAction:result.draftAction});
       respond(result); return false;
     }
-    if (message?.type === 'DICO_INSPECT') { respond(inspect(message.target)); return false; }
+    if (message?.type === 'DICO_CHANNEL_LIMIT') { detectSlowmodeSetting(message.target).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
+    if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>respond(inspect(message.target))); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;
   });

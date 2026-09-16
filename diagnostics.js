@@ -9,6 +9,7 @@ export function diagnosticEvents(previous, current, now = Date.now()) {
       intervalSeconds: channel.intervalSeconds, nextRunAt: channel.nextRunAt,
       pending: Boolean(channel.pending), nextMessage: channel.nextIndex === 1 ? 'B' : 'A',
       dedicatedTab: Boolean(channel.target?.managed), dedicatedWindow: Boolean(channel.target?.windowManaged)};
+    if (channel.slowmodeSeconds && channel.slowmodeSeconds !== before?.slowmodeSeconds) events.push({...base,kind:'slowmode-minimum',slowmodeSeconds:channel.slowmodeSeconds,minimumSeconds:Math.max(30,channel.slowmodeSeconds+3)});
     if (channel.slowmodeUntil && channel.slowmodeUntil !== before?.slowmodeUntil) events.push({...base,kind:'slowmode-wait',until:channel.slowmodeUntil});
     if ((channel.draftRetries || 0) > (before?.draftRetries || 0)) events.push({...base,kind:'draft-retry-scheduled',attempt:channel.draftRetries});
     if (channel.error && channel.error !== before?.error) events.push({...base, kind:'error', reason:String(channel.error).slice(0,500)});
@@ -37,7 +38,7 @@ export function appendDiagnostics(api,events) {
 
 const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed']);
 const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected'];
-const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs'];
+const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   const index=state.channels.findIndex(c=>c.target?.tabId===tabId && c.pending?.id===message.id);
   if(index<0 || !TRACE_STAGES.has(message.stage)) return null;

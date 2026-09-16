@@ -52,7 +52,7 @@ export function createChannelManager(io) {
     save: state => commit(async () => {
       const root = await read();
       const current = find(root, id);
-      const next = newChannel(id, name ?? current.name, { ...state, settingsRevision: current.settingsRevision + (revise ? 1 : 0) });
+      const next = newChannel(id, name ?? current.name, { ...state, settingsRevision: current.settingsRevision + (revise || state.intervalSeconds!==current.intervalSeconds || state.slowmodeSeconds!==current.slowmodeSeconds ? 1 : 0) });
       if (next.target && root.channels.some(c => c.id !== id && c.target?.guildId === next.target.guildId && c.target?.channelId === next.target.channelId)) throw new Error('이미 다른 설정에 연결된 Discord 채널입니다.');
       root.channels = root.channels.map(channel => channel.id === id ? next : channel);
       await persistRoot(root);
