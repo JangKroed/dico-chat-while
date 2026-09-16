@@ -3,7 +3,7 @@ const status = document.querySelector('#diagnostic-status');
 button.addEventListener('click', async () => {
   try {
     const {diagnosticLog=[]} = await chrome.storage.local.get('diagnosticLog');
-    const report = {version:chrome.runtime.getManifest().version, exportedAt:new Date().toISOString(), browser:navigator.userAgent, events:diagnosticLog};
+    const report = {schemaVersion:2,version:chrome.runtime.getManifest().version, exportedAt:new Date().toISOString(), browser:navigator.userAgent, events:diagnosticLog};
     const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));
     const link=document.createElement('a');
     link.href=url;link.download=`dico-diagnostics-${Date.now()}.json`;link.click();

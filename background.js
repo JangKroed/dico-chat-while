@@ -1,7 +1,7 @@
 import { recoverLoading } from './loading-recovery.js';
 import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
-import { recordDiagnostics, appendDiagnostics } from './diagnostics.js';
+import { recordDiagnostics, appendDiagnostics, deliveryTraceEvent } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
 import { waitForReady, tabReadiness } from './readiness.js';
 import { createChannelManager } from './channel-manager.js';
@@ -141,6 +141,15 @@ async function startAllChannels() {
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
+  if (message?.type === 'DICO_TRACE' && sender.tab) {
+    // Do not enqueue behind the delivery whose progress we are recording.
+    manager.getState().then(async state => {
+      const event = deliveryTraceEvent(message, state, sender.tab.id);
+      if (event) await appendDiagnostics(chrome, [event]);
+      respond({ok:Boolean(event)});
+    }).catch(() => respond({ok:false}));
+    return true;
+  }
   if (message?.type === 'DICO_CAN_SEND' && sender.tab) {
     manager.getState().then(state => respond({
       allowed: !stopAllRequested && state.channels.some(channel =>

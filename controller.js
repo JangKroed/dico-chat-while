@@ -126,7 +126,7 @@ export function createController(io) {
       }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId });
       if (!result.ok) return pause(state, result.error);
-      state.pending = { id: io.id(), index: state.nextIndex, text: state.messages[state.nextIndex], startedAt: io.now() };
+      state.pending = { id: io.id(), index: state.nextIndex, text: state.messages[state.nextIndex], scheduledAt: state.nextRunAt, startedAt: io.now() };
       // Keep a watchdog alarm in case the worker is terminated during delivery.
       try { await io.schedule(io.now() + 60000); }
       catch {

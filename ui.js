@@ -305,6 +305,9 @@ function renderSchedule() {
   } else if (channel.pending && !channel.enabled) {
     elements.scheduleLabel.textContent = "전송 결과 확인 대기 중";
     elements.scheduleDetail.textContent = "확인 결과를 선택해야 다시 시작할 수 있어요.";
+  } else if (channel.pending) {
+    elements.scheduleLabel.textContent = `메시지 ${channel.pending.index === 1 ? "B" : "A"} 입력·전송 확인 중`;
+    elements.scheduleDetail.textContent = "전송 확인 후 다음 타이머가 시작됩니다.";
   } else if (!channel.enabled) {
     elements.scheduleLabel.textContent = "일정이 중지되어 있습니다";
     elements.scheduleDetail.textContent = conflict ? "최신 설정을 먼저 불러오세요." : isDirty() ? "변경한 설정을 먼저 저장하세요." : "다음 차례를 유지한 채 시작할 수 있어요.";

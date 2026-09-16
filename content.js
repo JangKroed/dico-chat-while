@@ -73,17 +73,45 @@
     if (!document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
     return { ok: true };
   }
-  function watchMessage(editor, text, userId, startedAt) {
+  const CONTENT_VERSION = '0.2.12';
+  let composing = false;
+  document.addEventListener?.('compositionstart', () => { composing = true; }, true);
+  document.addEventListener?.('compositionend', () => { composing = false; }, true);
+  function traceSnapshot(target, text, originalEditor) {
+    const found = editors(), editor = found[0], selection = window.getSelection();
+    const draft = normalize(editor?.innerText || editor?.textContent || '');
+    return {
+      pageHidden: document.hidden, documentFocused: document.hasFocus(),
+      editorCount: found.length, editorFocused: editor === document.activeElement,
+      editorConnected: Boolean(editor?.isConnected), editorReplaced: Boolean(originalEditor && editor !== originalEditor),
+      selectionRanges: selection?.rangeCount || 0,
+      selectionInside: Boolean(editor && selection?.anchorNode && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)),
+      selectionCollapsed: Boolean(selection?.isCollapsed), draftLength: draft.length,
+      draftEmpty: !draft, textMatches: draft === normalize(text), composing,
+      targetMatches: matchesTarget(target),
+    };
+  }
+  function reportTrace(delivery, stage, data = {}) {
+    try {
+      // Never wait for telemetry before typing; record only allowlisted metadata.
+      const request = chrome.runtime.sendMessage({type:'DICO_TRACE',id:delivery.id,stage,version:CONTENT_VERSION,
+        data:{...data,elapsedMs:Date.now()-delivery.startedAt,latenessMs:delivery.startedAt-delivery.scheduledAt}});
+      request?.catch?.(() => {});
+    } catch { /* Diagnostics must not change delivery behavior. */ }
+  }
+  function watchMessage(editor, text, userId, startedAt, report = () => {}) {
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
     const localNodes = new WeakSet();
     let observer, timer, poll, resolve, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
+    const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
     const promise = new Promise(done => { resolve = done; });
     const finish = value => {
       if (finished) return;
       finished = true;
+      report(evidence);
       observer?.disconnect(); clearTimeout(timer); clearInterval(poll); resolve(value);
     };
     const currentEditor = () => editor.isConnected ? editor : editors()[0];
@@ -93,32 +121,39 @@
       const empty = liveEditor && !normalize(liveEditor.innerText || liveEditor.textContent || '');
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
+        evidence.newMessage = true;
         if (!matchesRenderedText(text, messageText(node))) {
           detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
           continue;
         }
+        evidence.matchingMessage = true;
         const row = node.closest('li') || node;
         const isSending = row.querySelector('[class*="isSending"]') || row.matches('[class*="isSending"]');
         // Optimistic IDs need not be final snowflakes. Observe them even while
         // Slate still displays the submitted draft, then require a final ID.
         if (isSending) {
+          evidence.sendingSeen = true;
           locallySending.add(node.id); localNodes.add(node);
           detail = '메시지가 아직 전송 중으로 표시됩니다.';
           continue;
         }
         if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
+          evidence.failedSeen = true;
           detail = 'Discord가 메시지를 전송 실패로 표시했습니다.'; continue;
         }
         const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
         const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
         if (!id || created < startedAt - 2000 || created > Date.now() + 2000) {
+          evidence.timeMismatch = true;
           detail = '메시지 생성 시각을 이번 전송과 연결하지 못했습니다.'; continue;
         }
         const author = authorId(row);
         if (userId && author && author !== userId) {
+          evidence.authorMismatch = true;
           detail = '일치하는 메시지의 작성자가 본인과 다릅니다.'; continue;
         }
         if (!locallySending.has(node.id) && !localNodes.has(node) && (!userId || author !== userId)) {
+          evidence.authorUnknown = true;
           detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
         }
         if (!empty) { detail = '입력창이 비워졌는지 확인하지 못했습니다.'; continue; }
@@ -143,7 +178,11 @@
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
     busy = true;
     let entered = false;
-    let watcher;
+    let watcher, originalEditor;
+    const trace = (stage, extra = {}) => {
+      try { reportTrace(delivery, stage, {...traceSnapshot(target, delivery.text, originalEditor), ...extra}); } catch {}
+    };
+    trace('received');
     try {
       let result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
@@ -152,6 +191,7 @@
       result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
       let editor = editors()[0];
+      originalEditor = editor;
       seenDeliveries.add(delivery.id);
       if (seenDeliveries.size > 100) seenDeliveries.delete(seenDeliveries.values().next().value);
       editor.focus();
@@ -172,10 +212,13 @@
       const clipboardData = new DataTransfer();
       clipboardData.setData('text/plain', delivery.text);
       entered = true;
-      editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true, composed: true }));
+      trace('before-paste');
+      const paste = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true, composed: true });
+      editor.dispatchEvent(paste);
       // Paste updates the editor model and React may render it asynchronously.
       // Never send Enter in the same task as text insertion.
       await new Promise(resolve => setTimeout(resolve, 150));
+      trace('after-paste', {pastePrevented:paste.defaultPrevented});
       const currentEditors = editors();
       if (currentEditors.length !== 1 || normalize(currentEditors[0].innerText || currentEditors[0].textContent || '') !== normalize(delivery.text)) {
         return { status: 'uncertain', error: 'Discord 편집기에 문구가 반영되지 않았습니다. 페이지를 새로고침하고 남은 초안을 확인해 주세요.' };
@@ -188,11 +231,18 @@
       if (!matchesTarget(target) || !editor.isConnected || normalize(editor.innerText || editor.textContent || '') !== normalize(delivery.text)) {
         return { status: 'uncertain', error: '전송 직전에 채널이나 입력 내용이 변경되었습니다. 초안을 확인해 주세요.' };
       }
-      watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now());
-      editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      return await watcher.promise;
+      watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence));
+      trace('before-enter');
+      const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+      const keyup = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+      editor.dispatchEvent(keydown);
+      editor.dispatchEvent(keyup);
+      trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
+      const outcome = await watcher.promise;
+      trace('finished', {result:outcome.status});
+      return outcome;
     } catch {
+      trace('exception');
       watcher?.cancel();
       return { status: entered ? 'uncertain' : 'blocked', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
     } finally { busy = false; }
