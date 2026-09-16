@@ -1,3 +1,4 @@
+import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
 import { recordDiagnostics, appendDiagnostics } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
@@ -149,6 +150,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return true;
   }
   if (sender.tab || !sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
+  if (message?.type === 'DICO_EXPORT_SETTINGS') {
+    enqueue(async()=>exportSettings(await manager.getState()), 'settings-export')
+      .then(backup=>respond({ok:true,backup})).catch(error=>respond({ok:false,error:error.message}));
+    return true;
+  }
   if (message?.type === 'DICO_GET') {
     manager.getState().then(state => respond({ ok: true, state })).catch(error => respond({ ok: false, error: error.message }));
     return true;
@@ -163,6 +169,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'DICO_STOP_ALL') stopAllRequested = true;
   const action = async () => {
     switch (message?.type) {
+      case 'DICO_IMPORT_SETTINGS': return manager.restoreSettings(message.backup);
       case 'DICO_ADD': return manager.add();
       case 'DICO_REMOVE': return manager.remove(message.channelId);
       case 'DICO_SAVE': return manager.updateSettings(message.channelId, message.settings, message.expectedRevision);

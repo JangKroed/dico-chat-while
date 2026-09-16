@@ -220,3 +220,17 @@ test('탭 준비 실패는 해당 채널에만 기록하고 미확인 전송을 
   assert.equal(r.alarms.has(first), false);
   assert.equal(r.alarms.has(second), true);
 });
+
+test('설정 복원은 전체 검증 후 교체하고 실행 중에는 거부한다',async()=>{
+ const {r,first}=await pair();
+ const backup={format:'dico-settings',version:1,channels:[{name:'복원',messages:['A','B'],intervalSeconds:60,ownUserId:'',nextIndex:1,url:'https://discord.com/channels/123/999'}]};
+ const original=r.state;
+ await assert.rejects(r.manager.restoreSettings({...backup,channels:[{...backup.channels[0],intervalSeconds:0}]}));
+ assert.deepEqual(r.state,original);
+ await r.manager.start(first);
+ await assert.rejects(r.manager.restoreSettings(backup));
+ await r.manager.stopAll();
+ const restored=await r.manager.restoreSettings(backup);
+ assert.equal(restored.channels.length,1);assert.equal(restored.channels[0].nextIndex,1);
+ assert.equal(restored.channels[0].enabled,false);assert.equal(restored.channels[0].target.managed,undefined);
+});

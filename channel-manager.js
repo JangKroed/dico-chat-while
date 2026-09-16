@@ -1,3 +1,4 @@
+import { importSettings } from './settings-backup.js';
 import { createController, initialState, parseChannel } from './controller.js';
 
 const newChannel = (id, name, saved = {}) => {
@@ -78,6 +79,16 @@ export function createChannelManager(io) {
 
   return {
     getState: read,
+    restoreSettings: backup => mutate(async () => {
+      const root=await read();
+      if(root.channels.some(c=>c.enabled || c.pending)) throw new Error('모두 중지하고 미확인 전송 결과를 확인한 뒤 복원하세요.');
+      const imported=importSettings(backup);
+      const channels=imported.map(c=>newChannel(io.id(),c.name,c));
+      if(new Set(channels.map(c=>c.id)).size!==channels.length)throw new Error('채널 ID 생성 실패');
+      for(const channel of root.channels)await io.cancel(channel.id);
+      root.channels=channels;
+      await persistRoot(root);
+    }),
     updateSettings: (id, settings, expectedRevision) => mutate(async () => {
       const channel = find(await read(), id);
       if (!Number.isInteger(expectedRevision) || expectedRevision !== channel.settingsRevision) {

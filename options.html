@@ -25,6 +25,13 @@
         <p id="notification-status" class="field-help" role="status">알림 설정 확인 중…</p>
         <button id="test-notification" class="button button-secondary button-small" type="button">테스트 알림</button>
       </section>
+      <section class="card">
+        <h2>설정 백업·복원</h2>
+        <p class="field-help">업데이트는 기존 설치 폴더에 덮어쓰고 확장 프로그램을 새로고침하세요. 다른 폴더·PC로 옮길 때는 백업 파일을 사용하세요.</p>
+        <button id="backup-export" class="button button-secondary" type="button">설정 백업</button>
+        <label class="field-label" for="backup-import">백업에서 복원</label><input id="backup-import" type="file" accept=".json,application/json">
+        <p id="backup-status" class="field-help" role="status">저장된 채널·문구·주기·내 사용자 ID·A/B 차례를 옮깁니다. 복원하면 현재 채널 설정을 교체하며 자동 시작하지 않습니다. 메일 연결 키는 포함하지 않습니다.</p>
+      </section>
       <section id="conflict-card" class="notice conflict-notice" role="alert" hidden>
         <p id="conflict-message">다른 화면에서 이 채널의 설정이 변경되었습니다.</p>
         <button id="reload-button" class="button button-secondary button-small" type="button">최신 설정 불러오기</button>
@@ -152,6 +159,7 @@
       </div>
     </main>
     <script type="module" src="ui.js"></script>
+    <script type="module" src="backup-settings-ui.js"></script>
     <script type="module" src="email-settings.js"></script>
     <script type="module" src="notification-settings.js"></script>
     <script type="module" src="diagnostic-settings.js"></script>
