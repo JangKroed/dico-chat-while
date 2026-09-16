@@ -225,3 +225,26 @@ test('같은 채팅방을 일반 탭에서 다시 연결해도 전송용 창을 
   assert.equal(r.state.target.tabId,8);
   assert.equal(r.state.target.managed,undefined);
 });
+
+test('남은 공지는 주기 후 같은 차례로 최대 3회 재시도하고 성공하면 차례를 넘긴다',async()=>{
+ const r=await configured();let calls=0;
+ r.io.send=async()=>++calls<3?{status:'draft-retained',error:'남음'}:{status:'confirmed'};
+ await r.controller.start();assert.equal(r.state.enabled,true);assert.equal(r.state.pending,null);assert.equal(r.state.nextIndex,0);
+ await r.controller.tick();assert.equal(calls,1);
+ r.advance(30);await r.controller.tick();assert.equal(calls,2);assert.equal(r.state.nextIndex,0);
+ r.advance(30);await r.controller.tick();assert.equal(r.state.nextIndex,1);assert.equal(r.state.draftRetries,0);
+});
+test('잔류 초안 재시도 횟수는 worker 재생성 뒤에도 유지되고 한도에서 중지한다',async()=>{
+ const r=await configured();let calls=0;r.io.send=async()=>{calls++;return {status:'draft-retained',error:'남음'};};
+ await r.controller.start();
+ for(let i=0;i<3;i++){r.advance(30);await createController(r.io).tick();}
+ assert.equal(calls,4);assert.equal(r.state.enabled,false);assert.ok(r.state.pending);assert.equal(r.state.nextIndex,0);
+});
+test('재시도 전에 늦게 게시된 흔적이 발견되면 재전송 없이 원래 전송 확인으로 전환한다',async()=>{
+ const r=await configured();let calls=0;r.io.send=async()=>{calls++;return {status:'draft-retained',error:'남음'};};
+ await r.controller.start();const original=r.state.draftRetryPending.id;
+ r.io.inspect=async()=>({ok:false,code:'POSSIBLY_SENT',error:'게시 흔적'});
+ r.advance(30);await r.controller.tick();
+ assert.equal(calls,1);assert.equal(r.state.enabled,false);assert.equal(r.state.pending.id,original);
+ await r.controller.resolvePending('sent');assert.equal(r.state.nextIndex,1);assert.equal(r.state.draftRetrySince,null);
+});

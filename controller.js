@@ -11,6 +11,9 @@ export const initialState = () => ({
   error: null,
   history: [],
   lastSentAt: null,
+  draftRetries: 0,
+  draftRetrySince: null,
+  draftRetryPending: null,
 });
 
 export function parseChannel(value) {
@@ -96,9 +99,13 @@ export function createController(io) {
       if (state.enabled) return state;
       validateSettings(state);
       if (!state.target) throw new Error('현재 Discord 채널을 먼저 선택해 주세요.');
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId });
-      if (!result.ok) throw new Error(result.error);
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      if (!result.ok) {
+        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) { state.pending = state.draftRetryPending; await persist(state); }
+        throw new Error(result.error);
+      }
       state.enabled = true;
+      state.draftRetries = 0;
       state.error = null;
       state.nextRunAt = io.now();
       log(state, 'info', `${state.nextIndex === 0 ? 'A' : 'B'}부터 자동 전송을 시작합니다.`);
@@ -124,8 +131,11 @@ export function createController(io) {
         catch { return pause(state, '예약을 복원하지 못해 중지했습니다.'); }
         return state;
       }
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId });
-      if (!result.ok) return pause(state, result.error);
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      if (!result.ok) {
+        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) state.pending = state.draftRetryPending;
+        return pause(state, result.error);
+      }
       state.pending = { id: io.id(), index: state.nextIndex, text: state.messages[state.nextIndex], scheduledAt: state.nextRunAt, startedAt: io.now() };
       // Keep a watchdog alarm in case the worker is terminated during delivery.
       try { await io.schedule(io.now() + 60000); }
@@ -135,9 +145,25 @@ export function createController(io) {
       }
       await persist(state);
       let response;
-      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId }, state.pending); }
+      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
+      if (response?.status === 'draft-retained' && (state.draftRetries || 0) < 3) {
+        state.draftRetries = (state.draftRetries || 0) + 1;
+        state.draftRetrySince ||= state.pending.startedAt;
+        state.draftRetryPending ||= state.pending;
+        state.pending = null;
+        state.error = null;
+        state.nextRunAt = io.now() + state.intervalSeconds * 1000;
+        log(state, 'info', `입력창에 남은 공지를 다음 주기에 다시 확인합니다 (${state.draftRetries}/3). A/B 차례는 유지합니다.`);
+        await persist(state);
+        try { await io.schedule(state.nextRunAt); }
+        catch { return pause(state, '초안 재확인 예약을 등록하지 못했습니다.'); }
+        return state;
+      }
       if (response?.status === 'confirmed') {
+        state.draftRetries = 0;
+        state.draftRetrySince = null;
+        state.draftRetryPending = null;
         log(state, 'success', `문구 ${state.pending.index === 0 ? 'A' : 'B'} 전송 확인`);
         state.nextIndex = 1 - state.pending.index;
         state.pending = null;
@@ -161,6 +187,9 @@ export function createController(io) {
         state.lastSentAt = state.pending.startedAt;
       }
       state.pending = null;
+      state.draftRetries = 0;
+      state.draftRetrySince = null;
+      state.draftRetryPending = null;
       state.error = null;
       log(state, 'info', resolution === 'sent' ? '사용자가 발송 완료를 확인했습니다. 다음 문구로 이어집니다.' : '사용자가 미발송을 확인했습니다. 같은 문구로 이어집니다.');
       return persist(state);
@@ -169,8 +198,11 @@ export function createController(io) {
       const state = await read();
       if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
       if (!state.enabled) { await io.cancel(); return state; }
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId });
-      if (!result.ok) return pause(state, result.error);
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      if (!result.ok) {
+        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) state.pending = state.draftRetryPending;
+        return pause(state, result.error);
+      }
       // Never replay every missed interval after sleep or browser restart.
       if (!state.nextRunAt || (!preserveDue && state.nextRunAt < io.now())) {
         state.nextRunAt = io.now() + state.intervalSeconds * 1000;

@@ -5,9 +5,9 @@ import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,diagnosticEvents} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
 const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678'};
-async function deliver(ignoreEnter=false) {
+async function deliver(ignoreEnter=false, draft='') {
  const traces=[], nodes=[];let listener, check;
- const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>({querySelector:()=>null}),contains:n=>n===editor,
+ const editor={innerText:draft,isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>({querySelector:()=>null}),contains:n=>n===editor,
   focus:()=>{document.activeElement=editor;},dispatchEvent:event=>{
    if(event.type==='paste'){editor.innerText=event.clipboardData.text;event.defaultPrevented=true;}
    if(event.type==='keydown'&&!ignoreEnter){
@@ -16,24 +16,24 @@ async function deliver(ignoreEnter=false) {
    }
   }};
  const selection={anchorNode:editor,focusNode:editor,rangeCount:1,isCollapsed:true,removeAllRanges(){},addRange(){}};
- const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:()=>({}),createRange:()=>({selectNodeContents(){}}),addEventListener(){}};
+ const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:()=>({}),createRange:()=>({selectNodeContents(){},collapse(){}}),addEventListener(){}};
  const ctx={document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},
   chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true};}return {allowed:true};}}},
   ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data);}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data);}},DataTransfer:class{setData(_,text){this.text=text;}},
   MutationObserver:class{constructor(fn){check=fn;}observe(){}disconnect(){}},setTimeout:fn=>setImmediate(fn),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},Date};
  runInNewContext(source,ctx);
- const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target,delivery:{id:'attempt',text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
+ const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target:{...target,messages:['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']},delivery:{id:'attempt',text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
  return {result,traces};
 }
 test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부를 문구 없이 기록한다',async()=>{
  const {result,traces}=await deliver();assert.equal(result.status,'confirmed');
- assert.deepEqual(traces.map(t=>t.stage),['received','before-paste','after-paste','before-enter','observation','enter-dispatched','finished']);
+ assert.deepEqual(traces.map(t=>t.stage),['received','draft-replaced','before-paste','after-paste','before-enter','observation','enter-dispatched','finished']);
  assert.equal(traces.find(t=>t.stage==='after-paste').data.textMatches,true);
  assert.equal(traces.find(t=>t.stage==='enter-dispatched').data.enterPrevented,true);
  assert.equal(JSON.stringify(traces).includes('PRIVATE MESSAGE'),false);
 });
 test('Enter가 무시되는 입력창을 재현하면 잔류·이벤트 미처리·새 메시지 없음이 기록된다',async()=>{
- const {result,traces}=await deliver(true);assert.equal(result.status,'uncertain');assert.match(result.error,/문구가 남아/);
+ const {result,traces}=await deliver(true);assert.equal(result.status,'draft-retained');assert.match(result.error,/문구가 남아/);
  const enter=traces.find(t=>t.stage==='enter-dispatched');assert.equal(enter.data.enterPrevented,false);assert.equal(enter.data.draftEmpty,false);
  assert.equal(traces.find(t=>t.stage==='observation').data.newMessage,false);
  assert.equal(traces.filter(t=>t.stage==='enter-dispatched').length,1,'Enter 재시도 없음');
@@ -61,4 +61,18 @@ test('전송 처리 중에는 다음 타이머 대신 입력·전송 확인 중�
  runInNewContext(fn+'\nrenderSchedule();',{selectedChannel:()=>channel,elements,formatRemaining:()=>{throw Error('pending must not render a timer');}});
  assert.match(elements.scheduleLabel.textContent,/B 입력·전송 확인 중/);
  assert.match(elements.scheduleDetail.textContent,/전송 확인 후/);
+});
+
+test('현재 차례 공지는 재입력 없이 보내고 다른 차례 공지는 교체한다',async()=>{
+ for (const draft of ['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']) {
+  const {result,traces}=await deliver(false,draft);
+  assert.equal(result.status,'confirmed');
+  assert.ok(traces.some(t=>t.stage===(draft==='PRIVATE MESSAGE'?'draft-reused':'draft-replaced')));
+  assert.equal(traces.find(t=>t.stage==='after-paste').data.pastePrevented,draft!=='PRIVATE MESSAGE');
+ }
+});
+test('공지 A/B가 아닌 개인 초안은 입력과 Enter 없이 보존한다',async()=>{
+ const {result,traces}=await deliver(false,'MY PRIVATE DRAFT');
+ assert.equal(result.status,'blocked');
+ assert.equal(traces.some(t=>t.stage==='before-paste'||t.stage==='enter-dispatched'),false);
 });

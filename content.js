@@ -65,15 +65,25 @@
     const found = editors();
     if (found.length === 0) return { ok: false, code: 'EDITOR_LOADING', retryable: true, error: '아직 사용할 수 있는 채팅 입력창이 없습니다(0개).' };
     if (found.length > 1) return { ok: false, code: 'EDITOR_AMBIGUOUS', error: `채팅 입력창이 ${found.length}개입니다. 전송용 창에서 열린 스레드나 메시지 편집을 닫아 주세요.` };
-    if (hasDraft(found[0])) return { ok: false, error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
+    if (hasDraft(found[0]) && (!target.messages?.some(text => normalize(text) === normalize(found[0].innerText || found[0].textContent || '')) || found[0].querySelector('[data-slate-void="true"]'))) return { ok: false, error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
     const form = found[0].closest('form') || found[0].parentElement;
     if (form.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) {
       return { ok: false, error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
     }
     if (!document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
+    if (target.draftRetrySince) {
+      const expected = target.expectedText;
+      for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
+        const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
+        const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
+        if (created >= target.draftRetrySince - 2000 && matchesRenderedText(expected, messageText(node))) {
+          return {ok:false,code:'POSSIBLY_SENT',error:'이전 시도 이후 같은 공지가 게시된 흔적이 있어 재전송을 중지했습니다. 실제 게시 여부를 확인하세요.'};
+        }
+      }
+    }
     return { ok: true };
   }
-  const CONTENT_VERSION = '0.2.12';
+  const CONTENT_VERSION = '0.2.13';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -167,7 +177,9 @@
     timer = setTimeout(() => {
       check();
       const liveEditor = currentEditor();
-      finish({status:'uncertain',error:liveEditor && normalize(liveEditor.innerText || liveEditor.textContent || '')
+      const retained = liveEditor && normalize(liveEditor.innerText || liveEditor.textContent || '') === normalize(text);
+      const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
+      finish({status:retryDraft ? 'draft-retained' : 'uncertain',error:liveEditor && normalize(liveEditor.innerText || liveEditor.textContent || '')
         ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
         : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
     }, 25000);
@@ -208,13 +220,22 @@
       if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id }))?.allowed) {
         return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
       }
-      editor = editors()[0];
+      const live = editors()[0];
+      if (live !== editor) return {status:'blocked',error:'입력창이 교체되었습니다. 다음 시작 때 다시 확인해 주세요.'};
+      const reuseDraft = normalize(editor.innerText || editor.textContent || '') === normalize(delivery.text);
+      trace(reuseDraft ? 'draft-reused' : 'draft-replaced');
+      if (reuseDraft) {
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(false);
+        selection.removeAllRanges(); selection.addRange(range);
+      }
       const clipboardData = new DataTransfer();
       clipboardData.setData('text/plain', delivery.text);
       entered = true;
       trace('before-paste');
       const paste = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true, composed: true });
-      editor.dispatchEvent(paste);
+      if (!reuseDraft) editor.dispatchEvent(paste);
       // Paste updates the editor model and React may render it asynchronously.
       // Never send Enter in the same task as text insertion.
       await new Promise(resolve => setTimeout(resolve, 150));

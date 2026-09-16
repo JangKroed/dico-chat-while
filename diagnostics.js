@@ -9,6 +9,7 @@ export function diagnosticEvents(previous, current, now = Date.now()) {
       intervalSeconds: channel.intervalSeconds, nextRunAt: channel.nextRunAt,
       pending: Boolean(channel.pending), nextMessage: channel.nextIndex === 1 ? 'B' : 'A',
       dedicatedTab: Boolean(channel.target?.managed), dedicatedWindow: Boolean(channel.target?.windowManaged)};
+    if ((channel.draftRetries || 0) > (before?.draftRetries || 0)) events.push({...base,kind:'draft-retry-scheduled',attempt:channel.draftRetries});
     if (channel.error && channel.error !== before?.error) events.push({...base, kind:'error', reason:String(channel.error).slice(0,500)});
     if (before && before.enabled !== channel.enabled) events.push({...base, kind:channel.enabled?'started':channel.error?'automatic-stop':'stopped', reason:channel.error ? String(channel.error).slice(0,500) : '실행 상태 변경'});
     if (before && channel.lastSentAt && channel.lastSentAt !== before.lastSentAt) events.push({...base,kind:before.pending && !before.enabled ? 'manual-confirmed' : 'delivery-confirmed'});
@@ -33,7 +34,7 @@ export function appendDiagnostics(api,events) {
   return next;
 }
 
-const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception']);
+const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced']);
 const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches'];
 const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
@@ -43,6 +44,6 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   if (/^\d+\.\d+\.\d+$/.test(message.version||'')) event.contentVersion=message.version;
   for(const key of TRACE_BOOLEANS) if(typeof message.data?.[key]==='boolean') event[key]=message.data[key];
   for(const key of TRACE_NUMBERS) if(Number.isFinite(message.data?.[key])) event[key]=Math.max(-86400000,Math.min(86400000,Math.round(message.data[key])));
-  if(['confirmed','uncertain','blocked'].includes(message.data?.result)) event.result=message.data.result;
+  if(['confirmed','uncertain','blocked','draft-retained'].includes(message.data?.result)) event.result=message.data.result;
   return event;
 }
