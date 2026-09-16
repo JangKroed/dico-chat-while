@@ -78,6 +78,29 @@ export function createController(io) {
     try { return await io.inspect(target); }
     catch { return { ok: false, error: '대상 탭에 연결할 수 없습니다. Discord 페이지를 확인해 주세요.' }; }
   };
+  const confirmed = async state => {
+    state.draftRetries = 0;
+    state.draftRetrySince = null;
+    state.draftRetryPending = null;
+    log(state, 'success', `문구 ${state.pending.index === 0 ? 'A' : 'B'} 전송 확인`);
+    state.nextIndex = 1 - state.pending.index;
+    state.pending = null;
+    state.lastSentAt = io.now();
+    state.error = null;
+    state.nextRunAt = io.now() + state.intervalSeconds * 1000;
+    await persist(state);
+    try { await io.schedule(state.nextRunAt); }
+    catch { return pause(state, '다음 예약을 등록하지 못해 중지했습니다.'); }
+    return state;
+  };
+  const recheck = async state => {
+    if (!io.reconcile) return false;
+    try {
+      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId}, state.pending);
+      log(state, 'info', result?.status === 'confirmed' ? '게시 기록 재확인으로 본인의 전송을 확인했습니다.' : '게시 기록 재확인에서 전송을 확정하지 못했습니다.');
+      return result?.status === 'confirmed';
+    } catch { log(state, 'info', '게시 기록 재확인에 연결하지 못했습니다.'); return false; }
+  };
   const api = {
     getState: read,
     async updateSettings(settings) {
@@ -138,6 +161,7 @@ export function createController(io) {
     async tick() {
       const state = await read();
       if (!state.enabled) return state;
+      if (state.pending && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '이전 전송 결과가 확인되지 않아 중지했습니다. 채널을 확인해 주세요.');
       if (state.nextRunAt == null) return pause(state, '다음 예약 시간이 없어 중지했습니다. 다시 시작해 주세요.');
       if (state.nextRunAt > io.now()) {
@@ -163,6 +187,7 @@ export function createController(io) {
       let response;
       try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
+      if (response?.status === 'uncertain' && await recheck(state)) response = {status:'confirmed'};
       if (response?.status === 'deferred' && Number.isFinite(response.retryAfterMs) && response.retryAfterMs > 0) {
         if (response.draftPrepared) {
           state.draftRetrySince ||= state.pending.startedAt;
@@ -183,21 +208,7 @@ export function createController(io) {
         catch { return pause(state, '초안 재확인 예약을 등록하지 못했습니다.'); }
         return state;
       }
-      if (response?.status === 'confirmed') {
-        state.draftRetries = 0;
-        state.draftRetrySince = null;
-        state.draftRetryPending = null;
-        log(state, 'success', `문구 ${state.pending.index === 0 ? 'A' : 'B'} 전송 확인`);
-        state.nextIndex = 1 - state.pending.index;
-        state.pending = null;
-        state.lastSentAt = io.now();
-        state.error = null;
-        state.nextRunAt = io.now() + state.intervalSeconds * 1000;
-        await persist(state);
-        try { await io.schedule(state.nextRunAt); }
-        catch { return pause(state, '다음 예약을 등록하지 못해 중지했습니다.'); }
-        return state;
-      }
+      if (response?.status === 'confirmed') return confirmed(state);
       if (response?.status === 'blocked') state.pending = null;
       return pause(state, response?.error || '전송 결과가 불확실합니다. 채널에서 확인해 주세요.');
     },
@@ -219,6 +230,7 @@ export function createController(io) {
     },
     async recover({ preserveDue = false } = {}) {
       const state = await read();
+      if (state.pending && state.enabled && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
       if (!state.enabled) { await io.cancel(); return state; }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });

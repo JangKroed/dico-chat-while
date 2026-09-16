@@ -61,6 +61,7 @@ export function createChannelManager(io) {
     cancel: () => io.cancel(id),
     inspect: target => io.inspect(target),
     send: (target, delivery) => io.send(target, { ...delivery, channelId: id }),
+    reconcile: io.reconcile ? (target, delivery) => io.reconcile(target, {...delivery,channelId:id}) : undefined,
     now: () => io.now(),
     id: () => io.id(),
   });

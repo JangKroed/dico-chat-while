@@ -98,7 +98,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.15';
+  const CONTENT_VERSION = '0.2.16';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -200,6 +200,27 @@
     }, 25000);
     return {promise,cancel:()=>finish({status:'uncertain',error:'입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.'})};
   }
+  function reconcile(target, delivery) {
+    const unknown = reason => ({status:'uncertain', reason});
+    if (!target || !matchesTarget(target)) return unknown('wrong-channel');
+    if (!delivery?.id || typeof delivery.text !== 'string' || !Number.isFinite(delivery.startedAt)) return unknown('invalid-delivery');
+    const found = editors();
+    if (found.length !== 1 || hasDraft(found[0])) return unknown('draft-or-editor');
+    const user = ownUserId(target);
+    if (!user) return unknown('author-unknown');
+    const candidates = new Set();
+    for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
+      if (!matchesRenderedText(delivery.text, messageText(node))) continue;
+      const row = node.closest('li') || node;
+      if (row.querySelector('[class*="isSending"], [class*="isFailed"]') || row.matches('[class*="isSending"], [class*="isFailed"]')) continue;
+      const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
+      const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
+      // No backwards tolerance: an older identical announcement is not proof.
+      if (!id || created < delivery.startedAt || created > Date.now() + 2000 || authorId(row) !== user) continue;
+      candidates.add(id);
+    }
+    return candidates.size === 1 ? {status:'confirmed'} : unknown(candidates.size ? 'multiple-matches' : 'no-proof');
+  }
   async function deliver(target, delivery) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
@@ -291,6 +312,11 @@
   }
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== chrome.runtime.id) return false;
+    if (message?.type === 'DICO_RECONCILE') {
+      const result = reconcile(message.target, message.delivery);
+      reportTrace(message.delivery, 'reconcile', {result:result.status});
+      respond(result); return false;
+    }
     if (message?.type === 'DICO_INSPECT') { respond(inspect(message.target)); return false; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;

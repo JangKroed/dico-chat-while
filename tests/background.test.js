@@ -26,6 +26,8 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
   let openingTab = false;
   let loadingReads = 0;
   let holdDelivery = false;
+  let uncertainDelivery = false;
+  let reconciliationReads = 0;
   let holdStart = true;
   let releaseStart;
   let secondStarted;
@@ -49,12 +51,13 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     scripting: { executeScript: async () => {} },
     tabs: { reload: async id => { reloaded.push(id); tabs.get(id).discarded=false; tabs.get(id).frozen=false; }, create: async spec => { const tab={id:++nextTabId,title:'전송용 탭',url:spec.url,status:'complete'};tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return tab; }, get: async id => { const tab=tabs.get(id); if (tab?.pendingUrl && ++loadingReads>1) { tab.url=tab.pendingUrl; delete tab.pendingUrl; tab.status='complete'; } return tab; }, query: async () => [...tabs.values()], onRemoved: event(), onUpdated: event(), sendMessage: async (tabId, message) => {
       if (message.type === 'DICO_INSPECT') { assert.equal(tabs.get(tabId).status,'complete'); assert.equal(tabs.get(tabId).pendingUrl,undefined); return { ok: true }; }
+      if (message.type === 'DICO_RECONCILE') { reconciliationReads++; assert.ok(message.delivery.channelId); return {status:'confirmed'}; }
       if (message.type === 'DICO_DELIVER') {
         deliveries.push({tabId, id:message.delivery.id});
         if (holdStart && tabId === 101) await startGate;
         if (holdStart && tabId === 102) secondStarted();
         if (holdDelivery && tabId === 101) { startedDelivery({...message,tabId}); await waitDelivery; }
-        return { status: 'confirmed' };
+        return { status: uncertainDelivery ? 'uncertain' : 'confirmed' };
       }
     } },
   };
@@ -157,6 +160,16 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     reply=await request({type:'DICO_GET'});
     assert.equal(reply.state.channels[0].enabled,false,'real navigation still stops the sender');
     assert.match(reply.state.channels[0].error,/이동/);
+    await request({type:'DICO_STOP_ALL'});
+    tabs.get(recreatedId).url='https://discord.com/channels/123/456';
+    uncertainDelivery=true;
+    const beforeRecovery=deliveries.length;
+    reply=await request({type:'DICO_START',channelId:ids[0]});
+    assert.equal(reply.ok,true);
+    assert.equal(reconciliationReads,1,'background에서 게시 재확인 요청을 연결한다');
+    assert.equal(deliveries.length,beforeRecovery+1,'재확인 중 추가 전송하지 않는다');
+    assert.equal(reply.state.channels[0].pending,null);
+    assert.equal(reply.state.channels[0].enabled,true);
     await request({type:'DICO_STOP_ALL'});
   } finally {
     releaseStart();

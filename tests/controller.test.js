@@ -286,3 +286,29 @@ test('슬로우 모드 대기 중 중지하면 알람을 해제하고 재개 시
  await r.controller.tick();assert.equal(r.sent.length,0);assert.equal(r.alarm,null);
  r.io.inspect=async()=>({ok:true});await r.controller.start();assert.deepEqual(r.sent,['공지 A']);
 });
+
+test('응답 유실 후 게시 기록에서 확인되면 재발송 없이 다음 문구로 이어간다',async()=>{
+ const r=await configured();let sends=0,checks=0;
+ r.io.send=async()=>{sends++;throw new Error('port closed')};
+ r.io.reconcile=async(_,delivery)=>{checks++;assert.equal(delivery.text,'공지 A');return {status:'confirmed'}};
+ await r.controller.start();
+ assert.equal(sends,1);assert.equal(checks,1);assert.equal(r.state.nextIndex,1);
+ assert.equal(r.state.enabled,true);assert.equal(r.state.pending,null);assert.equal(r.alarm,1030000);
+});
+test('게시 재확인 실패·통신 오류는 원래 pending을 유지하고 추가 발송 없이 중지한다',async()=>{
+ for(const throws of [false,true]){
+ const r=await configured();let sends=0;
+ r.io.send=async()=>{sends++;return {status:'uncertain'}};
+ r.io.reconcile=async()=>{if(throws)throw new Error('offline');return {status:'uncertain'}};
+ await r.controller.start();assert.equal(sends,1);assert.equal(r.state.nextIndex,0);
+ assert.equal(r.state.enabled,false);assert.ok(r.state.pending);assert.equal(r.alarm,null);
+ }
+});
+test('worker 중단 뒤 실행 중 pending만 재확인하며 사용자가 중지한 상태는 재개하지 않는다',async()=>{
+ const r=await configured();r.io.send=async()=>({status:'uncertain'});await r.controller.start();
+ let state=r.state;state.enabled=true;await r.io.save(state);let checks=0;
+ r.io.reconcile=async()=>{checks++;return {status:'confirmed'}};
+ await r.controller.recover();assert.equal(checks,1);assert.equal(r.state.nextIndex,1);assert.equal(r.state.pending,null);
+ state={...state,enabled:false};await r.io.save(state);
+ await r.controller.recover();assert.equal(checks,1);assert.equal(r.state.enabled,false);assert.ok(r.state.pending);
+});

@@ -80,6 +80,17 @@ const manager = createChannelManager({
   send: (target, delivery) => isStopped(delivery.channelId)
     ? Promise.resolve({ status: 'blocked', error: '중지 요청으로 전송을 취소했습니다.' })
     : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 30000),
+  reconcile: async (target, delivery) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (isStopped(delivery.channelId)) break;
+      try {
+        const result = await withTimeout(chrome.tabs.sendMessage(target.tabId, {type:'DICO_RECONCILE',target,delivery}),2000);
+        if (result?.status === 'confirmed') return result;
+      } catch { /* Read-only retries do not authorize a second delivery. */ }
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve,2000));
+    }
+    return {status:'uncertain'};
+  },
   now: () => Date.now(),
   id: () => crypto.randomUUID(),
 });
