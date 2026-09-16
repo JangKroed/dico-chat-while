@@ -942,3 +942,5 @@ input[aria-invalid="true"] {
 }
 
 #error-notifications-enabled { width: auto; min-height: auto; accent-color: #7565e8; margin-right: 6px; }
+
+#mail-enabled { width: auto; min-height: auto; accent-color: #7565e8; }

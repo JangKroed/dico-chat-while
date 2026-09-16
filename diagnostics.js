@@ -1,3 +1,4 @@
+import { queueEmailReport } from './email-report.js';
 // Explicit allowlist: never serialize channel state, message bodies or credentials.
 export function diagnosticEvents(previous, current, now = Date.now()) {
   return (current?.channels || []).flatMap((channel, index) => {
@@ -17,6 +18,15 @@ export function diagnosticEvents(previous, current, now = Date.now()) {
 export async function recordDiagnostics(api, previous, current) {
   const events = diagnosticEvents(previous,current);
   if (!events.length) return;
+  return appendDiagnostics(api,events);
+}
+let writes = Promise.resolve();
+export function appendDiagnostics(api,events) {
+  const next=writes.then(async()=>{
   const {diagnosticLog=[]} = await api.storage.local.get('diagnosticLog');
   await api.storage.local.set({diagnosticLog:[...diagnosticLog,...events].slice(-500)});
+  await queueEmailReport(api,events);
+  });
+  writes=next.catch(()=>{});
+  return next;
 }

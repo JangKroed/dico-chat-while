@@ -1,0 +1,43 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>DICO 메일 연결 안내</title><link rel="stylesheet" href="../styles.css"><body class="options-page"><main class="options-shell"><h1>Gmail 계정으로 오류 로그 받기</h1>
+<p>별도 서버를 구매하지 않고 Google Apps Script를 배포해 사용합니다. Gmail 비밀번호를 확장 프로그램에 넣지 않습니다. 아래 작업은 메일을 발송할 Google 계정에서 한 번 진행하세요.</p>
+<ol>
+<li><a href="https://script.google.com/home" target="_blank" rel="noreferrer">Google Apps Script</a>에서 새 프로젝트를 만듭니다.</li>
+<li>기본 Code.gs 내용을 지우고 아래 코드를 붙여넣어 저장합니다.</li>
+<li>비밀번호 관리자의 생성 기능으로 영문·숫자로 된 무작위 연결 키 40자를 만듭니다. 프로젝트 설정 → 스크립트 속성에서 이름 REPORT_KEY, 값은 생성한 키로 저장합니다.</li>
+<li>배포 → 새 배포 → 웹 앱을 선택합니다. 실행 사용자: 나, 액세스 권한: 모든 사용자로 설정하고 배포합니다. MailApp의 메일 발송 권한을 확인하고 승인합니다. 조직 정책상 모든 사용자 배포가 불가능하면 이 방식은 사용할 수 없습니다.</li>
+<li>배포된 웹 앱 URL(/exec로 끝나는 주소)을 복사합니다. /dev 주소는 사용할 수 없습니다.</li>
+<li>DICO 설정 페이지의 이메일 영역에 URL과 연결 키를 입력하고 자동 발송을 켠 뒤 저장합니다. Google Script 서버 연결 권한을 허용합니다.</li>
+<li>테스트 메일 발송을 누르고 didlsdydgh@gmail.com의 받은편지함·스팸함을 확인합니다. 실제 수신을 확인한 후 다른 사용자에게도 같은 URL·연결 키를 안전하게 전달해 각 기기에 등록합니다.</li>
+</ol>
+<p>각 사용자는 자동 전송 동의 스위치를 직접 켭니다. 연결 키는 해당 수신 주소로 메일을 보낼 수 있는 권한이므로 공개 저장소나 공개 배포 ZIP에 넣지 마세요. 유출되면 REPORT_KEY와 각 확장 프로그램의 키를 변경하세요.</p>
+<p>오류 후 약 1분 뒤 최근 100개 기록을 묶어 보냅니다. 연속 오류는 최근 기록으로 합칩니다. 브라우저 상태에 따라 지연될 수 있습니다. 발송은 보고서당 1회 시도하며 실패·응답 유실 시 자동 재시도하지 않습니다. 로컬 500개 로그는 계속 다운로드할 수 있습니다. 서버는 UTC 날짜 기준 전체 사용자 합계 하루 20회로 제한하며 Google 자체 한도도 적용됩니다.</p>
+<p>이 코드는 받은편지함을 읽지 않으며 수신자는 고정되어 있습니다. Google에서 메일 처리가 완료되어도 스팸 분류 등으로 수신이 지연될 수 있습니다. URL과 키를 넣기 전에는 외부로 로그를 보내지 않습니다.</p>
+<p><a href="https://developers.google.com/apps-script/guides/web">공식 웹 앱 배포 안내</a> · <a href="https://developers.google.com/apps-script/reference/mail/mail-app">MailApp</a> · <a href="https://developers.google.com/apps-script/guides/services/quotas">Google 사용 한도</a></p>
+<h2>Code.gs에 붙여넣을 코드</h2><pre>// Set REPORT_KEY in Project Settings &gt; Script Properties before deploying.
+// Recipient is fixed: clients cannot choose who receives email.
+function doPost(e) {
+  const json = value =&gt; ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return json({ok:false});
+  try {
+    if (!e.postData || e.postData.contents.length &gt; 100000) return json({ok:false});
+    const data = JSON.parse(e.postData.contents);
+    const properties = PropertiesService.getScriptProperties();
+    const key = properties.getProperty(&#x27;REPORT_KEY&#x27;);
+    if (!key || key.length &lt; 32 || data.key !== key) return json({ok:false});
+    const report = data.report;
+    if (!report || !/^[a-f0-9-]{36}$/.test(report.id) || !Array.isArray(report.events) || report.events.length &gt; 100) return json({ok:false});
+    const day = new Date().toISOString().slice(0,10);
+    let budget = JSON.parse(properties.getProperty(&#x27;REPORT_BUDGET&#x27;) || &#x27;{}&#x27;);
+    if (budget.day !== day) budget = {day:day,count:0,ids:[]};
+    if (budget.ids.indexOf(report.id) !== -1) return json({ok:false});
+    if (budget.count &gt;= 20 || MailApp.getRemainingDailyQuota() &lt; 1) return json({ok:false});
+    // Reserve before send to avoid duplicate delivery after an ambiguous failure.
+    budget.count++; budget.ids.push(report.id);
+    properties.setProperty(&#x27;REPORT_BUDGET&#x27;,JSON.stringify(budget));
+    MailApp.sendEmail(&#x27;didlsdydgh@gmail.com&#x27;,&#x27;[DICO] 오류 진단 로그&#x27;,JSON.stringify(report,null,2));
+    return json({ok:true});
+  } catch (_) { return json({ok:false}); }
+  finally { lock.releaseLock(); }
+}
+</pre></main></body></html>

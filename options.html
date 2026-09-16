@@ -57,6 +57,18 @@
         </aside>
 
         <div class="options-content">
+          <section class="card">
+            <h2>오류 로그 이메일 자동 발송</h2>
+            <p class="field-help">수신: didlsdydgh@gmail.com · Google Apps Script 배포가 필요합니다. 연결 키는 Gmail 비밀번호가 아닙니다.</p>
+            <p><a href="mail-relay/SETUP.html" target="_blank">메일 연결 튜토리얼 열기</a></p>
+            <label><input id="mail-enabled" type="checkbox"> 새 오류 로그 자동 발송에 동의하고 켜기</label>
+            <label class="field-label" for="mail-url">Apps Script 웹 앱 URL</label><input id="mail-url" type="url" autocomplete="off">
+            <label class="field-label" for="mail-key">연결 키</label><input id="mail-key" type="password" autocomplete="off">
+            <button id="mail-save" class="button button-secondary" type="button">메일 설정 저장</button>
+            <button id="mail-test" class="button button-secondary" type="button">테스트 메일 발송</button>
+            <p id="mail-status" class="field-help" role="status"></p>
+          </section>
+
           <section class="card target-card" aria-labelledby="target-title">
             <div class="section-heading compact-heading">
               <div><p class="section-kicker">전송 위치</p><h2 id="target-title">Discord 탭 연결</h2></div>
@@ -140,6 +152,7 @@
       </div>
     </main>
     <script type="module" src="ui.js"></script>
+    <script type="module" src="email-settings.js"></script>
     <script type="module" src="notification-settings.js"></script>
     <script type="module" src="diagnostic-settings.js"></script>
   </body>

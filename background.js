@@ -1,4 +1,5 @@
-import { recordDiagnostics } from './diagnostics.js';
+import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
+import { recordDiagnostics, appendDiagnostics } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
 import { waitForReady } from './readiness.js';
 import { createChannelManager } from './channel-manager.js';
@@ -8,9 +9,13 @@ const ALARM_PREFIX = 'dico-channel:';
 let queue = Promise.resolve();
 const stopRequested = new Set();
 let stopAllRequested = false;
-const enqueue = action => {
+const enqueue = (action, operation = 'background-event') => {
   const next = queue.then(action);
-  queue = next.catch(error => console.error('Dico While:', error.message));
+  queue = next.catch(async error => {
+    const reason=String(error?.message || error).replace(/https?:\/\/\S+/g,'[URL]').slice(0,500);
+    try { await appendDiagnostics(chrome,[{at:new Date().toISOString(),kind:'runtime-error',operation,reason}]); } catch {}
+    console.warn('Dico While:', operation, reason);
+  });
   return next;
 };
 const withTimeout = (promise, milliseconds) => {
@@ -186,16 +191,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       default: throw new Error('지원하지 않는 요청입니다. 확장 프로그램과 설정 페이지를 새로고침해 주세요.');
     }
   };
-  enqueue(action).then(state => respond({ ok: true, state })).catch(async error => {
+  enqueue(action, String(message?.type || 'unknown')).then(state => respond({ ok: true, state })).catch(async error => {
     respond({ ok: false, error: error.message, state: await manager.getState() });
   });
   return true;
 });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name.startsWith(ALARM_PREFIX)) void enqueue(() => manager.tick(alarm.name.slice(ALARM_PREFIX.length)));
+  if (alarm.name === EMAIL_ALARM) { void flushEmailReport(chrome).catch(()=>{}); return; }
+  if (alarm.name.startsWith(ALARM_PREFIX)) void enqueue(() => manager.tick(alarm.name.slice(ALARM_PREFIX.length)), 'alarm-delivery');
 });
-chrome.runtime.onInstalled.addListener(() => void enqueue(() => recoverChannels()));
-chrome.runtime.onStartup.addListener(() => void enqueue(() => recoverChannels()));
+chrome.runtime.onInstalled.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
+chrome.runtime.onStartup.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
 chrome.tabs.onRemoved.addListener(tabId => void enqueue(() => manager.targetLost(tabId, '대상 탭이 닫혀 이 채널의 자동 전송을 중지했습니다.')));
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (!change.url && !change.discarded && !change.frozen) return;
