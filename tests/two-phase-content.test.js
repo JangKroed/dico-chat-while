@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
+import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0}={}) {
+function rig({lag=0,fault=null}={}) {
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  const nodes=[],events=[],traces=[];
  const form={querySelector:()=>null,querySelectorAll:()=>cooldown?[{textContent:cooldown,getClientRects:()=>[1]}]:[]};
@@ -17,8 +18,14 @@ function rig({lag=0}={}) {
   }
  }};
  const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:()=>({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
- const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=pasteText;pasteDue=null;selection.isCollapsed=true;}};
- const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:['A','B']};
+ const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=pasteText;pasteDue=null;selection.isCollapsed=true;
+ if(fault==='text_mismatch')editor.innerText='WRONG';
+ if(fault==='focus_lost')document.activeElement=null;
+ if(fault==='selection_not_collapsed')selection.isCollapsed=false;
+ if(fault==='selection_outside')selection.anchorNode=null;
+ if(fault==='composing')composition();
+ if(fault==='editor_detached')editor.isConnected=false;}};
+ const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:['A','B'],expectedText:'A'};
  const delivery={id:'attempt',index:0,text:'A',startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},Date:DateMock,
@@ -51,4 +58,25 @@ test('전송 시각에 제한이 남으면 준비된 문구를 보존하고 Ente
  const r=rig();await r.request('DICO_PREPARE');r.tick(3000);r.cooldown('00:08');
  assert.equal((await r.request('DICO_DELIVER')).status,'deferred');assert.equal(r.editor.innerText,'A');
  assert.equal(r.events.some(e=>e.type==='keydown'),false);
+});
+
+ test('입력 준비 실패의 조건을 각각 재현하고 실패 로그까지 수신한다',async()=>{
+  for(const fault of ['text_mismatch','focus_lost','selection_not_collapsed','selection_outside','composing','editor_detached']){
+   const r=rig({fault});const result=await r.request('DICO_PREPARE');
+   assert.equal(result.status,'blocked');assert.equal(r.events.some(e=>e.type==='keydown'),false);
+   const failure=r.traces.find(t=>t.stage==='stability-failed');assert.ok(failure,fault);
+   assert.ok(failure.data.failedChecks.includes(fault),fault);assert.ok(failure.data.failureCounts[fault]>0);
+   const event=deliveryTraceEvent(failure,{channels:[{id:'channel-a',target:{tabId:7},prepared:{id:r.delivery.id}}]},7);
+   let saved;const api={storage:{local:{get:async()=>({}),set:async value=>{saved=value;}}}};
+   await appendDiagnostics(api,[event]);assert.ok(saved.diagnosticTimeline[0].failedChecks.includes(fault));assert.ok(saved.diagnosticTimeline[0].failureCounts[fault]>0);
+   assert.ok(r.traces.some(t=>t.stage==='paste-dispatched'));assert.equal(JSON.stringify(failure).includes('WRONG'),false);
+  }
+ });
+
+test('재시작 검사에서 개인 초안을 차단한 이유를 본문 없이 반환한다',async()=>{
+ const r=rig();r.editor.innerText='A extra';
+ const result=await r.request('DICO_INSPECT');assert.equal(result.code,'DRAFT_MISMATCH');
+ assert.equal(result.diagnostics.draftLength,7);assert.equal(result.diagnostics.expectedLength,1);
+ assert.equal(result.diagnostics.draftMatchesA,false);assert.equal(result.diagnostics.draftMatchesB,false);
+ assert.equal(JSON.stringify(result).includes('A extra'),false);
 });

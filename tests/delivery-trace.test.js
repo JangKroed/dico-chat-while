@@ -31,7 +31,7 @@ async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAft
 }
 test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부를 문구 없이 기록한다',async()=>{
  const {result,traces}=await deliver();assert.equal(result.status,'confirmed');
- assert.deepEqual(traces.map(t=>t.stage),['received','draft-replaced','before-paste','after-paste','before-enter','observation','enter-dispatched','finished']);
+ assert.deepEqual(traces.map(t=>t.stage),['received','draft-replaced','before-paste','paste-dispatched','after-paste','before-enter','observation','enter-dispatched','finished']);
  assert.equal(traces.find(t=>t.stage==='after-paste').data.textMatches,true);
  assert.equal(traces.find(t=>t.stage==='enter-dispatched').data.enterPrevented,true);
  assert.equal(JSON.stringify(traces).includes('PRIVATE MESSAGE'),false);

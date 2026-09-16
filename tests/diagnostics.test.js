@@ -53,3 +53,9 @@ test('상세 로그가 밀려도 Enter와 설정 변경 타임라인은 보존�
  assert.equal(saved.diagnosticLog.length,500);assert.equal(saved.diagnosticTimeline.length,2);
  assert.equal(saved.diagnosticTimeline[0].kind,'settings-changed');assert.equal(saved.diagnosticTimeline[1].stage,'enter-dispatched');
 });
+
+test('남은 초안의 A/B 일치 여부와 길이만 기록하며 원문은 버린다',async()=>{
+ const {inspectionDiagnostic}=await import('../diagnostics.js');
+ const e=inspectionDiagnostic({code:'DRAFT_MISMATCH',diagnostics:{draftLength:109,expectedLength:108,draftMatchesA:false,draftMatchesB:false,whitespaceOnlyDifference:true,draftHasVoid:false,body:'SECRET',token:'SECRET'}},{id:'a',target:{tabId:7}},0,2);
+ assert.equal(e.kind,'inspection-failed');assert.equal(e.code,'DRAFT_MISMATCH');assert.equal(e.expectedLength,108);assert.equal(e.draftMatchesA,false);assert.equal(e.whitespaceOnlyDifference,true);assert.equal(JSON.stringify(e).includes('SECRET'),false);
+});

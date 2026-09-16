@@ -59,16 +59,16 @@ let writes = Promise.resolve();
 export function appendDiagnostics(api,events) {
   const next=writes.then(async()=>{
   const {diagnosticLog=[],diagnosticTimeline=[]} = await api.storage.local.get(['diagnosticLog','diagnosticTimeline']);
-  await api.storage.local.set({diagnosticLog:[...diagnosticLog,...events].slice(-500),diagnosticTimeline:[...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished'].includes(e.stage))].slice(-2000)});
+  await api.storage.local.set({diagnosticLog:[...diagnosticLog,...events].slice(-500),diagnosticTimeline:[...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed'].includes(e.stage))].slice(-2000)});
   await queueEmailReport(api,events);
   });
   writes=next.catch(()=>{});
   return next;
 }
 
-const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prepared','prepared-verified']);
-const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected'];
-const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds','eventAt','scheduledAt','startedAt'];
+const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prepared','prepared-verified','paste-dispatched','stability-failed']);
+const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected','draftMatchesA','draftMatchesB','draftHasVoid','whitespaceOnlyDifference'];
+const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds','eventAt','scheduledAt','startedAt','maxStableMs','stableRequiredMs','stableWaitMs','expectedLength','messageALength','messageBLength','draftLineCount','expectedLineCount'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   const index=state.channels.findIndex(c=>c.target?.tabId===tabId && (c.pending?.id===message.id || c.prepared?.id===message.id || c.lastDeliveryId===message.id));
   if(index<0 || !TRACE_STAGES.has(message.stage)) return null;
@@ -80,7 +80,20 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   for(const key of TRACE_NUMBERS) if(Number.isFinite(message.data?.[key])) event[key]=['eventAt','scheduledAt','startedAt'].includes(key)?Math.round(message.data[key]):Math.max(-86400000,Math.min(86400000,Math.round(message.data[key])));
   const path=String(message.data?.observedPath || '').match(/^\/channels\/(\d{1,20})\/(\d{1,20})(?:\/\d{1,20})?\/?$/);
   if(path){event.observedGuildId=path[1];event.observedChannelId=path[2];}
+  const checks=['channel_changed','editor_detached','editor_count','editor_replaced','text_mismatch','composing','focus_lost','selection_missing','selection_not_collapsed','selection_outside'];
+  if(Array.isArray(message.data?.failedChecks))event.failedChecks=checks.filter(key=>message.data.failedChecks.includes(key));
+  if(message.data?.failureCounts)event.failureCounts=Object.fromEntries(checks.filter(key=>Number.isInteger(message.data.failureCounts[key])).map(key=>[key,Math.max(0,Math.min(10000,message.data.failureCounts[key]))]));
   if(['confirmed','uncertain','blocked','draft-retained','deferred','prepared','unverified'].includes(message.data?.result)) event.result=message.data.result;
   if (['empty','replace-next','reuse-next'].includes(message.data?.draftAction)) event.draftAction=message.data.draftAction;
+  return event;
+}
+
+export function inspectionDiagnostic(result,channel,index,revision,now=Date.now()) {
+  const event={...channelDiagnostic(channel,index,revision),at:new Date(now).toISOString(),kind:'inspection-failed'};
+  const data=result.diagnostics || {};
+  if(/^[A-Z_]{1,40}$/.test(result.code || ''))event.code=result.code;
+  if(/^\d+\.\d+\.\d+$/.test(data.contentVersion || ''))event.contentVersion=data.contentVersion;
+  for(const key of TRACE_BOOLEANS)if(typeof data[key]==='boolean')event[key]=data[key];
+  for(const key of TRACE_NUMBERS)if(Number.isFinite(data[key]))event[key]=Math.max(-86400000,Math.min(86400000,Math.round(data[key])));
   return event;
 }

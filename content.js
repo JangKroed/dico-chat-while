@@ -126,7 +126,7 @@
     const found = editors();
     if (found.length === 0) return { ok: false, code: 'EDITOR_LOADING', retryable: true, error: '아직 사용할 수 있는 채팅 입력창이 없습니다(0개).' };
     if (found.length > 1) return { ok: false, code: 'EDITOR_AMBIGUOUS', error: `채팅 입력창이 ${found.length}개입니다. 전송용 창에서 열린 스레드나 메시지 편집을 닫아 주세요.` };
-    if (hasDraft(found[0]) && (!target.messages?.some(text => normalize(text) === normalize(found[0].innerText || found[0].textContent || '')) || found[0].querySelector('[data-slate-void="true"]'))) return { ok: false, error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
+    if (hasDraft(found[0]) && (!target.messages?.some(text => normalize(text) === normalize(found[0].innerText || found[0].textContent || '')) || found[0].querySelector('[data-slate-void="true"]'))) return { ok: false, code:'DRAFT_MISMATCH', error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
     const form = found[0].closest('form') || found[0].parentElement;
     if (form.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) {
       return { ok: false, error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
@@ -144,10 +144,19 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.21';
+  const CONTENT_VERSION = '0.2.22';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
+  function draftEvidence(target,editor) {
+    const draft=normalize(editor?.innerText || editor?.textContent || '');
+    const expected=normalize(target.expectedText || ''),messages=target.messages || [];
+    return {expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
+      draftMatchesA:typeof messages[0]==='string' && draft===normalize(messages[0]),draftMatchesB:typeof messages[1]==='string' && draft===normalize(messages[1]),
+      draftHasVoid:Boolean(editor?.querySelector('[data-slate-void="true"]')),
+      whitespaceOnlyDifference:draft!==expected && draft.replace(/\s/g,'')===expected.replace(/\s/g,''),
+      draftLineCount:draft.split('\n').length,expectedLineCount:expected.split('\n').length};
+  }
   function traceSnapshot(target, text, originalEditor) {
     const found = editors(), editor = found[0], selection = window.getSelection();
     const draft = normalize(editor?.innerText || editor?.textContent || '');
@@ -159,7 +168,7 @@
       selectionInside: Boolean(editor && selection?.anchorNode && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)),
       selectionCollapsed: Boolean(selection?.isCollapsed), draftLength: draft.length,
       draftEmpty: !draft, textMatches: draft === normalize(text), composing,
-      targetMatches: matchesTarget(target), ...slowmode(editor),
+      targetMatches: matchesTarget(target), ...slowmode(editor), ...draftEvidence({...target,expectedText:text},editor),
     };
   }
   function reportTrace(delivery, stage, data = {}) {
@@ -167,7 +176,7 @@
       // Never wait for telemetry before typing; record only allowlisted metadata.
       const request = chrome.runtime.sendMessage({type:'DICO_TRACE',id:delivery.id,stage,version:CONTENT_VERSION,
         data:{...data,messageIndex:delivery.index,deliveryPhase:delivery.phase || 'send',eventAt:Date.now(),scheduledAt:delivery.scheduledAt,startedAt:delivery.startedAt,observedPath:location.pathname,elapsedMs:Date.now()-delivery.startedAt,latenessMs:Date.now()-delivery.scheduledAt}});
-      request?.catch?.(() => {});
+      return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
   function watchMessage(editor, text, userId, startedAt, report = () => {}) {
@@ -285,18 +294,33 @@
     }
     return {status:'confirmed',draftAction};
   }
-  async function stableEditor(target, text, editor, duration) {
-    const began=Date.now(); let stableSince=null;
+  async function stableEditor(target, text, editor, duration, report) {
+    const began=Date.now(); let stableSince=null,maxStableMs=0;
+    const failureCounts={};let lastFailedChecks=[];
+    const fail=async()=>{
+      let timer;
+      try { await Promise.race([report('stability-failed',{failedChecks:lastFailedChecks,failureCounts,maxStableMs,stableRequiredMs:duration,stableWaitMs:Date.now()-began}),new Promise(resolve=>{timer=setTimeout(resolve,1500);})]); } finally { clearTimeout(timer); }
+      return false;
+    };
     while (Date.now()-began<5000) {
-      if (!matchesTarget(target) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor) return false;
-      const matches=normalize(editor.innerText || editor.textContent || '')===normalize(text);
-      const selection=window.getSelection();
-      const ready=matches && !composing && document.activeElement===editor && selection?.isCollapsed && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode);
-      if(ready) { stableSince ??=Date.now(); if(Date.now()-stableSince>=duration) return true; }
-      else stableSince=null;
+      const found=editors(),selection=window.getSelection();
+      const checks={channel_changed:!matchesTarget(target),editor_detached:!editor.isConnected,
+        editor_count:found.length!==1,editor_replaced:found[0]!==editor,
+        text_mismatch:normalize(editor.innerText || editor.textContent || '')!==normalize(text),
+        composing,focus_lost:document.activeElement!==editor,
+        selection_missing:!selection || !selection.rangeCount,
+        selection_not_collapsed:!selection?.isCollapsed,
+        selection_outside:!selection || !editor.contains(selection.anchorNode) || !editor.contains(selection.focusNode)};
+      lastFailedChecks=Object.keys(checks).filter(key=>checks[key]);
+      for(const key of lastFailedChecks)failureCounts[key]=(failureCounts[key] || 0)+1;
+      if(checks.channel_changed || checks.editor_detached || checks.editor_count || checks.editor_replaced)return fail();
+      if(!lastFailedChecks.length) {
+        stableSince ??=Date.now();maxStableMs=Math.max(maxStableMs,Date.now()-stableSince);
+        if(maxStableMs>=duration)return true;
+      } else stableSince=null;
       await new Promise(resolve=>setTimeout(resolve,100));
     }
-    return false;
+    return fail();
   }
   async function deliver(target, delivery) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
@@ -305,7 +329,7 @@
     let entered = false;
     let watcher, originalEditor;
     const trace = (stage, extra = {}) => {
-      try { reportTrace(delivery, stage, {...traceSnapshot(target, delivery.text, originalEditor), ...extra}); } catch {}
+      try { return reportTrace(delivery, stage, {...traceSnapshot(target, delivery.text, originalEditor), ...extra}); } catch {}
     };
     trace('received');
     try {
@@ -334,7 +358,7 @@
         editor.focus();
         const selection=window.getSelection(), range=document.createRange();
         range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
-        if(!await stableEditor(target,delivery.text,editor,500)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
+        if(!await stableEditor(target,delivery.text,editor,500,trace)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
         if (!(await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'}))?.allowed) return {status:'blocked',error:'전송 준비 후 중지 요청을 확인했습니다.'};
         trace('prepared-verified');
       } else {
@@ -368,10 +392,11 @@
         trace('before-paste');
         const paste = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true, composed: true });
         if (!reuseDraft) editor.dispatchEvent(paste);
+        trace('paste-dispatched',{pastePrevented:paste.defaultPrevented});
         // Paste updates the editor model and React may render it asynchronously.
         // Never send Enter in the same task as text insertion.
         if (delivery.phase==='prepare') {
-          if (!await stableEditor(target,delivery.text,editor,1000)) return {status:'blocked',error:'문구가 1초 동안 안정적으로 준비되지 않았습니다. 초안을 보존하고 중지합니다.'};
+          if (!await stableEditor(target,delivery.text,editor,1000,trace)) return {status:'blocked',error:'문구가 1초 동안 안정적으로 준비되지 않았습니다. 초안을 보존하고 중지합니다.'};
         } else await new Promise(resolve => setTimeout(resolve,150));
         trace('after-paste', {pastePrevented:paste.defaultPrevented});
         const currentEditors = editors();
@@ -424,7 +449,7 @@
       respond(result); return false;
     }
     if (message?.type === 'DICO_CHANNEL_LIMIT') { detectSlowmodeSetting(message.target).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
-    if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>respond(inspect(message.target))); return true; }
+    if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>{const result=inspect(message.target);respond({...result,diagnostics:{...traceSnapshot(message.target,message.target.expectedText || ''),contentVersion:CONTENT_VERSION}});}); return true; }
     if (message?.type === 'DICO_PREPARE') { deliver(message.target,{...message.delivery,phase:'prepare'}).then(respond); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;

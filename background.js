@@ -1,7 +1,7 @@
 import { recoverLoading } from './loading-recovery.js';
 import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
-import { recordDiagnostics, appendDiagnostics, deliveryTraceEvent, channelDiagnostic, uiDiagnostic } from './diagnostics.js';
+import { recordDiagnostics, appendDiagnostics, deliveryTraceEvent, channelDiagnostic, uiDiagnostic, inspectionDiagnostic } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
 import { waitForReady, tabReadiness } from './readiness.js';
 import { createChannelQueue } from './channel-queue.js';
@@ -49,7 +49,13 @@ async function inspect(target) {
     catch { return {ok:false,code:'TAB_MISSING',error:'전송용 탭이 닫혔습니다.'}; }
     const readiness = tabReadiness(tab, target);
     if (!readiness.ok) return readiness;
-    try { return await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),5000); }
+    try {
+      const result=await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),5000);
+      if(!result?.ok && channel) {
+        try { await withTimeout(appendDiagnostics(chrome,[inspectionDiagnostic(result || {},channel,state.channels.indexOf(channel),state.revision)]),1500); } catch {}
+      }
+      return result;
+    }
     catch {
       try { await chrome.scripting.executeScript({target:{tabId:target.tabId},files:['content.js']}); } catch {}
       return {ok:false,code:'CONNECTING',retryable:true,error:'Discord 입력창 연결을 기다리고 있습니다.'};
