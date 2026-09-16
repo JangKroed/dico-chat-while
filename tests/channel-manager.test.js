@@ -234,3 +234,27 @@ test('설정 복원은 전체 검증 후 교체하고 실행 중에는 거부한
  assert.equal(restored.channels.length,1);assert.equal(restored.channels[0].nextIndex,1);
  assert.equal(restored.channels[0].enabled,false);assert.equal(restored.channels[0].target.managed,undefined);
 });
+
+test('채널 1 전송이 멈춰도 채널 2는 시작하고 저장 결과가 유실되지 않는다',async()=>{
+ const {r,first,second}=await pair();let release,entered;
+ const gate=new Promise(resolve=>release=resolve), ready=new Promise(resolve=>entered=resolve);
+ r.io.send=async(_,delivery)=>{if(delivery.channelId===first){entered();await gate;}return {status:'confirmed'};};
+ const a=r.manager.start(first);await ready;
+ try {
+  const result=await Promise.race([r.manager.start(second).then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),100))]);
+  assert.equal(result,true,'둘째 채널은 첫 채널의 전송 확인을 기다리면 안 된다');
+  assert.equal(r.state.channels.find(c=>c.id===first).pending.index,0);
+  assert.equal(r.state.channels.find(c=>c.id===second).nextIndex,1);
+ } finally {release();await a;}
+ assert.ok(r.state.channels.every(c=>c.nextIndex===1&&c.pending===null));
+});
+
+test('서로 다른 설정에서 동시에 같은 채팅방을 연결해도 하나만 저장한다', async () => {
+  const {r, first, second} = await pair();
+  const results = await Promise.allSettled([
+    r.manager.bind(first, target(10, '999')),
+    r.manager.bind(second, target(11, '999')),
+  ]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(r.state.channels.filter(channel => channel.target.channelId === '999').length, 1);
+});

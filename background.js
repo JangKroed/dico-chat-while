@@ -4,16 +4,19 @@ import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
 import { recordDiagnostics, appendDiagnostics, deliveryTraceEvent } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
 import { waitForReady, tabReadiness } from './readiness.js';
+import { createChannelQueue } from './channel-queue.js';
 import { createChannelManager } from './channel-manager.js';
 import { parseChannel, validateSettings } from './controller.js';
 
 const ALARM_PREFIX = 'dico-channel:';
-let queue = Promise.resolve();
+const queue = createChannelQueue();
 const stopRequested = new Set();
 let stopAllRequested = false;
-const enqueue = (action, operation = 'background-event') => {
-  const next = queue.then(action);
-  queue = next.catch(async error => {
+const startsAfterStopAll = new Set();
+const isStopped = id => stopRequested.has(id) || (stopAllRequested && !startsAfterStopAll.has(id));
+const enqueue = (action, operation = 'background-event', key = 'control') => {
+  const next = queue.run(key, action);
+  void next.catch(async error => {
     const reason=String(error?.message || error).replace(/https?:\/\/\S+/g,'[URL]').slice(0,500);
     try { await appendDiagnostics(chrome,[{at:new Date().toISOString(),kind:'runtime-error',operation,reason}]); } catch {}
     console.warn('Dico While:', operation, reason);
@@ -31,7 +34,7 @@ async function inspect(target) {
   if (!target) return { ok: false, error: '대상 채널을 선택해 주세요.' };
   const state = await manager.getState();
   const channel = state.channels.find(item => item.target?.tabId === target.tabId);
-  const cancelled = () => stopAllRequested || stopRequested.has(channel?.id);
+  const cancelled = () => isStopped(channel?.id);
   const key = `loadingRecovery:${target.tabId}`;
   const probe = () => waitForReady(async () => {
     let tab;
@@ -52,10 +55,10 @@ async function inspect(target) {
     saveCount:count=>chrome.storage.local.set({[key]:count}),
     reload:()=>chrome.tabs.reload(target.tabId),
     onAttempt:async(attempt,code)=>{
-      await chrome.storage.local.set({loadingRecoveryStatus:{channelId:channel?.id,attempt,at:Date.now()}});
+      await chrome.storage.local.set({[`loadingRecoveryStatus:${channel?.id || target.tabId}`]:{channelId:channel?.id,attempt,at:Date.now()}});
       try { await appendDiagnostics(chrome,[{at:new Date().toISOString(),kind:'loading-recovery',channel:state.channels.indexOf(channel)+1,attempt,reason:code}]); } catch {}
     },
-  }).finally(()=>chrome.storage.local.set({loadingRecoveryStatus:null}));
+  }).finally(()=>chrome.storage.local.set({[`loadingRecoveryStatus:${channel?.id || target.tabId}`]:null}));
 }
 const manager = createChannelManager({
   load: async () => (await chrome.storage.local.get('state')).state,
@@ -74,7 +77,7 @@ const manager = createChannelManager({
   schedule: (channelId, when) => chrome.alarms.create(ALARM_PREFIX + channelId, { when }),
   cancel: channelId => chrome.alarms.clear(ALARM_PREFIX + channelId),
   inspect,
-  send: (target, delivery) => stopAllRequested || stopRequested.has(delivery.channelId)
+  send: (target, delivery) => isStopped(delivery.channelId)
     ? Promise.resolve({ status: 'blocked', error: '중지 요청으로 전송을 취소했습니다.' })
     : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 30000),
   now: () => Date.now(),
@@ -126,16 +129,18 @@ async function startChannel(channelId) {
     await manager.bind(channelId, { ...channel.target, tabId: tab.id, managed: true, windowManaged: true });
   }
   await chrome.storage.local.set({[`loadingRecovery:${tab.id}`]:0});
-  if (stopAllRequested || stopRequested.has(channelId)) throw new Error('전송용 탭 준비 중 시작이 취소되었습니다.');
+  if (isStopped(channelId)) throw new Error('전송용 탭 준비 중 시작이 취소되었습니다.');
   return manager.start(channelId);
 }
 async function startAllChannels() {
   const { channels } = await manager.getState();
-  for (const channel of channels) {
-    if (stopAllRequested) break;
+  await Promise.all(channels.map(channel => enqueue(async () => {
+    if (isStopped(channel.id)) return;
     try { await startChannel(channel.id); }
-    catch (error) { await manager.fail(channel.id, error); }
-  }
+    catch (error) {
+      if (!isStopped(channel.id)) await manager.fail(channel.id, error);
+    }
+  }, 'start-channel', channel.id)));
   return manager.getState();
 }
 
@@ -152,8 +157,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
   if (message?.type === 'DICO_CAN_SEND' && sender.tab) {
     manager.getState().then(state => respond({
-      allowed: !stopAllRequested && state.channels.some(channel =>
-        !stopRequested.has(channel.id) && channel.enabled && channel.target?.tabId === sender.tab.id && channel.pending?.id === message.id),
+      allowed: state.channels.some(channel =>
+        !isStopped(channel.id) && channel.enabled && channel.target?.tabId === sender.tab.id && channel.pending?.id === message.id),
     })).catch(() => respond({ allowed: false }));
     return true;
   }
@@ -174,7 +179,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return true;
   }
   if (message?.type === 'DICO_STOP') stopRequested.add(message.channelId);
-  if (message?.type === 'DICO_STOP_ALL') stopAllRequested = true;
+  if (message?.type === 'DICO_STOP_ALL') { stopAllRequested = true; startsAfterStopAll.clear(); }
+  if (message?.type === 'DICO_START') { stopRequested.delete(message.channelId); startsAfterStopAll.add(message.channelId); }
+  if (message?.type === 'DICO_START_ALL') { stopRequested.clear(); stopAllRequested = false; }
   const action = async () => {
     switch (message?.type) {
       case 'DICO_IMPORT_SETTINGS': return manager.restoreSettings(message.backup);
@@ -189,38 +196,39 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         return manager.bind(message.channelId, { tabId: tab.id, url: tab.url, title: tab.title });
       }
       case 'DICO_START':
-        stopRequested.delete(message.channelId);
-        stopAllRequested = false;
         try { return await startChannel(message.channelId); }
         catch (error) {
-          if (!stopAllRequested && !stopRequested.has(message.channelId)) await manager.fail(message.channelId, error);
+          if (!isStopped(message.channelId)) await manager.fail(message.channelId, error);
           throw error;
         }
       case 'DICO_STOP': return manager.stop(message.channelId);
       case 'DICO_START_ALL':
-        stopRequested.clear();
-        stopAllRequested = false;
         return startAllChannels();
       case 'DICO_STOP_ALL': return manager.stopAll();
       case 'DICO_RESOLVE': return manager.resolvePending(message.channelId, message.resolution);
       default: throw new Error('지원하지 않는 요청입니다. 확장 프로그램과 설정 페이지를 새로고침해 주세요.');
     }
   };
-  enqueue(action, String(message?.type || 'unknown')).then(state => respond({ ok: true, state })).catch(async error => {
+  enqueue(action, String(message?.type || 'unknown'), message.channelId || (message?.type === 'DICO_STOP_ALL' ? 'stop-all' : 'control')).then(state => respond({ ok: true, state })).catch(async error => {
     respond({ ok: false, error: error.message, state: await manager.getState() });
   });
   return true;
 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === EMAIL_ALARM) { void flushEmailReport(chrome).catch(()=>{}); return; }
-  if (alarm.name.startsWith(ALARM_PREFIX)) void enqueue(() => manager.tick(alarm.name.slice(ALARM_PREFIX.length)), 'alarm-delivery');
+  if (alarm.name.startsWith(ALARM_PREFIX)) void enqueue(() => manager.tick(alarm.name.slice(ALARM_PREFIX.length)), 'alarm-delivery', alarm.name.slice(ALARM_PREFIX.length));
 });
 chrome.runtime.onInstalled.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
 chrome.runtime.onStartup.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
-chrome.tabs.onRemoved.addListener(tabId => void enqueue(() => manager.targetLost(tabId, '대상 탭이 닫혀 이 채널의 자동 전송을 중지했습니다.')));
+function enqueueForTab(tabId, action) {
+  void manager.getState().then(state => Promise.all(state.channels
+    .filter(channel => channel.target?.tabId === tabId)
+    .map(channel => enqueue(action, 'tab-event', channel.id)))).catch(() => {});
+}
+chrome.tabs.onRemoved.addListener(tabId => enqueueForTab(tabId, () => manager.targetLost(tabId, '대상 탭이 닫혀 이 채널의 자동 전송을 중지했습니다.')));
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (!change.url && !change.discarded && !change.frozen && change.status !== 'complete') return;
-  void enqueue(async () => {
+  enqueueForTab(tabId, async () => {
     const state = await manager.getState();
     const target = state.channels.find(channel => channel.target?.tabId === tabId)?.target;
     if (!target) return;

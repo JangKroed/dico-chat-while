@@ -1,3 +1,4 @@
+import { createChannelQueue } from './channel-queue.js';
 import { importSettings } from './settings-backup.js';
 import { createController, initialState, parseChannel } from './controller.js';
 
@@ -8,7 +9,13 @@ const newChannel = (id, name, saved = {}) => {
 
 export function createChannelManager(io) {
   let initialization;
-  let mutations = Promise.resolve();
+  const operations = createChannelQueue();
+  let commits = Promise.resolve();
+  const commit = action => {
+    const task = commits.then(action);
+    commits = task.catch(() => {});
+    return task;
+  };
   const persistRoot = async root => {
     const saved = await io.load();
     root.revision = (saved?.revision ?? 0) + 1;
@@ -37,20 +44,19 @@ export function createChannelManager(io) {
     if (channel.enabled) throw new Error('먼저 자동 전송을 중지해 주세요.');
     if (channel.pending) throw new Error('이전 전송 결과를 먼저 확인해 주세요.');
   };
-  const mutate = operation => {
-    const task = mutations.then(async () => { await initialize(); await operation(); return read(); });
-    mutations = task.catch(() => {});
-    return task;
-  };
+  const mutate = (operation, key = 'structure') => operations.run(key, async () => {
+    await initialize(); await operation(); return read();
+  });
   const controller = (id, { name, revise = false } = {}) => createController({
     load: async () => find(await read(), id),
-    save: async state => {
+    save: state => commit(async () => {
       const root = await read();
       const current = find(root, id);
       const next = newChannel(id, name ?? current.name, { ...state, settingsRevision: current.settingsRevision + (revise ? 1 : 0) });
+      if (next.target && root.channels.some(c => c.id !== id && c.target?.guildId === next.target.guildId && c.target?.channelId === next.target.channelId)) throw new Error('이미 다른 설정에 연결된 Discord 채널입니다.');
       root.channels = root.channels.map(channel => channel.id === id ? next : channel);
       await persistRoot(root);
-    },
+    }),
     schedule: when => io.schedule(id, when),
     cancel: () => io.cancel(id),
     inspect: target => io.inspect(target),
@@ -58,7 +64,7 @@ export function createChannelManager(io) {
     now: () => io.now(),
     id: () => io.id(),
   });
-  const recordFailure = async (id, error) => {
+  const recordFailure = (id, error) => commit(async () => {
     const root = await read();
     const channel = find(root, id);
     channel.error = error?.message || String(error);
@@ -67,27 +73,32 @@ export function createChannelManager(io) {
     channel.history = [{ at: io.now(), kind: 'error', text: channel.error }, ...channel.history].slice(0, 30);
     await persistRoot(root);
     try { await io.cancel(id); } catch { /* Keep other channels recoverable. */ }
-  };
+  });
   const each = async (method, ...args) => {
     const root = await read();
-    for (const { id } of root.channels) {
+    await Promise.all(root.channels.map(({id}) => mutate(async () => {
       try { await controller(id)[method](...args); }
       catch (error) { await recordFailure(id, error); }
-    }
+    }, id)));
+    return read();
   };
-  const one = (method, id, ...args) => mutate(() => controller(id)[method](...args));
+  const one = (method, id, ...args) => mutate(() => controller(id)[method](...args), id);
 
   return {
     getState: read,
-    restoreSettings: backup => mutate(async () => {
-      const root=await read();
-      if(root.channels.some(c=>c.enabled || c.pending)) throw new Error('모두 중지하고 미확인 전송 결과를 확인한 뒤 복원하세요.');
-      const imported=importSettings(backup);
-      const channels=imported.map(c=>newChannel(io.id(),c.name,c));
-      if(new Set(channels.map(c=>c.id)).size!==channels.length)throw new Error('채널 ID 생성 실패');
-      for(const channel of root.channels)await io.cancel(channel.id);
-      root.channels=channels;
-      await persistRoot(root);
+    restoreSettings: backup => operations.exclusive(async () => {
+      await initialize();
+      await commit(async () => {
+        const root=await read();
+        if(root.channels.some(c=>c.enabled || c.pending)) throw new Error('모두 중지하고 미확인 전송 결과를 확인한 뒤 복원하세요.');
+        const imported=importSettings(backup);
+        const channels=imported.map(c=>newChannel(io.id(),c.name,c));
+        if(new Set(channels.map(c=>c.id)).size!==channels.length)throw new Error('채널 ID 생성 실패');
+        for(const channel of root.channels)await io.cancel(channel.id);
+        root.channels=channels;
+        await persistRoot(root);
+      });
+      return read();
     }),
     updateSettings: (id, settings, expectedRevision) => mutate(async () => {
       const channel = find(await read(), id);
@@ -102,7 +113,7 @@ export function createChannelManager(io) {
         name = settings.name.trim();
       }
       await controller(id, { name, revise: true }).updateSettings(settings);
-    }),
+    }, id),
     bind: (id, target) => mutate(async () => {
       const root = await read();
       editable(find(root, id));
@@ -112,8 +123,8 @@ export function createChannelManager(io) {
         throw new Error('이미 다른 설정에 연결된 Discord 채널입니다.');
       }
       await controller(id, { revise: true }).bind(target);
-    }),
-    add: () => mutate(async () => {
+    }, id),
+    add: () => mutate(() => commit(async () => {
       const root = await read();
       const id = io.id();
       if (typeof id !== 'string' || !id || root.channels.some(channel => channel.id === id)) throw new Error('새 채널 ID를 만들지 못했습니다. 다시 시도해 주세요.');
@@ -121,8 +132,8 @@ export function createChannelManager(io) {
       while (root.channels.some(channel => channel.name === `채널 ${number}`)) number++;
       root.channels.push(newChannel(id, `채널 ${number}`));
       await persistRoot(root);
-    }),
-    remove: id => mutate(async () => {
+    })),
+    remove: id => mutate(() => commit(async () => {
       const root = await read();
       const channel = find(root, id);
       if (root.channels.length === 1) throw new Error('최소 한 개의 채널 설정은 남겨 두어야 합니다.');
@@ -130,15 +141,19 @@ export function createChannelManager(io) {
       await io.cancel(id);
       root.channels = root.channels.filter(item => item.id !== id);
       await persistRoot(root);
-    }),
-    fail: (id, error) => mutate(() => recordFailure(id, error)),
+    }), id),
+    fail: (id, error) => mutate(() => recordFailure(id, error), id),
     start: id => one('start', id),
     stop: id => one('stop', id),
     tick: id => one('tick', id),
     resolvePending: (id, resolution) => one('resolvePending', id, resolution),
-    recover: options => mutate(() => each('recover', options)),
-    targetLost: (tabId, reason) => mutate(() => each('targetLost', tabId, reason)),
-    startAll: () => mutate(() => each('start')),
-    stopAll: () => mutate(() => each('stop')),
+    recover: options => each('recover', options),
+    targetLost: async (tabId, reason) => {
+      const root = await read();
+      await Promise.all(root.channels.filter(c=>c.target?.tabId===tabId).map(c=>one('targetLost',c.id,tabId,reason)));
+      return read();
+    },
+    startAll: () => each('start'),
+    stopAll: () => each('stop'),
   };
 }

@@ -83,7 +83,7 @@
     }
     return { ok: true };
   }
-  const CONTENT_VERSION = '0.2.13';
+  const CONTENT_VERSION = '0.2.14';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);

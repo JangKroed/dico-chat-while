@@ -22,9 +22,15 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
   let nextTabId = 100;
   const created = [];
   const reloaded = [];
+  const deliveries = [];
   let openingTab = false;
   let loadingReads = 0;
   let holdDelivery = false;
+  let holdStart = true;
+  let releaseStart;
+  let secondStarted;
+  const startGate = new Promise(resolve => {releaseStart = resolve;});
+  const secondStart = new Promise(resolve => {secondStarted = resolve;});
   let releaseDelivery;
   let startedDelivery;
   const deliveryStarted = new Promise(resolve => { startedDelivery = resolve; });
@@ -44,7 +50,10 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     tabs: { reload: async id => { reloaded.push(id); tabs.get(id).discarded=false; tabs.get(id).frozen=false; }, create: async spec => { const tab={id:++nextTabId,title:'전송용 탭',url:spec.url,status:'complete'};tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return tab; }, get: async id => { const tab=tabs.get(id); if (tab?.pendingUrl && ++loadingReads>1) { tab.url=tab.pendingUrl; delete tab.pendingUrl; tab.status='complete'; } return tab; }, query: async () => [...tabs.values()], onRemoved: event(), onUpdated: event(), sendMessage: async (tabId, message) => {
       if (message.type === 'DICO_INSPECT') { assert.equal(tabs.get(tabId).status,'complete'); assert.equal(tabs.get(tabId).pendingUrl,undefined); return { ok: true }; }
       if (message.type === 'DICO_DELIVER') {
-        if (holdDelivery) { startedDelivery({...message,tabId}); await waitDelivery; }
+        deliveries.push({tabId, id:message.delivery.id});
+        if (holdStart && tabId === 101) await startGate;
+        if (holdStart && tabId === 102) secondStarted();
+        if (holdDelivery && tabId === 101) { startedDelivery({...message,tabId}); await waitDelivery; }
         return { status: 'confirmed' };
       }
     } },
@@ -67,7 +76,12 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
         settings: { name: `채널 ${index + 1}`, messages: [`A${index}`, `B${index}`], ownUserId: '', intervalSeconds: 30 } });
       assert.equal(reply.ok, true);
     }
-    reply = await request({ type: 'DICO_START_ALL' });
+    const allStarting = request({ type: 'DICO_START_ALL' });
+    const secondReady = await Promise.race([secondStart.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 200))]);
+    releaseStart();
+    assert.equal(secondReady, true, '모두 시작에서도 둘째 채널은 첫째 전송 확인을 기다리지 않는다');
+    reply = await allStarting;
+    holdStart = false;
     assert.equal(reply.state.channels.filter(channel => channel.enabled).length, 2);
     assert.equal(alarms.size, 2);
     assert.equal(created.length, 2);
@@ -86,15 +100,26 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     assert.equal(delivery.tabId, 101, 'send uses dedicated tab, not original tab');
     const live = await request({ type: 'DICO_GET' });
     assert.ok(live.state.channels[0].pending, 'GET must not wait for delivery');
+    onAlarm.fire({ name: `dico-channel:${ids[1]}` });
+    const independent = await Promise.race([
+      request({type:'DICO_START',channelId:ids[1]}),
+      new Promise(resolve => setTimeout(() => resolve(null), 200)),
+    ]);
+    assert.ok(independent, '둘째 채널은 첫째 채널의 확인 지연에 막히지 않는다');
+    assert.equal(independent.state.channels[1].nextIndex, 0);
+    assert.equal(independent.state.channels[1].nextRunAt, clock + 30000);
+    assert.ok(independent.state.channels[0].pending);
+    onAlarm.fire({ name: `dico-channel:${ids[0]}` });
     const stopPromise = request({ type: 'DICO_STOP', channelId: ids[0] });
     const permitted = await request({ type: 'DICO_CAN_SEND', id: delivery.delivery.id }, { id: 'test-extension', tab: { id: 101 } });
     assert.equal(permitted.allowed, false);
     releaseDelivery();
     reply = await stopPromise;
+    assert.equal(deliveries.filter(value => value.tabId === 101).length, 2, '같은 채널의 중복 알람은 추가 전송하지 않는다');
     assert.equal(reply.state.channels[0].enabled, false);
     assert.equal(reply.state.channels[0].nextIndex, 1);
     assert.equal(reply.state.channels[1].enabled, true);
-    assert.equal(reply.state.channels[1].nextIndex, 1);
+    assert.equal(reply.state.channels[1].nextIndex, 0);
     assert.equal(alarms.has(`dico-channel:${ids[0]}`), false);
     assert.equal(alarms.has(`dico-channel:${ids[1]}`), true);
     const revision = reply.state.channels[0].settingsRevision;
@@ -134,7 +159,9 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     assert.match(reply.state.channels[0].error,/이동/);
     await request({type:'DICO_STOP_ALL'});
   } finally {
+    releaseStart();
     releaseDelivery();
+    await new Promise(resolve => setImmediate(resolve));
     Date.now = originalNow;
     delete globalThis.chrome;
   }
