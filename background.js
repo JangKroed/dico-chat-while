@@ -81,7 +81,7 @@ const manager = createChannelManager({
   inspect,
   send: (target, delivery) => stopAllRequested || stopRequested.has(delivery.channelId)
     ? Promise.resolve({ status: 'blocked', error: '중지 요청으로 전송을 취소했습니다.' })
-    : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 15000),
+    : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 30000),
   now: () => Date.now(),
   id: () => crypto.randomUUID(),
 });

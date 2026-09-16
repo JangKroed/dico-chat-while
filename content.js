@@ -40,7 +40,7 @@
     while (current) {
       const avatar = avatarUserId(current);
       if (avatar) return avatar;
-      if (current.querySelector('h3')) return null;
+      if (current.querySelector('[id^="message-username-"]')) return null;
       current = current.previousElementSibling;
     }
     return null;
@@ -62,36 +62,66 @@
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
-    let observer;
-    let timer;
-    let resolve;
+    const localNodes = new WeakSet();
+    let observer, timer, poll, resolve, finished = false;
+    let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const promise = new Promise(done => { resolve = done; });
-    const finish = value => { observer?.disconnect(); clearTimeout(timer); resolve(value); };
+    const finish = value => {
+      if (finished) return;
+      finished = true;
+      observer?.disconnect(); clearTimeout(timer); clearInterval(poll); resolve(value);
+    };
+    const currentEditor = () => editor.isConnected ? editor : editors()[0];
     const check = () => {
-      if (normalize(editor.innerText || editor.textContent || '')) return;
+      if (finished) return;
+      const liveEditor = currentEditor();
+      const empty = liveEditor && !normalize(liveEditor.innerText || liveEditor.textContent || '');
       for (const node of document.querySelectorAll(selector)) {
-        if (existing.has(node.id) || !matchesRenderedText(text, node.innerText || node.textContent || '')) continue;
-        const row = node.closest('li') || node;
-        const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
-        if (!id || Number((BigInt(id) >> 22n) + 1420070400000n) < startedAt - 2000) continue;
-        if (row.querySelector('[class*="isSending"]') || row.matches('[class*="isSending"]')) {
-          // Only this account's optimistic messages enter the local sending
-          // state. This also works for accounts with a default avatar.
-          locallySending.add(node.id);
+        if (existing.has(node.id)) continue;
+        if (!matchesRenderedText(text, node.innerText || node.textContent || '')) {
+          detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
           continue;
         }
-        if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) continue;
-        if (!locallySending.has(node.id) && (!userId || authorId(row) !== userId)) continue;
-        finish({ status: 'confirmed' });
-        return;
+        const row = node.closest('li') || node;
+        const isSending = row.querySelector('[class*="isSending"]') || row.matches('[class*="isSending"]');
+        // Optimistic IDs need not be final snowflakes. Observe them even while
+        // Slate still displays the submitted draft, then require a final ID.
+        if (isSending) {
+          locallySending.add(node.id); localNodes.add(node);
+          detail = '메시지가 아직 전송 중으로 표시됩니다.';
+          continue;
+        }
+        if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
+          detail = 'Discord가 메시지를 전송 실패로 표시했습니다.'; continue;
+        }
+        const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
+        const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
+        if (!id || created < startedAt - 2000 || created > Date.now() + 2000) {
+          detail = '메시지 생성 시각을 이번 전송과 연결하지 못했습니다.'; continue;
+        }
+        const author = authorId(row);
+        if (userId && author && author !== userId) {
+          detail = '일치하는 메시지의 작성자가 본인과 다릅니다.'; continue;
+        }
+        if (!locallySending.has(node.id) && !localNodes.has(node) && (!userId || author !== userId)) {
+          detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
+        }
+        if (!empty) { detail = '입력창이 비워졌는지 확인하지 못했습니다.'; continue; }
+        finish({status:'confirmed'}); return;
       }
     };
     observer = new MutationObserver(check);
-    observer.observe(document.querySelector('main') || document.body, { subtree: true, childList: true, characterData: true, attributes: true });
-    timer = setTimeout(() => finish({ status: 'uncertain', error: normalize(editor.innerText || editor.textContent || '')
-      ? '전송 키를 처리한 뒤에도 입력창에 문구가 남아 있습니다. 채널의 실제 발송 여부와 남은 초안을 확인해 주세요.'
-      : '입력창은 비워졌지만 메시지 내용·작성자·전송 완료를 모두 확인하지 못했습니다. 실제 게시 여부를 확인하고, 반복되면 설정의 내 Discord 사용자 ID를 입력해 주세요.' }), 10000);
-    return { promise, cancel: () => finish({ status: 'uncertain', error: '입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.' }) };
+    observer.observe(document.querySelector('main') || document.body, {subtree:true,childList:true,characterData:true,attributes:true});
+    // Read-only checks: no additional Enter, reload or retransmission.
+    poll = setInterval(check, 500);
+    timer = setTimeout(() => {
+      check();
+      const liveEditor = currentEditor();
+      finish({status:'uncertain',error:liveEditor && normalize(liveEditor.innerText || liveEditor.textContent || '')
+        ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
+        : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
+    }, 25000);
+    return {promise,cancel:()=>finish({status:'uncertain',error:'입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.'})};
   }
   async function deliver(target, delivery) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
