@@ -59,14 +59,14 @@ let writes = Promise.resolve();
 export function appendDiagnostics(api,events) {
   const next=writes.then(async()=>{
   const {diagnosticLog=[],diagnosticTimeline=[]} = await api.storage.local.get(['diagnosticLog','diagnosticTimeline']);
-  await api.storage.local.set({diagnosticLog:[...diagnosticLog,...events].slice(-500),diagnosticTimeline:[...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed'].includes(e.stage))].slice(-2000)});
+  await api.storage.local.set({diagnosticLog:[...diagnosticLog,...events].slice(-500),diagnosticTimeline:[...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed','editor-recovered'].includes(e.stage))].slice(-2000)});
   await queueEmailReport(api,events);
   });
   writes=next.catch(()=>{});
   return next;
 }
 
-const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prepared','prepared-verified','paste-dispatched','stability-failed']);
+const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prepared','prepared-verified','paste-dispatched','stability-failed','editor-recovered']);
 const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected','draftMatchesA','draftMatchesB','draftHasVoid','whitespaceOnlyDifference'];
 const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds','eventAt','scheduledAt','startedAt','maxStableMs','stableRequiredMs','stableWaitMs','expectedLength','messageALength','messageBLength','draftLineCount','expectedLineCount'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {

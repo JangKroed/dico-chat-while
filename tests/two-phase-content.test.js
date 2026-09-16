@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null}={}) {
+function rig({lag=0,fault=null,managed=false}={}) {
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  const nodes=[],events=[],traces=[];
  const form={querySelector:()=>null,querySelectorAll:()=>cooldown?[{textContent:cooldown,getClientRects:()=>[1]}]:[]};
@@ -21,11 +21,12 @@ function rig({lag=0,fault=null}={}) {
  const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=pasteText;pasteDue=null;selection.isCollapsed=true;
  if(fault==='text_mismatch')editor.innerText='WRONG';
  if(fault==='focus_lost')document.activeElement=null;
+ if(fault==='foreign_focus')document.activeElement={};
  if(fault==='selection_not_collapsed')selection.isCollapsed=false;
  if(fault==='selection_outside')selection.anchorNode=null;
  if(fault==='composing')composition();
  if(fault==='editor_detached')editor.isConnected=false;}};
- const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:['A','B'],expectedText:'A'};
+ const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:['A','B'],expectedText:'A'};
  const delivery={id:'attempt',index:0,text:'A',startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},Date:DateMock,
@@ -79,4 +80,19 @@ test('재시작 검사에서 개인 초안을 차단한 이유를 본문 없이 
  assert.equal(result.diagnostics.draftLength,7);assert.equal(result.diagnostics.expectedLength,1);
  assert.equal(result.diagnostics.draftMatchesA,false);assert.equal(result.diagnostics.draftMatchesB,false);
  assert.equal(JSON.stringify(result).includes('A extra'),false);
+});
+
+test('전용 창에서 정확한 문구 입력 후 커서·포커스가 남아도 재입력 없이 복구한다',async()=>{
+ for(const fault of ['selection_not_collapsed','selection_outside','focus_lost']){
+  const r=rig({fault,managed:true});const result=await r.request('DICO_PREPARE');
+  assert.equal(result.status,'prepared',fault);assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+  assert.equal(r.events.some(e=>e.type==='keydown'),false);assert.ok(r.traces.some(e=>e.stage==='editor-recovered'));
+  r.tick(3000);assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ }
+});
+test('복구는 다른 입력칸·변경된 문구·조합 중인 입력을 건드리지 않는다',async()=>{
+ for(const fault of ['foreign_focus','text_mismatch','composing']){
+  const r=rig({fault,managed:true});assert.equal((await r.request('DICO_PREPARE')).status,'blocked');
+  assert.equal(r.traces.some(e=>e.stage==='editor-recovered'),false);assert.equal(r.events.some(e=>e.type==='keydown'),false);
+ }
 });

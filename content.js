@@ -144,7 +144,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.22';
+  const CONTENT_VERSION = '0.2.23';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -295,7 +295,7 @@
     return {status:'confirmed',draftAction};
   }
   async function stableEditor(target, text, editor, duration, report) {
-    const began=Date.now(); let stableSince=null,maxStableMs=0;
+    const began=Date.now(); let stableSince=null,maxStableMs=0,textStableSince=null,repaired=false;
     const failureCounts={};let lastFailedChecks=[];
     const fail=async()=>{
       let timer;
@@ -314,6 +314,19 @@
       lastFailedChecks=Object.keys(checks).filter(key=>checks[key]);
       for(const key of lastFailedChecks)failureCounts[key]=(failureCounts[key] || 0)+1;
       if(checks.channel_changed || checks.editor_detached || checks.editor_count || checks.editor_replaced)return fail();
+      if(!checks.text_mismatch && !checks.composing)textStableSince ??=Date.now();else textStableSince=null;
+      // A paste can leave Slate's old selection active. Repair only our dedicated
+      // editor, once, after exact text settles; never overwrite text or other inputs.
+      const repairable=lastFailedChecks.length && lastFailedChecks.every(key=>['focus_lost','selection_missing','selection_not_collapsed','selection_outside'].includes(key));
+      if(target.managed && !repaired && repairable && textStableSince!==null && Date.now()-textStableSince>=500 &&
+          (!document.activeElement || document.activeElement===document.body || document.activeElement===editor)) {
+        repaired=true;editor.focus();
+        const range=document.createRange(),currentSelection=window.getSelection();
+        if(currentSelection){range.selectNodeContents(editor);range.collapse(false);currentSelection.removeAllRanges();currentSelection.addRange(range);}
+        report('editor-recovered',{failedChecks:lastFailedChecks,failureCounts});
+        stableSince=null;
+        await new Promise(resolve=>setTimeout(resolve,100));continue;
+      }
       if(!lastFailedChecks.length) {
         stableSince ??=Date.now();maxStableMs=Math.max(maxStableMs,Date.now()-stableSince);
         if(maxStableMs>=duration)return true;
