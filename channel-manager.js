@@ -61,6 +61,8 @@ export function createChannelManager(io) {
     cancel: () => io.cancel(id),
     inspect: target => io.inspect(target),
     send: (target, delivery) => io.send(target, { ...delivery, channelId: id }),
+    prepare: io.prepare ? (target, delivery) => io.prepare(target,{...delivery,channelId:id}) : undefined,
+    waitUntil: io.waitUntil ? when=>io.waitUntil(id,when) : undefined,
     reconcile: io.reconcile ? (target, delivery) => io.reconcile(target, {...delivery,channelId:id}) : undefined,
     now: () => io.now(),
     id: () => io.id(),
@@ -70,6 +72,7 @@ export function createChannelManager(io) {
     const channel = find(root, id);
     channel.error = error?.message || String(error);
     channel.enabled = false;
+    channel.prepared = null;
     channel.nextRunAt = null;
     channel.history = [{ at: io.now(), kind: 'error', text: channel.error }, ...channel.history].slice(0, 30);
     await persistRoot(root);

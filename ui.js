@@ -309,6 +309,9 @@ function renderSchedule() {
   } else if (channel.pending) {
     elements.scheduleLabel.textContent = `메시지 ${channel.pending.index === 1 ? "B" : "A"} 입력·전송 확인 중`;
     elements.scheduleDetail.textContent = "전송 확인 후 다음 타이머가 시작됩니다.";
+  } else if (channel.enabled && channel.prepared) {
+    elements.scheduleLabel.textContent=channel.prepared.phase==='ready' ? '문구 준비 완료 · 전송 시각 대기' : '문구 입력 준비 중';
+    elements.scheduleDetail.textContent=`메시지 ${channel.nextIndex===1?'B':'A'} · ${formatRemaining(channel.nextRunAt) || '준비 상태 확인 중'}`;
   } else if (!channel.enabled) {
     elements.scheduleLabel.textContent = "일정이 중지되어 있습니다";
     elements.scheduleDetail.textContent = conflict ? "최신 설정을 먼저 불러오세요." : isDirty() ? "변경한 설정을 먼저 저장하세요." : "다음 차례를 유지한 채 시작할 수 있어요.";

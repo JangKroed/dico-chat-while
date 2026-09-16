@@ -340,3 +340,42 @@ test('실행 도중 더 긴 슬로우 모드를 발견하면 마지막 발송 �
  assert.equal(r.alarm,1603000);assert.equal(r.state.nextIndex,1);
  r.advance(573);await r.controller.tick();assert.deepEqual(r.sent,['공지 A','공지 B']);
 });
+
+test('두 단계 전송은 3초 전 준비하고 예약 시각 전에는 Enter 단계로 넘기지 않는다',async()=>{
+ const r=await configured();let preparations=0;
+ r.io.prepare=async()=>{preparations++;return {status:'prepared'}};
+ await r.controller.start();assert.equal(preparations,1);assert.equal(r.sent.length,1);
+ assert.equal(r.alarm,1027000);
+ r.advance(27);await r.controller.tick();
+ assert.equal(preparations,2);assert.equal(r.sent.length,1);assert.equal(r.state.prepared.phase,'ready');
+ assert.equal(r.state.pending,null);assert.equal(r.alarm,1030000);
+ r.advance(3);await r.controller.tick();assert.equal(r.sent.length,2);assert.equal(r.state.prepared,null);
+});
+
+test('준비 완료 후 worker를 재생성해도 재입력하지 않고 같은 준비 ID로 전송한다',async()=>{
+ const r=await configured();let count=0;
+ r.io.prepare=async()=>{count++;return {status:'prepared'}};
+ await r.controller.start();r.advance(27);await r.controller.tick();
+ const id=r.state.prepared.id;
+ const next=createController(r.io);await next.recover({preserveDue:true});
+ assert.equal(r.state.prepared.id,id);assert.equal(count,2);
+ r.advance(3);await next.tick();assert.equal(count,2);assert.equal(r.sent.length,2);
+ await next.tick();assert.equal(r.sent.length,2);
+});
+test('준비만 한 상태에서 중지하면 초안 재전송 예약을 없애고 차례를 유지한다',async()=>{
+ const r=await configured();r.io.prepare=async()=>({status:'prepared'});
+ await r.controller.start();r.advance(27);await r.controller.tick();await r.controller.stop();
+ assert.equal(r.state.prepared,null);assert.equal(r.state.pending,null);assert.equal(r.state.nextIndex,1);
+ r.advance(3);await r.controller.tick();assert.equal(r.sent.length,1);assert.equal(r.alarm,null);
+});
+test('입력 준비 응답이 유실되면 Enter 단계로 넘어가지 않고 초안 확인을 위해 중지한다',async()=>{
+ const r=await configured();r.io.prepare=async()=>{throw new Error('lost')};
+ await r.controller.start();assert.equal(r.sent.length,0);assert.equal(r.state.enabled,false);
+ assert.equal(r.state.pending,null);assert.equal(r.state.prepared,null);assert.equal(r.state.nextIndex,0);
+});
+test('입력 준비가 예약보다 늦으면 준비 완료 뒤에만 전송한다',async()=>{
+ const r=await configured();r.io.prepare=async()=>{r.advance(5);return {status:'prepared'}};
+ let at;
+ r.io.send=async(_,delivery)=>{at=delivery.scheduledAt;return {status:'confirmed'}};
+ await r.controller.start();assert.equal(at,1005000);assert.equal(r.state.lastSentAt,1005000);
+});

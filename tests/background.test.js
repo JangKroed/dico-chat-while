@@ -51,6 +51,12 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     scripting: { executeScript: async () => {} },
     tabs: { reload: async id => { reloaded.push(id); tabs.get(id).discarded=false; tabs.get(id).frozen=false; }, create: async spec => { const tab={id:++nextTabId,title:'전송용 탭',url:spec.url,status:'complete'};tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return tab; }, get: async id => { const tab=tabs.get(id); if (tab?.pendingUrl && ++loadingReads>1) { tab.url=tab.pendingUrl; delete tab.pendingUrl; tab.status='complete'; } return tab; }, query: async () => [...tabs.values()], onRemoved: event(), onUpdated: event(), sendMessage: async (tabId, message) => {
       if (message.type === 'DICO_INSPECT') { assert.equal(tabs.get(tabId).status,'complete'); assert.equal(tabs.get(tabId).pendingUrl,undefined); return { ok: true }; }
+      if (message.type === 'DICO_PREPARE') {
+        const sender={id:'test-extension',tab:{id:tabId}};
+        assert.equal((await request({type:'DICO_CAN_SEND',id:message.delivery.id,phase:'prepare'},sender)).allowed,true);
+        assert.equal((await request({type:'DICO_CAN_SEND',id:message.delivery.id,phase:'commit'},sender)).allowed,false,'입력 준비 ID는 Enter 권한이 없다');
+        return {status:'prepared'};
+      }
       if (message.type === 'DICO_RECONCILE') { reconciliationReads++; assert.ok(message.delivery.channelId); return {status:'confirmed'}; }
       if (message.type === 'DICO_DELIVER') {
         deliveries.push({tabId, id:message.delivery.id});

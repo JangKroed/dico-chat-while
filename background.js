@@ -49,7 +49,7 @@ async function inspect(target) {
     }
   },{attempts:15,cancelled});
   // A pending delivery is never reloaded or sent again automatically.
-  if (!target.managed || channel?.pending) return probe();
+  if (!target.managed || channel?.pending || channel?.prepared) return probe();
   return recoverLoading({probe,cancelled,
     readCount:async()=> (await chrome.storage.local.get(key))[key] || 0,
     saveCount:count=>chrome.storage.local.set({[key]:count}),
@@ -77,9 +77,16 @@ const manager = createChannelManager({
   schedule: (channelId, when) => chrome.alarms.create(ALARM_PREFIX + channelId, { when }),
   cancel: channelId => chrome.alarms.clear(ALARM_PREFIX + channelId),
   inspect,
+  prepare: (target, delivery) => isStopped(delivery.channelId)
+    ? Promise.resolve({status:'blocked',error:'중지 요청으로 입력 준비를 취소했습니다.'})
+    : withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_PREPARE',target,delivery}),10000),
+  waitUntil: async (id, when) => {
+    while (!isStopped(id) && Date.now()<when) await new Promise(resolve=>setTimeout(resolve,Math.min(250,when-Date.now())));
+    if (isStopped(id)) throw new Error('중지 요청으로 전송 대기를 취소했습니다.');
+  },
   send: (target, delivery) => isStopped(delivery.channelId)
     ? Promise.resolve({ status: 'blocked', error: '중지 요청으로 전송을 취소했습니다.' })
-    : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 30000),
+    : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 35000),
   reconcile: async (target, delivery) => {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (isStopped(delivery.channelId)) break;
@@ -169,7 +176,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'DICO_CAN_SEND' && sender.tab) {
     manager.getState().then(state => respond({
       allowed: state.channels.some(channel =>
-        !isStopped(channel.id) && channel.enabled && channel.target?.tabId === sender.tab.id && channel.pending?.id === message.id),
+        !isStopped(channel.id) && channel.enabled && channel.target?.tabId === sender.tab.id && (message.phase==='prepare' ? !channel.pending && channel.prepared?.phase==='preparing' && channel.prepared.id===message.id : channel.pending?.id===message.id && Date.now()>=channel.pending.scheduledAt)),
     })).catch(() => respond({ allowed: false }));
     return true;
   }

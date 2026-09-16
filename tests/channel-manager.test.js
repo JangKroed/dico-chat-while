@@ -267,3 +267,15 @@ test('채널별로 10분과 2분 슬로우 모드 최소값을 독립 저장한�
  assert.equal(a.slowmodeSeconds,600);assert.equal(b.slowmodeSeconds,120);
  await assert.rejects(r.manager.updateSettings(first,settings('수정',602),a.settingsRevision),/603/);
 });
+
+test('첫 채널의 입력 준비가 지연돼도 둘째 채널은 독립적으로 준비·전송한다',async()=>{
+ const {r,first,second}=await pair();let release,entered;
+ const gate=new Promise(resolve=>release=resolve),ready=new Promise(resolve=>entered=resolve);
+ r.io.prepare=async(_,delivery)=>{if(delivery.channelId===first){entered();await gate;}return {status:'prepared'}};
+ const a=r.manager.start(first);await ready;
+ try {
+  const done=await Promise.race([r.manager.start(second).then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),100))]);
+  assert.equal(done,true);assert.equal(r.state.channels.find(c=>c.id===first).prepared.phase,'preparing');
+  assert.equal(r.state.channels.find(c=>c.id===second).nextIndex,1);
+ } finally {release();await a;}
+});

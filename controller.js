@@ -9,6 +9,7 @@ export const initialState = () => ({
   nextIndex: 0,
   nextRunAt: null,
   pending: null,
+  prepared: null,
   error: null,
   history: [],
   lastSentAt: null,
@@ -51,7 +52,10 @@ export function createController(io) {
     state.history = [{ at: io.now(), kind, text }, ...state.history].slice(0, 30);
   };
   const persist = async state => { await io.save(state); return state; };
+  const scheduleNext = state => io.schedule(io.prepare && !state.prepared ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
+  const destination = state => ({...state.target,ownUserId:state.ownUserId,lastSentAt:state.lastSentAt,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
   const pause = async (state, error) => {
+    state.prepared = null;
     state.enabled = false;
     state.nextRunAt = null;
     state.error = error;
@@ -69,7 +73,7 @@ export function createController(io) {
     state.slowmodeUntil = state.nextRunAt;
     log(state, 'info', '슬로우 모드 해제를 기다립니다. 문구 차례는 유지합니다.');
     await persist(state);
-    try { await io.schedule(state.nextRunAt); }
+    try { await scheduleNext(state); }
     catch { return pause(state, '슬로우 모드 대기 예약을 등록하지 못했습니다.'); }
     return state;
   };
@@ -92,6 +96,7 @@ export function createController(io) {
     }
   };
   const confirmed = async state => {
+    state.prepared = null;
     state.draftRetries = 0;
     state.draftRetrySince = null;
     state.draftRetryPending = null;
@@ -102,7 +107,7 @@ export function createController(io) {
     state.error = null;
     state.nextRunAt = io.now() + state.intervalSeconds * 1000;
     await persist(state);
-    try { await io.schedule(state.nextRunAt); }
+    try { await scheduleNext(state); }
     catch { return pause(state, '다음 예약을 등록하지 못해 중지했습니다.'); }
     return state;
   };
@@ -173,6 +178,7 @@ export function createController(io) {
     },
     async stop() {
       const state = await read();
+      state.prepared = null;
       state.enabled = false;
       state.nextRunAt = null;
       log(state, 'info', '자동 전송을 중지했습니다. 다음 문구 순서는 유지됩니다.');
@@ -185,10 +191,12 @@ export function createController(io) {
       if (!state.enabled) return state;
       if (state.pending && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '이전 전송 결과가 확인되지 않아 중지했습니다. 채널을 확인해 주세요.');
+      if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
       if (state.nextRunAt == null) return pause(state, '다음 예약 시간이 없어 중지했습니다. 다시 시작해 주세요.');
-      if (state.nextRunAt > io.now()) {
-        try { await io.schedule(state.nextRunAt); }
+      if (state.nextRunAt - (io.prepare && !state.prepared ? 3000 : 0) > io.now()) {
+        try { await scheduleNext(state); }
         catch { return pause(state, '예약을 복원하지 못해 중지했습니다.'); }
+        if (state.prepared && io.waitUntil && state.nextRunAt-io.now()<=3000) { await io.waitUntil(state.nextRunAt); return api.tick(); }
         return state;
       }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
@@ -200,15 +208,39 @@ export function createController(io) {
         }
         return pause(state, result.error);
       }
-      if (state.nextRunAt>io.now()) {
+      if (state.nextRunAt-(io.prepare && !state.prepared ? 3000 : 0)>io.now()) {
         state.slowmodeUntil=state.nextRunAt;
         await persist(state);
-        try { await io.schedule(state.nextRunAt); } catch { return pause(state,'슬로우 모드 최소 주기 예약에 실패했습니다.'); }
+        try { await scheduleNext(state); } catch { return pause(state,'슬로우 모드 최소 주기 예약에 실패했습니다.'); }
         return state;
       }
-      if (Number.isFinite(result.cooldownMs) && result.cooldownMs > 0) return deferSlowmode(state, result.cooldownMs);
+      if (state.nextRunAt<=io.now() && Number.isFinite(result.cooldownMs) && result.cooldownMs > 0) return deferSlowmode(state, result.cooldownMs);
       state.slowmodeUntil = null;
-      state.pending = { id: io.id(), index: state.nextIndex, text: state.messages[state.nextIndex], scheduledAt: state.nextRunAt, startedAt: io.now() };
+      if (io.prepare && !state.prepared) {
+        state.prepared={id:io.id(),index:state.nextIndex,text:state.messages[state.nextIndex],scheduledAt:state.nextRunAt,startedAt:io.now(),phase:'preparing'};
+        // This durable intent can type, but it can never authorize Enter.
+        await persist(state);
+        try { await io.schedule(io.now()+15000); }
+        catch { return pause(state,'입력 준비 복구용 예약을 등록하지 못했습니다.'); }
+        let prepared;
+        try { prepared=await io.prepare(destination(state),state.prepared); }
+        catch { prepared={status:'blocked',error:'입력 준비 응답을 받지 못했습니다. 남은 초안을 보존하고 중지합니다.'}; }
+        if (prepared?.status==='confirmed') { state.pending=state.prepared; return confirmed(state); }
+        if (prepared?.status!=='prepared') return pause(state,prepared?.error || '문구 입력 준비를 완료하지 못했습니다.');
+        state.prepared.phase='ready';
+        state.prepared.readyAt=io.now();
+        state.nextRunAt=Math.max(state.nextRunAt,io.now());
+        log(state,'info','문구 입력 준비를 마쳤습니다. 예약 시각에 다시 확인한 뒤 전송합니다.');
+        await persist(state);
+        try { await scheduleNext(state); } catch { return pause(state,'전송 시각 예약을 등록하지 못했습니다.'); }
+      }
+      if (state.nextRunAt>io.now()) {
+        if (io.waitUntil && state.nextRunAt-io.now()<=3000) { await io.waitUntil(state.nextRunAt); return api.tick(); }
+        return state;
+      }
+      if (state.prepared && (state.prepared.phase!=='ready' || state.prepared.index!==state.nextIndex || state.prepared.text!==state.messages[state.nextIndex])) return pause(state,'저장된 입력 준비 상태가 현재 문구 차례와 다릅니다.');
+      state.pending = state.prepared ? {...state.prepared,scheduledAt:state.nextRunAt,phase:'commit'} : { id: io.id(), index: state.nextIndex, text: state.messages[state.nextIndex], scheduledAt: state.nextRunAt, startedAt: io.now() };
+
       // Keep a watchdog alarm in case the worker is terminated during delivery.
       try { await io.schedule(io.now() + 60000); }
       catch {
@@ -228,6 +260,7 @@ export function createController(io) {
         return deferSlowmode(state, response.retryAfterMs);
       }
       if (response?.status === 'draft-retained' && (state.draftRetries || 0) < 3) {
+        state.prepared = null;
         state.draftRetries = (state.draftRetries || 0) + 1;
         state.draftRetrySince ||= state.pending.startedAt;
         state.draftRetryPending ||= state.pending;
@@ -236,7 +269,7 @@ export function createController(io) {
         state.nextRunAt = io.now() + state.intervalSeconds * 1000;
         log(state, 'info', `입력창에 남은 공지를 다음 주기에 다시 확인합니다 (${state.draftRetries}/3). A/B 차례는 유지합니다.`);
         await persist(state);
-        try { await io.schedule(state.nextRunAt); }
+        try { await scheduleNext(state); }
         catch { return pause(state, '초안 재확인 예약을 등록하지 못했습니다.'); }
         return state;
       }
@@ -253,6 +286,7 @@ export function createController(io) {
         state.lastSentAt = state.pending.startedAt;
       }
       state.pending = null;
+      state.prepared = null;
       state.draftRetries = 0;
       state.draftRetrySince = null;
       state.draftRetryPending = null;
@@ -265,6 +299,7 @@ export function createController(io) {
       if (state.pending && state.enabled && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
       if (!state.enabled) { await io.cancel(); return state; }
+      if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
@@ -276,11 +311,11 @@ export function createController(io) {
       }
       await persist(state);
       // Never replay every missed interval after sleep or browser restart.
-      if (!state.nextRunAt || (!preserveDue && state.nextRunAt < io.now())) {
+      if (!state.nextRunAt || (!state.prepared && !preserveDue && state.nextRunAt < io.now())) {
         state.nextRunAt = io.now() + state.intervalSeconds * 1000;
         await persist(state);
       }
-      try { await io.schedule(state.nextRunAt); }
+      try { await scheduleNext(state); }
       catch { return pause(state, '예약 복구에 실패해 중지했습니다. 다시 시작해 주세요.'); }
       return state;
     },

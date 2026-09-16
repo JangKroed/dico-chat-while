@@ -144,7 +144,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.18';
+  const CONTENT_VERSION = '0.2.19';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -285,6 +285,19 @@
     }
     return {status:'confirmed',draftAction};
   }
+  async function stableEditor(target, text, editor, duration) {
+    const began=Date.now(); let stableSince=null;
+    while (Date.now()-began<5000) {
+      if (!matchesTarget(target) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor) return false;
+      const matches=normalize(editor.innerText || editor.textContent || '')===normalize(text);
+      const selection=window.getSelection();
+      const ready=matches && !composing && document.activeElement===editor && selection?.isCollapsed && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode);
+      if(ready) { stableSince ??=Date.now(); if(Date.now()-stableSince>=duration) return true; }
+      else stableSince=null;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    return false;
+  }
   async function deliver(target, delivery) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
@@ -306,61 +319,81 @@
       }
       let result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
-      if (result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
-      const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id });
+      if (delivery.phase!=='prepare' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
+      const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase });
       if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
       result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
       let editor = editors()[0];
       originalEditor = editor;
-      seenDeliveries.add(delivery.id);
+      if(delivery.phase!=='prepare') seenDeliveries.add(delivery.id);
       if (seenDeliveries.size > 100) seenDeliveries.delete(seenDeliveries.values().next().value);
-      editor.focus();
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      // Let Slate observe focus/selection before delivering a paste event.
-      // Native DOM insertion can leave visible text outside Slate's model.
-      await new Promise(resolve => setTimeout(resolve, 100));
-      result = inspect(target);
-      if (!result.ok) return { status: 'blocked', error: result.error };
-      if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id }))?.allowed) {
-        return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
-      }
-      const live = editors()[0];
-      if (live !== editor) return {status:'blocked',error:'입력창이 교체되었습니다. 다음 시작 때 다시 확인해 주세요.'};
-      const reuseDraft = normalize(editor.innerText || editor.textContent || '') === normalize(delivery.text);
-      trace(reuseDraft ? 'draft-reused' : 'draft-replaced');
-      if (reuseDraft) {
+      if (delivery.phase==='commit') {
+        if (!Number.isFinite(delivery.scheduledAt) || Date.now()<delivery.scheduledAt) return {status:'blocked',error:'아직 전송 예약 시각이 아닙니다.'};
+        if (normalize(editor.innerText || editor.textContent || '')!==normalize(delivery.text)) return {status:'blocked',error:'준비한 문구가 변경되었습니다. 입력창을 보존하고 중지합니다.'};
+        editor.focus();
+        const selection=window.getSelection(), range=document.createRange();
+        range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
+        if(!await stableEditor(target,delivery.text,editor,500)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
+        if (!(await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'}))?.allowed) return {status:'blocked',error:'전송 준비 후 중지 요청을 확인했습니다.'};
+        trace('prepared-verified');
+      } else {
+        editor.focus();
+        const selection = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(editor);
-        range.collapse(false);
-        selection.removeAllRanges(); selection.addRange(range);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        // Let Slate observe focus/selection before delivering a paste event.
+        // Native DOM insertion can leave visible text outside Slate's model.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        result = inspect(target);
+        if (!result.ok) return { status: 'blocked', error: result.error };
+        if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
+          return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
+        }
+        const live = editors()[0];
+        if (live !== editor) return {status:'blocked',error:'입력창이 교체되었습니다. 다음 시작 때 다시 확인해 주세요.'};
+        const reuseDraft = normalize(editor.innerText || editor.textContent || '') === normalize(delivery.text);
+        trace(reuseDraft ? 'draft-reused' : 'draft-replaced');
+        if (reuseDraft) {
+          const range = document.createRange();
+          range.selectNodeContents(editor);
+          range.collapse(false);
+          selection.removeAllRanges(); selection.addRange(range);
+        }
+        const clipboardData = new DataTransfer();
+        clipboardData.setData('text/plain', delivery.text);
+        entered = true;
+        trace('before-paste');
+        const paste = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true, composed: true });
+        if (!reuseDraft) editor.dispatchEvent(paste);
+        // Paste updates the editor model and React may render it asynchronously.
+        // Never send Enter in the same task as text insertion.
+        if (delivery.phase==='prepare') {
+          if (!await stableEditor(target,delivery.text,editor,1000)) return {status:'blocked',error:'문구가 1초 동안 안정적으로 준비되지 않았습니다. 초안을 보존하고 중지합니다.'};
+        } else await new Promise(resolve => setTimeout(resolve,150));
+        trace('after-paste', {pastePrevented:paste.defaultPrevented});
+        const currentEditors = editors();
+        if (currentEditors.length !== 1 || normalize(currentEditors[0].innerText || currentEditors[0].textContent || '') !== normalize(delivery.text)) {
+          return { status: 'uncertain', error: 'Discord 편집기에 문구가 반영되지 않았습니다. 페이지를 새로고침하고 남은 초안을 확인해 주세요.' };
+        }
+        editor = currentEditors[0];
+        if (!matchesTarget(target)) return { status: 'uncertain', error: '문구 입력 중 채널이 변경되었습니다. 초안을 확인해 주세요.' };
+        if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
+          return { status: 'uncertain', error: '문구 입력 후 예약이 취소되었습니다. 남은 초안을 확인해 주세요.' };
+        }
+        if (!matchesTarget(target) || !editor.isConnected || normalize(editor.innerText || editor.textContent || '') !== normalize(delivery.text)) {
+          return { status: 'uncertain', error: '전송 직전에 채널이나 입력 내용이 변경되었습니다. 초안을 확인해 주세요.' };
+        }
+
+        if(delivery.phase==='prepare') {
+          trace('prepared', {result:'prepared'});
+          return {status:'prepared'};
+        }
       }
-      const clipboardData = new DataTransfer();
-      clipboardData.setData('text/plain', delivery.text);
-      entered = true;
-      trace('before-paste');
-      const paste = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true, composed: true });
-      if (!reuseDraft) editor.dispatchEvent(paste);
-      // Paste updates the editor model and React may render it asynchronously.
-      // Never send Enter in the same task as text insertion.
-      await new Promise(resolve => setTimeout(resolve, 150));
-      trace('after-paste', {pastePrevented:paste.defaultPrevented});
-      const currentEditors = editors();
-      if (currentEditors.length !== 1 || normalize(currentEditors[0].innerText || currentEditors[0].textContent || '') !== normalize(delivery.text)) {
-        return { status: 'uncertain', error: 'Discord 편집기에 문구가 반영되지 않았습니다. 페이지를 새로고침하고 남은 초안을 확인해 주세요.' };
-      }
-      editor = currentEditors[0];
-      if (!matchesTarget(target)) return { status: 'uncertain', error: '문구 입력 중 채널이 변경되었습니다. 초안을 확인해 주세요.' };
-      if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id }))?.allowed) {
-        return { status: 'uncertain', error: '문구 입력 후 예약이 취소되었습니다. 남은 초안을 확인해 주세요.' };
-      }
-      if (!matchesTarget(target) || !editor.isConnected || normalize(editor.innerText || editor.textContent || '') !== normalize(delivery.text)) {
-        return { status: 'uncertain', error: '전송 직전에 채널이나 입력 내용이 변경되었습니다. 초안을 확인해 주세요.' };
-      }
+      const finalSelection=window.getSelection();
+      if (!matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || normalize(editor.innerText || editor.textContent || '')!==normalize(delivery.text)) return {status:'blocked',error:'Enter 직전 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'};
       const cooldown = slowmode(editor);
       if (cooldown.cooldownMs > 0) {
         trace('slowmode-wait', cooldown);
@@ -391,6 +424,7 @@
     }
     if (message?.type === 'DICO_CHANNEL_LIMIT') { detectSlowmodeSetting(message.target).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
     if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>respond(inspect(message.target))); return true; }
+    if (message?.type === 'DICO_PREPARE') { deliver(message.target,{...message.delivery,phase:'prepare'}).then(respond); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;
   });
