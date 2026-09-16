@@ -3,7 +3,7 @@ import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
 import { recordDiagnostics, appendDiagnostics } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
-import { waitForReady } from './readiness.js';
+import { waitForReady, tabReadiness } from './readiness.js';
 import { createChannelManager } from './channel-manager.js';
 import { parseChannel, validateSettings } from './controller.js';
 
@@ -37,13 +37,8 @@ async function inspect(target) {
     let tab;
     try { tab = await chrome.tabs.get(target.tabId); }
     catch { return {ok:false,code:'TAB_MISSING',error:'전송용 탭이 닫혔습니다.'}; }
-    if (!tab) return {ok:false,code:'TAB_MISSING',error:'전송용 탭이 닫혔습니다.'};
-    const parsed = parseChannel(tab.url);
-    if (!parsed || parsed.channelId !== target.channelId || parsed.guildId !== target.guildId) {
-      return {ok:false,code:'WRONG_CHANNEL',error:'대상 탭이 다른 페이지로 이동했습니다. 로그인 상태와 채널을 확인하세요.'};
-    }
-    if (tab.discarded || tab.frozen) return {ok:false,code:'TAB_SUSPENDED',error:'전송용 탭이 메모리 절약으로 중지되었습니다.'};
-    if (tab.status === 'loading') return {ok:false,code:'PAGE_LOADING',retryable:true,error:'Discord 페이지 로딩 중입니다.'};
+    const readiness = tabReadiness(tab, target);
+    if (!readiness.ok) return readiness;
     try { return await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),1000); }
     catch {
       try { await chrome.scripting.executeScript({target:{tabId:target.tabId},files:['content.js']}); } catch {}
@@ -114,8 +109,8 @@ async function startChannel(channelId) {
   if (channel.target.managed) {
     try {
       const candidate = await chrome.tabs.get(channel.target.tabId);
-      const parsed = parseChannel(candidate.url);
-      if (parsed?.channelId === channel.target.channelId && parsed.guildId === channel.target.guildId) {
+      const readiness = tabReadiness(candidate, channel.target);
+      if (readiness.ok || readiness.code === 'PAGE_LOADING' || readiness.code === 'TAB_SUSPENDED') {
         tab = candidate;
         if (candidate.discarded || candidate.frozen) await chrome.tabs.reload(candidate.id);
       }
@@ -215,13 +210,17 @@ chrome.runtime.onInstalled.addListener(() => void enqueue(() => recoverChannels(
 chrome.runtime.onStartup.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
 chrome.tabs.onRemoved.addListener(tabId => void enqueue(() => manager.targetLost(tabId, '대상 탭이 닫혀 이 채널의 자동 전송을 중지했습니다.')));
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (!change.url && !change.discarded && !change.frozen) return;
+  if (!change.url && !change.discarded && !change.frozen && change.status !== 'complete') return;
   void enqueue(async () => {
     const state = await manager.getState();
     const target = state.channels.find(channel => channel.target?.tabId === tabId)?.target;
     if (!target) return;
-    const channel = change.url && parseChannel(change.url);
-    if (change.discarded || change.frozen || (change.url && (!channel || channel.channelId !== target.channelId || channel.guildId !== target.guildId))) {
+    // Events may have waited behind a send/start. Inspect the current tab,
+    // not a stale blank URL or suspension event from before recovery.
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch { return; }
+    const readiness = tabReadiness(tab, target);
+    if (readiness.code === 'WRONG_CHANNEL' || readiness.code === 'TAB_SUSPENDED') {
       return manager.targetLost(tabId, '대상 탭이 이동하거나 메모리 절약으로 중지되어 이 채널의 자동 전송을 중지했습니다.');
     }
   });

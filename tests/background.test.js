@@ -15,13 +15,15 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
   const onMessage = event();
   const onAlarm = event();
   const tabs = new Map([
-    [1, { id: 1, title: '첫 채널', url: 'https://discord.com/channels/123/456' }],
-    [2, { id: 2, title: '둘째 채널', url: 'https://discord.com/channels/123/789' }],
+    [1, { id: 1, title: '첫 채널', status:'complete', url: 'https://discord.com/channels/123/456' }],
+    [2, { id: 2, title: '둘째 채널', status:'complete', url: 'https://discord.com/channels/123/789' }],
   ]);
   stored = {version:1,messages:['기존 A','기존 B'],ownUserId:'',intervalSeconds:30,enabled:true,target:{tabId:1,url:'https://discord.com/channels/123/456',channelId:'456',guildId:'123'},nextIndex:1,nextRunAt:clock-1000,pending:null,error:null,history:[],lastSentAt:null};
   let nextTabId = 100;
   const created = [];
   const reloaded = [];
+  let openingTab = false;
+  let loadingReads = 0;
   let holdDelivery = false;
   let releaseDelivery;
   let startedDelivery;
@@ -31,6 +33,7 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     notifications: {create: async () => {}, onClicked: event()},
     windows: { create: async spec => {
       const tab=spec.tabId?tabs.get(spec.tabId):{id:++nextTabId,title:'전송용 창',url:spec.url,status:'complete'};
+      if (openingTab) { tab.pendingUrl=tab.url; tab.url=''; tab.status='loading'; loadingReads=0; }
       tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return {id:tab.id,tabs:[tab]};
     } },
     storage: { local: { get: async () => ({ state: structuredClone(stored) }), set: async values => { if ('state' in values) stored = structuredClone(values.state); } } },
@@ -38,8 +41,8 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     alarms: { create: async (name, spec) => alarms.set(name, spec), clear: async name => alarms.delete(name), onAlarm },
     runtime: { id: 'test-extension', getURL: path => `chrome-extension://test-extension/${path}`, onMessage, onInstalled: event(), onStartup: event() },
     scripting: { executeScript: async () => {} },
-    tabs: { reload: async id => { reloaded.push(id); tabs.get(id).discarded=false; tabs.get(id).frozen=false; }, create: async spec => { const tab={id:++nextTabId,title:'전송용 탭',url:spec.url,status:'complete'};tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return tab; }, get: async id => tabs.get(id), query: async () => [...tabs.values()], onRemoved: event(), onUpdated: event(), sendMessage: async (tabId, message) => {
-      if (message.type === 'DICO_INSPECT') return { ok: true };
+    tabs: { reload: async id => { reloaded.push(id); tabs.get(id).discarded=false; tabs.get(id).frozen=false; }, create: async spec => { const tab={id:++nextTabId,title:'전송용 탭',url:spec.url,status:'complete'};tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return tab; }, get: async id => { const tab=tabs.get(id); if (tab?.pendingUrl && ++loadingReads>1) { tab.url=tab.pendingUrl; delete tab.pendingUrl; tab.status='complete'; } return tab; }, query: async () => [...tabs.values()], onRemoved: event(), onUpdated: event(), sendMessage: async (tabId, message) => {
+      if (message.type === 'DICO_INSPECT') { assert.equal(tabs.get(tabId).status,'complete'); assert.equal(tabs.get(tabId).pendingUrl,undefined); return { ok: true }; }
       if (message.type === 'DICO_DELIVER') {
         if (holdDelivery) { startedDelivery({...message,tabId}); await waitDelivery; }
         return { status: 'confirmed' };
@@ -110,9 +113,25 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
     assert.deepEqual(reloaded,[101],'discarded sender is reloaded, not duplicated');
     await request({type:'DICO_STOP_ALL'});
     tabs.delete(101);
+    openingTab = true;
     reply=await request({type:'DICO_START',channelId:ids[0]});
     assert.equal(reply.ok,true);
     assert.equal(created.length,3,'closed dedicated tab recreated');
+    assert.ok(loadingReads>=2,'new window waits for the committed channel URL');
+    assert.equal(reply.state.channels[0].enabled,true);
+    assert.equal(reply.state.channels[0].pending,null);
+    const recreatedId=reply.state.channels[0].target.tabId;
+    chrome.tabs.onUpdated.fire(recreatedId,{url:'about:blank'});
+    chrome.tabs.onUpdated.fire(recreatedId,{discarded:true});
+    reply=await request({type:'DICO_START',channelId:ids[0]});
+    assert.equal(reply.state.channels[0].enabled,true,'queued stale events do not stop the ready replacement');
+    assert.equal(created.length,3,'restart reuses the replacement window');
+    tabs.get(recreatedId).url='https://discord.com/channels/123/999';
+    chrome.tabs.onUpdated.fire(recreatedId,{status:'complete'});
+    await request({type:'DICO_STOP',channelId:ids[1]});
+    reply=await request({type:'DICO_GET'});
+    assert.equal(reply.state.channels[0].enabled,false,'real navigation still stops the sender');
+    assert.match(reply.state.channels[0].error,/이동/);
     await request({type:'DICO_STOP_ALL'});
   } finally {
     releaseDelivery();
