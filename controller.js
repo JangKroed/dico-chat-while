@@ -96,8 +96,10 @@ export function createController(io) {
   const recheck = async state => {
     if (!io.reconcile) return false;
     try {
-      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId}, state.pending);
+      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId, messages:state.messages}, state.pending);
       log(state, 'info', result?.status === 'confirmed' ? '게시 기록 재확인으로 본인의 전송을 확인했습니다.' : '게시 기록 재확인에서 전송을 확정하지 못했습니다.');
+      if (result?.status === 'confirmed' && result.draftAction === 'replace-next') log(state,'info','이미 게시된 공지 초안은 다음 전송 시 현재 차례 문구로 교체합니다.');
+      if (result?.status === 'confirmed' && result.draftAction === 'reuse-next') log(state,'info','다음 차례의 초안을 보존합니다. 다음 전송 시 재사용합니다.');
       return result?.status === 'confirmed';
     } catch { log(state, 'info', '게시 기록 재확인에 연결하지 못했습니다.'); return false; }
   };
@@ -138,7 +140,10 @@ export function createController(io) {
       if (!state.target) throw new Error('현재 Discord 채널을 먼저 선택해 주세요.');
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       if (!result.ok) {
-        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) { state.pending = state.draftRetryPending; await persist(state); }
+        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
+          state.pending = state.draftRetryPending; await persist(state);
+          if (await recheck(state)) { state.enabled = true; return confirmed(state); }
+        }
         throw new Error(result.error);
       }
       state.enabled = true;
@@ -171,7 +176,10 @@ export function createController(io) {
       }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       if (!result.ok) {
-        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) state.pending = state.draftRetryPending;
+        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
+          state.pending = state.draftRetryPending; await persist(state);
+          if (await recheck(state)) return confirmed(state);
+        }
         return pause(state, result.error);
       }
       if (Number.isFinite(result.cooldownMs) && result.cooldownMs > 0) return deferSlowmode(state, result.cooldownMs);
@@ -185,7 +193,7 @@ export function createController(io) {
       }
       await persist(state);
       let response;
-      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
+      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, lastSentAt: state.lastSentAt, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
       if (response?.status === 'uncertain' && await recheck(state)) response = {status:'confirmed'};
       if (response?.status === 'deferred' && Number.isFinite(response.retryAfterMs) && response.retryAfterMs > 0) {
@@ -235,7 +243,10 @@ export function createController(io) {
       if (!state.enabled) { await io.cancel(); return state; }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       if (!result.ok) {
-        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) state.pending = state.draftRetryPending;
+        if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
+          state.pending = state.draftRetryPending; await persist(state);
+          if (await recheck(state)) return confirmed(state);
+        }
         return pause(state, result.error);
       }
       // Never replay every missed interval after sleep or browser restart.

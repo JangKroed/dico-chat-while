@@ -98,7 +98,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.16';
+  const CONTENT_VERSION = '0.2.17';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -205,21 +205,39 @@
     if (!target || !matchesTarget(target)) return unknown('wrong-channel');
     if (!delivery?.id || typeof delivery.text !== 'string' || !Number.isFinite(delivery.startedAt)) return unknown('invalid-delivery');
     const found = editors();
-    if (found.length !== 1 || hasDraft(found[0])) return unknown('draft-or-editor');
+    if (found.length !== 1) return unknown('draft-or-editor');
+    const editor = found[0];
+    const draft = normalize(editor.innerText || editor.textContent || '');
+    const nextText = [0,1].includes(delivery.index) ? target.messages?.[1-delivery.index] : undefined;
+    const form = editor.closest?.('form') || editor.parentElement;
+    if (editor.querySelector('[data-slate-void="true"]') || form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) return unknown('draft-or-editor');
     const user = ownUserId(target);
     if (!user) return unknown('author-unknown');
     const candidates = new Set();
+    let nextAlreadyPosted = false;
     for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
-      if (!matchesRenderedText(delivery.text, messageText(node))) continue;
+      const rendered = messageText(node);
+      const currentMatch = matchesRenderedText(delivery.text, rendered);
+      const nextMatch = typeof nextText === 'string' && normalize(nextText) !== normalize(delivery.text) && matchesRenderedText(nextText, rendered);
+      if (!currentMatch && !nextMatch) continue;
       const row = node.closest('li') || node;
       if (row.querySelector('[class*="isSending"], [class*="isFailed"]') || row.matches('[class*="isSending"], [class*="isFailed"]')) continue;
       const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
       const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
       // No backwards tolerance: an older identical announcement is not proof.
       if (!id || created < delivery.startedAt || created > Date.now() + 2000 || authorId(row) !== user) continue;
-      candidates.add(id);
+      if (currentMatch) candidates.add(id);
+      if (nextMatch && !currentMatch) nextAlreadyPosted = true;
     }
-    return candidates.size === 1 ? {status:'confirmed'} : unknown(candidates.size ? 'multiple-matches' : 'no-proof');
+    if (nextAlreadyPosted) return unknown('next-already-posted');
+    if (candidates.size !== 1) return unknown(candidates.size ? 'multiple-matches' : 'no-proof');
+    let draftAction = 'empty';
+    if (draft) {
+      if (typeof nextText === 'string' && draft === normalize(nextText)) draftAction = 'reuse-next';
+      else if (draft === normalize(delivery.text)) draftAction = 'replace-next';
+      else return unknown('foreign-draft');
+    }
+    return {status:'confirmed',draftAction};
   }
   async function deliver(target, delivery) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
@@ -232,6 +250,14 @@
     };
     trace('received');
     try {
+      if (Number.isFinite(target.lastSentAt) && target.lastSentAt > 0) {
+        const previous = reconcile(target, {...delivery,startedAt:target.lastSentAt + 1});
+        if (previous.status === 'confirmed') {
+          trace('prior-post-confirmed', {result:'confirmed',draftAction:previous.draftAction});
+          return previous;
+        }
+        if (['multiple-matches','next-already-posted','foreign-draft'].includes(previous.reason)) return {status:'uncertain',error:'이전 전송 이후 게시 기록과 초안의 순서를 확정할 수 없습니다. 중복 방지를 위해 확인이 필요합니다.'};
+      }
       let result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
       if (result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
@@ -314,7 +340,7 @@
     if (sender.id !== chrome.runtime.id) return false;
     if (message?.type === 'DICO_RECONCILE') {
       const result = reconcile(message.target, message.delivery);
-      reportTrace(message.delivery, 'reconcile', {result:result.status});
+      reportTrace(message.delivery, 'reconcile', {result:result.status,draftAction:result.draftAction});
       respond(result); return false;
     }
     if (message?.type === 'DICO_INSPECT') { respond(inspect(message.target)); return false; }

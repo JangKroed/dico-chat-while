@@ -35,7 +35,7 @@ export function appendDiagnostics(api,events) {
   return next;
 }
 
-const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile']);
+const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed']);
 const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected'];
 const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
@@ -46,5 +46,6 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   for(const key of TRACE_BOOLEANS) if(typeof message.data?.[key]==='boolean') event[key]=message.data[key];
   for(const key of TRACE_NUMBERS) if(Number.isFinite(message.data?.[key])) event[key]=Math.max(-86400000,Math.min(86400000,Math.round(message.data[key])));
   if(['confirmed','uncertain','blocked','draft-retained','deferred'].includes(message.data?.result)) event.result=message.data.result;
+  if (['empty','replace-next','reuse-next'].includes(message.data?.draftAction)) event.draftAction=message.data.draftAction;
   return event;
 }

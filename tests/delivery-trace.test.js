@@ -5,7 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,diagnosticEvents} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
 const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678'};
-async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false) {
+async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false, alreadyPosted=false) {
  const traces=[], nodes=[];let listener, check;
  let pasted=false;
  const countdown={textContent:cooldownText,getClientRects:()=>[1]};
@@ -24,8 +24,9 @@ async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAft
   chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true};}return {allowed:true};}}},
   ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data);}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data);}},DataTransfer:class{setData(_,text){this.text=text;}},
   MutationObserver:class{constructor(fn){check=fn;}observe(){}disconnect(){}},setTimeout:fn=>setImmediate(fn),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},Date};
+ if(alreadyPosted) nodes.push({id:'message-content-'+((BigInt(Date.now())-1420070400000n)<<22n),innerText:'PRIVATE MESSAGE',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});
  runInNewContext(source,ctx);
- const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target:{...target,messages:['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']},delivery:{id:'attempt',text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
+ const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target:{...target,lastSentAt:alreadyPosted?Date.now()-1000:null,messages:['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']},delivery:{id:'attempt',index:0,text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
  return {result,traces};
 }
 test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부를 문구 없이 기록한다',async()=>{
@@ -94,4 +95,11 @@ test('붙여넣기 후 슬로우 모드가 나타나면 Enter 없이 초안 보�
 test('슬로우 모드 00:00은 정상 전송하며 설정 안내 문구를 남은 시간으로 오인하지 않는다',async()=>{
  assert.equal((await deliver(false,'','00:00')).result.status,'confirmed');
  assert.equal((await deliver(false,'','Slowmode is enabled. 2 minutes')).result.status,'confirmed');
+});
+
+test('이전 확인 이후 이미 게시한 예정 문구는 초안이 있어도 붙여넣기·Enter 없이 순서만 처리한다',async()=>{
+ const {result,traces}=await deliver(false,'PRIVATE MESSAGE','',false,true);
+ assert.equal(result.status,'confirmed');
+ assert.equal(traces.some(t=>t.stage==='before-paste'||t.stage==='enter-dispatched'),false);
+ assert.equal(traces.some(t=>t.stage==='prior-post-confirmed'),true);
 });

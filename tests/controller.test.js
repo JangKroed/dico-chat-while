@@ -312,3 +312,17 @@ test('worker 중단 뒤 실행 중 pending만 재확인하며 사용자가 중�
  state={...state,enabled:false};await r.io.save(state);
  await r.controller.recover();assert.equal(checks,1);assert.equal(r.state.enabled,false);assert.ok(r.state.pending);
 });
+
+test('초안 재시도 전 늦게 게시된 현재 공지는 원래 전송과 A/B를 비교해 재발송 없이 복구한다',async()=>{
+ const r=await configured();let sends=0;
+ r.io.send=async()=>{sends++;return {status:'draft-retained'}};
+ await r.controller.start();r.advance(30);
+ r.io.inspect=async()=>({ok:false,code:'POSSIBLY_SENT',error:'게시 흔적'});
+ r.io.reconcile=async(target,pending)=>{
+  assert.deepEqual(target.messages,['공지 A','공지 B']);assert.equal(pending.index,0);
+  return {status:'confirmed',draftAction:'replace-next'};
+ };
+ await r.controller.tick();assert.equal(sends,1);assert.equal(r.state.nextIndex,1);
+ assert.equal(r.state.enabled,true);assert.equal(r.state.pending,null);
+ assert.equal(r.state.draftRetryPending,null);
+});
