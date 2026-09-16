@@ -30,6 +30,7 @@ const elements = {
   messageBError: document.querySelector("#message-b-error"),
   interval: document.querySelector("#interval-seconds"),
   intervalError: document.querySelector("#interval-error"),
+  skipConfirmation: document.querySelector("#skip-confirmation"),
   ownUserId: document.querySelector("#own-user-id"),
   ownUserIdError: document.querySelector("#own-user-id-error"),
   saveButton: document.querySelector("#save-button"),
@@ -75,6 +76,7 @@ function getDraft() {
     messages: [elements.messageA.value, elements.messageB.value],
     intervalText: elements.interval.value,
     ownUserId: elements.ownUserId.value,
+    skipConfirmation: elements.skipConfirmation.checked,
   };
 }
 
@@ -89,6 +91,7 @@ function setFormValues(channel) {
     elements.messageB.value = "";
     elements.interval.value = "300";
     elements.ownUserId.value = "";
+    elements.skipConfirmation.checked = false;
     loadedBase = null;
     return;
   }
@@ -97,6 +100,7 @@ function setFormValues(channel) {
   elements.messageB.value = channel.messages[1];
   elements.interval.value = String(channel.intervalSeconds);
   elements.ownUserId.value = channel.ownUserId;
+  elements.skipConfirmation.checked = channel.skipConfirmation === true;
   loadedBase = settingsBase(channel);
   conflict = false;
   pendingSelectionId = null;
@@ -194,6 +198,7 @@ function getSettingsPayload() {
     messages: [elements.messageA.value, elements.messageB.value],
     intervalSeconds: Number(elements.interval.value),
     ownUserId: elements.ownUserId.value.trim(),
+    skipConfirmation: elements.skipConfirmation.checked,
   };
 }
 
@@ -356,7 +361,7 @@ function renderControls() {
   const dirty = isDirty();
   const validation = validateDraft({ showErrors: dirty });
   const editable = Boolean(channel) && !channel.enabled && !channel.pending;
-  for (const field of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId]) {
+  for (const field of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId, elements.skipConfirmation]) {
     field.disabled = !editable || busy;
   }
   elements.saveButton.disabled = !editable || busy || conflict || !dirty || !validation.valid;
@@ -386,7 +391,7 @@ function render() {
   const pendingCount = rootState.channels.filter(channel => channel.pending && !channel.enabled).length;
   elements.runBadge.textContent = pendingCount ? `${pendingCount}개 확인 필요` : runningCount ? `${runningCount}개 실행 중` : "모두 중지";
   elements.runBadge.dataset.tone = pendingCount ? "warning" : runningCount ? "active" : "idle";
-  elements.nextMessageChip.textContent = `다음 ${selectedChannel()?.nextIndex === 1 ? "B" : "A"}`;
+  elements.nextMessageChip.textContent = `다음 ${selectedChannel()?.nextIndex === 1 ? "B" : "A"}${channel?.skipConfirmation?" · 확인 생략":""}`;
   elements.messageACount.textContent = `${elements.messageA.value.length} / 2000`;
   elements.messageBCount.textContent = `${elements.messageB.value.length} / 2000`;
   renderNotice();
@@ -464,7 +469,7 @@ function chooseChannel(channelId) {
   render();
 }
 
-for (const input of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId]) {
+for (const input of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId, elements.skipConfirmation]) {
   input.addEventListener("input", () => {
     localNotice = null;
     render();

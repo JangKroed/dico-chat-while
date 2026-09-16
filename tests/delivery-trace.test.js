@@ -5,7 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,diagnosticEvents} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
 const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678'};
-async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false, alreadyPosted=false) {
+async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false, alreadyPosted=false,skipConfirmation=false) {
  const traces=[], nodes=[];let listener, check;
  let pasted=false;
  const countdown={textContent:cooldownText,getClientRects:()=>[1]};
@@ -15,7 +15,7 @@ async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAft
    if(event.type==='paste'){pasted=true;editor.innerText=event.clipboardData.text;event.defaultPrevented=true;}
    if(event.type==='keydown'&&!ignoreEnter){
     event.defaultPrevented=true;editor.innerText='';
-    nodes.push({id:'message-content-'+((BigInt(Date.now())-1420070400000n)<<22n),innerText:'PRIVATE MESSAGE',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check();
+    nodes.push({id:'message-content-'+((BigInt(Date.now())-1420070400000n)<<22n),innerText:'PRIVATE MESSAGE',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
    }
   }};
  const selection={anchorNode:editor,focusNode:editor,rangeCount:1,isCollapsed:true,removeAllRanges(){},addRange(){}};
@@ -26,7 +26,7 @@ async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAft
   MutationObserver:class{constructor(fn){check=fn;}observe(){}disconnect(){}},setTimeout:fn=>setImmediate(fn),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},Date};
  if(alreadyPosted) nodes.push({id:'message-content-'+((BigInt(Date.now())-1420070400000n)<<22n),innerText:'PRIVATE MESSAGE',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});
  runInNewContext(source,ctx);
- const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target:{...target,lastSentAt:alreadyPosted?Date.now()-1000:null,messages:['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']},delivery:{id:'attempt',index:0,text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
+ const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target:{...target,skipConfirmation,lastSentAt:alreadyPosted?Date.now()-1000:null,messages:['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']},delivery:{id:'attempt',index:0,text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
  return {result,traces};
 }
 test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부를 문구 없이 기록한다',async()=>{
@@ -102,4 +102,14 @@ test('이전 확인 이후 이미 게시한 예정 문구는 초안이 있어도
  assert.equal(result.status,'confirmed');
  assert.equal(traces.some(t=>t.stage==='before-paste'||t.stage==='enter-dispatched'),false);
  assert.equal(traces.some(t=>t.stage==='prior-post-confirmed'),true);
+});
+
+test('확인 생략 모드에서는 Enter가 무시돼도 게시 감시 없이 미검증 시도로 반환한다',async()=>{
+ const {result,traces}=await deliver(true,'','',false,false,true);
+ assert.equal(result.status,'unverified');assert.equal(traces.filter(t=>t.stage==='enter-dispatched').length,1);
+ assert.equal(traces.some(t=>t.stage==='observation'),false);
+});
+test('확인 생략이어도 개인 초안과 슬로우 모드 검사는 유지한다',async()=>{
+ assert.equal((await deliver(false,'개인 초안','',false,false,true)).result.status,'blocked');
+ assert.equal((await deliver(false,'','00:08',false,false,true)).result.status,'deferred');
 });

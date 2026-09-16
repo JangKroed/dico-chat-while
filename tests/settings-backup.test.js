@@ -29,3 +29,9 @@ test('채널별 슬로우 모드 최소값을 백업·복원하고 이전 형식
  delete backup.channels[0].slowmodeSeconds;
  assert.equal(importSettings(backup)[0].slowmodeSeconds,null);
 });
+
+test('확인 생략 옵션은 백업에 보존되고 오래된 백업은 기본 해제다',()=>{
+ const backup=exportSettings({channels:[{...channel,skipConfirmation:true}]});
+ assert.equal(importSettings(backup)[0].skipConfirmation,true);delete backup.channels[0].skipConfirmation;
+ assert.equal(importSettings(backup)[0].skipConfirmation,false);
+});

@@ -15,7 +15,7 @@ export function diagnosticEvents(previous, current, now = Date.now()) {
     if ((channel.draftRetries || 0) > (before?.draftRetries || 0)) events.push({...base,kind:'draft-retry-scheduled',attempt:channel.draftRetries});
     if (channel.error && channel.error !== before?.error) events.push({...base, kind:'error', reason:String(channel.error).slice(0,500)});
     if (before && before.enabled !== channel.enabled) events.push({...base, kind:channel.enabled?'started':channel.error?'automatic-stop':'stopped', reason:channel.error ? String(channel.error).slice(0,500) : '실행 상태 변경'});
-    if (before && channel.lastSentAt && channel.lastSentAt !== before.lastSentAt) events.push({...base,kind:before.pending && !before.enabled ? 'manual-confirmed' : 'delivery-confirmed'});
+    if (before && channel.lastSentAt && channel.lastSentAt !== before.lastSentAt) events.push({...base,kind:channel.lastOutcome==='unverified'?'delivery-unverified':before.pending && !before.enabled ? 'manual-confirmed' : 'delivery-confirmed'});
     if (before?.pending && !before.enabled && !channel.pending && channel.lastSentAt === before.lastSentAt) events.push({...base,kind:'manual-not-sent'});
     if (before && !before.pending && channel.pending) events.push({...base,kind:'delivery-started'});
     return events;
@@ -47,7 +47,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   if (/^\d+\.\d+\.\d+$/.test(message.version||'')) event.contentVersion=message.version;
   for(const key of TRACE_BOOLEANS) if(typeof message.data?.[key]==='boolean') event[key]=message.data[key];
   for(const key of TRACE_NUMBERS) if(Number.isFinite(message.data?.[key])) event[key]=Math.max(-86400000,Math.min(86400000,Math.round(message.data[key])));
-  if(['confirmed','uncertain','blocked','draft-retained','deferred','prepared'].includes(message.data?.result)) event.result=message.data.result;
+  if(['confirmed','uncertain','blocked','draft-retained','deferred','prepared','unverified'].includes(message.data?.result)) event.result=message.data.result;
   if (['empty','replace-next','reuse-next'].includes(message.data?.draftAction)) event.draftAction=message.data.draftAction;
   return event;
 }

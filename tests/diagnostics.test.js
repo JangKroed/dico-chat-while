@@ -19,3 +19,10 @@ test('진단 로그는 최근 500개로 제한된다',async()=>{
  assert.equal(saved.diagnosticLog.length,500);
  assert.equal(saved.diagnosticLog.at(-1).kind,'error');
 });
+
+test('미검증 시도를 전송 성공으로 기록하지 않는다',()=>{
+ const before={channels:[{id:'a',enabled:true,pending:{id:'delivery'},lastSentAt:null}]};
+ const after={channels:[{id:'a',enabled:true,pending:null,lastSentAt:100,lastOutcome:'unverified'}]};
+ const events=diagnosticEvents(before,after);assert.ok(events.some(e=>e.kind==='delivery-unverified'));
+ assert.equal(events.some(e=>e.kind==='delivery-confirmed'),false);
+});

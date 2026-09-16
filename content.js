@@ -131,8 +131,8 @@
     if (form.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) {
       return { ok: false, error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
     }
-    if (!document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
-    if (target.draftRetrySince) {
+    if (!target.skipConfirmation && !document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
+    if (!target.skipConfirmation && target.draftRetrySince) {
       const expected = target.expectedText;
       for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
         const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
@@ -144,7 +144,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.19';
+  const CONTENT_VERSION = '0.2.20';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -309,7 +309,7 @@
     };
     trace('received');
     try {
-      if (Number.isFinite(target.lastSentAt) && target.lastSentAt > 0) {
+      if (!target.skipConfirmation && Number.isFinite(target.lastSentAt) && target.lastSentAt > 0) {
         const previous = reconcile(target, {...delivery,startedAt:target.lastSentAt + 1});
         if (previous.status === 'confirmed') {
           trace('prior-post-confirmed', {result:'confirmed',draftAction:previous.draftAction});
@@ -399,13 +399,14 @@
         trace('slowmode-wait', cooldown);
         return {status:'deferred',retryAfterMs:cooldown.cooldownMs,draftPrepared:true};
       }
-      watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence));
+      if (!target.skipConfirmation) watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence));
       trace('before-enter');
       const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
       const keyup = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
       editor.dispatchEvent(keydown);
       editor.dispatchEvent(keyup);
       trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
+      if (target.skipConfirmation) { trace('finished',{result:'unverified'}); return {status:'unverified'}; }
       const outcome = await watcher.promise;
       trace('finished', {result:outcome.status});
       return outcome;

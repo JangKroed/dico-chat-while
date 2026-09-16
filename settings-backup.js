@@ -2,7 +2,7 @@ import {parseChannel,validateSettings,minimumInterval} from './controller.js';
 export function exportSettings(root) {
   if (root.channels.some(c=>c.enabled || c.pending)) throw new Error('모두 중지하고 미확인 전송 결과를 확인한 뒤 백업하세요.');
   return {format:'dico-settings',version:1,createdAt:new Date().toISOString(),channels:root.channels.map(c=>({
-    name:c.name,slowmodeSeconds:c.slowmodeSeconds ?? null,messages:[...c.messages],intervalSeconds:c.intervalSeconds,ownUserId:c.ownUserId,
+    name:c.name,skipConfirmation:c.skipConfirmation===true,slowmodeSeconds:c.slowmodeSeconds ?? null,messages:[...c.messages],intervalSeconds:c.intervalSeconds,ownUserId:c.ownUserId,
     nextIndex:c.nextIndex,url:c.target?.url || null,
   }))};
 }
@@ -18,7 +18,7 @@ export function importSettings(data) {
     const key=parsed && `${parsed.guildId}/${parsed.channelId}`;
     if(key && destinations.has(key)) throw new Error('백업에 중복 채팅방이 있습니다.');
     if(key)destinations.add(key);
-    return {name:c.name.trim(),messages:[...c.messages],intervalSeconds:Math.max(c.intervalSeconds,minimumInterval(c)),slowmodeSeconds:c.slowmodeSeconds??null,ownUserId:c.ownUserId||'',nextIndex:c.nextIndex,
+    return {name:c.name.trim(),skipConfirmation:c.skipConfirmation===true,messages:[...c.messages],intervalSeconds:Math.max(c.intervalSeconds,minimumInterval(c)),slowmodeSeconds:c.slowmodeSeconds??null,ownUserId:c.ownUserId||'',nextIndex:c.nextIndex,
       target:parsed?{...parsed,url:`https://discord.com/channels/${key}`,tabId:0,title:c.name}:null};
   });
 }

@@ -5,6 +5,7 @@ const DEFAULT_CHANNEL = Object.freeze({
   messages: ["", ""],
   intervalSeconds: 300,
   ownUserId: "",
+  skipConfirmation: false,
   enabled: false,
   target: null,
   nextIndex: 0,
@@ -28,6 +29,7 @@ export function normalizeChannel(value) {
       : [...DEFAULT_CHANNEL.messages],
     intervalSeconds: Number.isInteger(channel.intervalSeconds) ? channel.intervalSeconds : 300,
     ownUserId: String(channel.ownUserId || ""),
+    skipConfirmation: channel.skipConfirmation === true,
     history: Array.isArray(channel.history) ? channel.history : [],
     nextIndex: channel.nextIndex === 1 ? 1 : 0,
   };
@@ -51,6 +53,7 @@ export function settingsBase(channel) {
     messages: [...normalized.messages],
     intervalText: String(normalized.intervalSeconds),
     ownUserId: normalized.ownUserId,
+    skipConfirmation: normalized.skipConfirmation,
   };
 }
 
@@ -60,7 +63,8 @@ export function draftMatchesBase(draft, base) {
     draft.messages[0] === base.messages[0] &&
     draft.messages[1] === base.messages[1] &&
     draft.intervalText === base.intervalText &&
-    draft.ownUserId === base.ownUserId;
+    draft.ownUserId === base.ownUserId &&
+    Boolean(draft.skipConfirmation) === Boolean(base.skipConfirmation);
 }
 
 export function selectExistingChannel(channels, selectedId) {

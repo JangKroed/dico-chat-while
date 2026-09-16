@@ -1,6 +1,8 @@
 export const initialState = () => ({
   version: 1,
   messages: ['', ''],
+  skipConfirmation: false,
+  lastOutcome: null,
   ownUserId: '',
   intervalSeconds: 300,
   slowmodeSeconds: null,
@@ -31,6 +33,7 @@ export function parseChannel(value) {
 export const minimumInterval = channel => Number.isInteger(channel?.slowmodeSeconds) && channel.slowmodeSeconds>0 && channel.slowmodeSeconds<=21600 ? Math.max(30,channel.slowmodeSeconds+3) : 30;
 
 export function validateSettings(settings) {
+  if (settings?.skipConfirmation!==undefined && typeof settings.skipConfirmation!=='boolean') throw new Error('전송 확인 옵션이 올바르지 않습니다.');
   if (settings?.ownUserId && !/^\d{17,20}$/.test(settings.ownUserId)) throw new Error('내 Discord 사용자 ID는 17~20자리 숫자로 입력해 주세요.');
   if (!Array.isArray(settings?.messages) || settings.messages.length !== 2 ||
       settings.messages.some(text => typeof text !== 'string' || !text.trim() || text.length > 2000)) {
@@ -53,7 +56,7 @@ export function createController(io) {
   };
   const persist = async state => { await io.save(state); return state; };
   const scheduleNext = state => io.schedule(io.prepare && !state.prepared ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
-  const destination = state => ({...state.target,ownUserId:state.ownUserId,lastSentAt:state.lastSentAt,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
+  const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
   const pause = async (state, error) => {
     state.prepared = null;
     state.enabled = false;
@@ -95,12 +98,13 @@ export function createController(io) {
       log(state,'info',`슬로우 모드 ${seconds}초에 여유 3초를 더해 주기를 ${minimum}초로 조정했습니다.`);
     }
   };
-  const confirmed = async state => {
+  const confirmed = async (state, verified=true) => {
+    state.lastOutcome=verified?'confirmed':'unverified';
     state.prepared = null;
     state.draftRetries = 0;
     state.draftRetrySince = null;
     state.draftRetryPending = null;
-    log(state, 'success', `문구 ${state.pending.index === 0 ? 'A' : 'B'} 전송 확인`);
+    log(state, verified?'success':'info', `문구 ${state.pending.index === 0 ? 'A' : 'B'} ${verified?'전송 확인':'전송 시도 · 결과 확인 생략'}`);
     state.nextIndex = 1 - state.pending.index;
     state.pending = null;
     state.lastSentAt = io.now();
@@ -114,7 +118,7 @@ export function createController(io) {
   const recheck = async state => {
     if (!io.reconcile) return false;
     try {
-      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId, messages:state.messages}, state.pending);
+      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation, messages:state.messages}, state.pending);
       log(state, 'info', result?.status === 'confirmed' ? '게시 기록 재확인으로 본인의 전송을 확인했습니다.' : '게시 기록 재확인에서 전송을 확정하지 못했습니다.');
       if (result?.status === 'confirmed' && result.draftAction === 'replace-next') log(state,'info','이미 게시된 공지 초안은 다음 전송 시 현재 차례 문구로 교체합니다.');
       if (result?.status === 'confirmed' && result.draftAction === 'reuse-next') log(state,'info','다음 차례의 초안을 보존합니다. 다음 전송 시 재사용합니다.');
@@ -129,6 +133,7 @@ export function createController(io) {
       requireEditable(state);
       if (settings.intervalSeconds<minimumInterval(state)) throw new Error(`이 채널은 슬로우 모드 때문에 최소 ${minimumInterval(state)}초 이상으로 설정해야 합니다.`);
       state.messages = [...settings.messages];
+      state.skipConfirmation = settings.skipConfirmation === true;
       state.ownUserId = settings.ownUserId || '';
       state.intervalSeconds = settings.intervalSeconds;
       state.error = null;
@@ -159,7 +164,7 @@ export function createController(io) {
       if (state.enabled) return state;
       validateSettings(state);
       if (!state.target) throw new Error('현재 Discord 채널을 먼저 선택해 주세요.');
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
@@ -189,6 +194,7 @@ export function createController(io) {
     async tick() {
       const state = await read();
       if (!state.enabled) return state;
+      if (state.pending && state.skipConfirmation) return confirmed(state,false);
       if (state.pending && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '이전 전송 결과가 확인되지 않아 중지했습니다. 채널을 확인해 주세요.');
       if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
@@ -199,7 +205,7 @@ export function createController(io) {
         if (state.prepared && io.waitUntil && state.nextRunAt-io.now()<=3000) { await io.waitUntil(state.nextRunAt); return api.tick(); }
         return state;
       }
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
@@ -249,8 +255,9 @@ export function createController(io) {
       }
       await persist(state);
       let response;
-      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, lastSentAt: state.lastSentAt, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
+      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, lastSentAt: state.lastSentAt, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
+      if (state.skipConfirmation && (!response?.status || ['unverified','uncertain'].includes(response.status))) return confirmed(state,false);
       if (response?.status === 'uncertain' && await recheck(state)) response = {status:'confirmed'};
       if (response?.status === 'deferred' && Number.isFinite(response.retryAfterMs) && response.retryAfterMs > 0) {
         if (response.draftPrepared) {
@@ -281,6 +288,7 @@ export function createController(io) {
       const state = await read();
       if (state.enabled || !state.pending) throw new Error('확인이 필요한 중지된 전송이 없습니다.');
       if (!['sent', 'not-sent'].includes(resolution)) throw new Error('올바른 전송 결과를 선택해 주세요.');
+      state.lastOutcome=resolution==='sent'?'confirmed':null;
       if (resolution === 'sent') {
         state.nextIndex = 1 - state.pending.index;
         state.lastSentAt = state.pending.startedAt;
@@ -296,11 +304,12 @@ export function createController(io) {
     },
     async recover({ preserveDue = false } = {}) {
       const state = await read();
+      if (state.pending && state.enabled && state.skipConfirmation) return confirmed(state,false);
       if (state.pending && state.enabled && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
       if (!state.enabled) { await io.cancel(); return state; }
       if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {

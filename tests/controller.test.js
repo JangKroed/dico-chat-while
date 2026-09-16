@@ -379,3 +379,21 @@ test('입력 준비가 예약보다 늦으면 준비 완료 뒤에만 전송한�
  r.io.send=async(_,delivery)=>{at=delivery.scheduledAt;return {status:'confirmed'}};
  await r.controller.start();assert.equal(at,1005000);assert.equal(r.state.lastSentAt,1005000);
 });
+
+test('채널별 확인 생략은 미검증 시도로 다음 차례를 예약하고 재확인을 호출하지 않는다',async()=>{
+ const r=await configured();await r.controller.updateSettings({messages:['공지 A','공지 B'],intervalSeconds:30,skipConfirmation:true});
+ r.io.send=async target=>{assert.equal(target.skipConfirmation,true);return {status:'unverified'}};
+ r.io.reconcile=async()=>{throw new Error('호출하면 안 됨')};
+ await r.controller.start();assert.equal(r.state.nextIndex,1);assert.equal(r.state.lastOutcome,'unverified');
+ assert.equal(r.state.enabled,true);assert.equal(r.state.pending,null);assert.equal(r.alarm,1030000);
+ assert.match(r.state.history[0].text,/결과 확인 생략/);
+ await r.controller.stop();await r.controller.updateSettings({messages:['공지 A','공지 B'],intervalSeconds:30,skipConfirmation:false});
+ r.io.send=async()=>({status:'uncertain'});await r.controller.start();assert.equal(r.state.enabled,false);assert.ok(r.state.pending);
+});
+test('확인 생략 시 응답 유실은 누락 가능성을 수용하고 진행하지만 입력 전 차단은 중지한다',async()=>{
+ for(const blocked of [false,true]){
+ const r=await configured();await r.controller.updateSettings({messages:['A','B'],intervalSeconds:30,skipConfirmation:true});
+ r.io.send=async()=>{if(blocked)return {status:'blocked',error:'문구 변경'};throw new Error('lost')};
+ await r.controller.start();assert.equal(r.state.nextIndex,blocked?0:1);assert.equal(r.state.enabled,!blocked);assert.equal(r.state.pending,null);
+ }
+});
