@@ -33,7 +33,7 @@ test('실제 background 메시지 연결: 채널별 예약·중지·오래된 �
       const tab=spec.tabId?tabs.get(spec.tabId):{id:++nextTabId,title:'전송용 창',url:spec.url,status:'complete'};
       tabs.set(tab.id,tab);created.push({...spec,id:tab.id});return {id:tab.id,tabs:[tab]};
     } },
-    storage: { local: { get: async () => ({ state: structuredClone(stored) }), set: async ({state}) => { stored = structuredClone(state); } } },
+    storage: { local: { get: async () => ({ state: structuredClone(stored) }), set: async values => { if ('state' in values) stored = structuredClone(values.state); } } },
     action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
     alarms: { create: async (name, spec) => alarms.set(name, spec), clear: async name => alarms.delete(name), onAlarm },
     runtime: { id: 'test-extension', getURL: path => `chrome-extension://test-extension/${path}`, onMessage, onInstalled: event(), onStartup: event() },

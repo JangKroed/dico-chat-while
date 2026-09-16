@@ -19,6 +19,8 @@
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
       <section class="card" aria-labelledby="notification-title">
         <h2 id="notification-title">오류 알림</h2>
+        <button id="download-diagnostics" class="button button-secondary button-small" type="button">진단 로그 다운로드</button>
+        <p id="diagnostic-status" class="field-help" role="status">최근 500개 진단 기록을 보관합니다. 공지 문구·계정 정보는 포함하지 않습니다.</p>
         <label><input id="error-notifications-enabled" type="checkbox" checked> 모든 채널의 오류 알림 받기</label>
         <p id="notification-status" class="field-help" role="status">알림 설정 확인 중…</p>
         <button id="test-notification" class="button button-secondary button-small" type="button">테스트 알림</button>
@@ -139,5 +141,6 @@
     </main>
     <script type="module" src="ui.js"></script>
     <script type="module" src="notification-settings.js"></script>
+    <script type="module" src="diagnostic-settings.js"></script>
   </body>
 </html>

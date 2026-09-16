@@ -1,3 +1,4 @@
+import { recordDiagnostics } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
 import { waitForReady } from './readiness.js';
 import { createChannelManager } from './channel-manager.js';
@@ -47,6 +48,8 @@ const manager = createChannelManager({
   save: async state => {
     const previous = (await chrome.storage.local.get('state')).state;
     await chrome.storage.local.set({ state });
+    try { await recordDiagnostics(chrome, previous, state); }
+    catch (error) { console.warn('DICO diagnostics:', error.message); }
     try { await notifyChannelErrors(chrome, previous, state); }
     catch (error) { console.warn('DICO notification:', error.message); }
     const active = state.channels.filter(channel => channel.enabled).length;
