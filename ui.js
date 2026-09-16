@@ -362,6 +362,8 @@ function renderControls() {
   elements.startButton.disabled = busy || !channel || Boolean(channel.enabled) || Boolean(channel.pending) || dirty || conflict || !validation.valid || !channel.target;
   elements.stopButton.hidden = !channel?.enabled;
   elements.stopButton.disabled = !channel?.enabled;
+  const waitingForOtherAction = Boolean(busy) && Boolean(channel?.pending) && !channel.enabled;
+  elements.resolveSentButton.textContent = waitingForOtherAction ? '다른 작업 완료 대기 중' : '전송됨';
   elements.resolveSentButton.disabled = busy;
   elements.resolveNotSentButton.disabled = busy;
   elements.startAllButton.disabled = busy || conflict || dirty || !rootState.channels.some(item => !item.enabled && !item.pending);

@@ -9,12 +9,27 @@
   const matchesRenderedText = (source, rendered) => {
     if (normalize(source) === normalize(rendered)) return true;
     // Unsupported constructs stay conservative (code, links, emphasis, etc.).
-    if (/[`*_~\[\]<>]/.test(source)) return false;
+    if (/[`*_\[\]<>]/.test(source) || source.includes('~~')) return false;
     const plain = source.split('\n').map(line => line
       .replace(/^ {0,3}#{1,3} +/, '')
       .replace(/^ {0,3}[-+] +/, '')).join('\n');
     return comparableLines(plain) === comparableLines(rendered);
   };
+  function messageText(node) {
+    // Discord appends screen-reader punctuation to headings/list items.
+    // Traverse only message content; preserve real punctuation and block breaks.
+    if (!node.childNodes) return node.innerText || node.textContent || '';
+    const read = element => {
+      if (element.nodeType === 3) return element.textContent || '';
+      if (element.nodeType !== 1) return '';
+      if (element.getAttribute('aria-hidden') === 'true' ||
+          /(?:^|\s)hiddenVisually[_\s]/.test(element.getAttribute('class') || '')) return '';
+      if (element.tagName === 'BR') return '\n';
+      const text = [...element.childNodes].map(read).join('');
+      return /^(H[1-6]|LI|UL|OL|P|DIV|BLOCKQUOTE)$/.test(element.tagName) ? `\n${text}\n` : text;
+    };
+    return [...node.childNodes].map(read).join('');
+  }
   const editors = () => [...document.querySelectorAll('main [role="textbox"][contenteditable="true"][data-slate-editor="true"], [role="main"] [role="textbox"][contenteditable="true"][data-slate-editor="true"]')]
     .filter(element => element.getClientRects().length > 0 && element.getAttribute('aria-disabled') !== 'true');
   const matchesTarget = target => location.origin === 'https://discord.com' &&
@@ -78,7 +93,7 @@
       const empty = liveEditor && !normalize(liveEditor.innerText || liveEditor.textContent || '');
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
-        if (!matchesRenderedText(text, node.innerText || node.textContent || '')) {
+        if (!matchesRenderedText(text, messageText(node))) {
           detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
           continue;
         }

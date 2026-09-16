@@ -12,3 +12,18 @@ test('제목과 목록의 렌더링 후 텍스트를 비교한다',()=>{
  assert.equal(matches('**공지**','공지'),false);
  assert.equal(matches('가격 -20','가격 20'),false);
 });
+
+test('일반 범위 물결표는 서식 차단 대상이 아니다',()=>{
+ assert.equal(matches('### 제목\n- 공용 35~43제 장비','제목\n공용 35~43제 장비'),true);
+ assert.equal(matches('### 제목\n- ~~취소~~','제목\n취소'),false);
+});
+test('Discord 숨김 쉼표는 제외하고 실제 문장 쉼표는 보존한다',()=>{
+ const read=runInNewContext(helpers+'\nmessageText');
+ const text=value=>({nodeType:3,textContent:value});
+ const element=(tag,children,cls='')=>({nodeType:1,tagName:tag,childNodes:children,getAttribute:key=>key==='class'?cls:null});
+ const hidden=()=>element('SPAN',[text(',')],'hiddenVisually_b18fe2');
+ const dom=element('DIV',[element('H3',[text('테스트 제목'),hidden()]),element('UL',[element('LI',[text('궁수, 해적 35~43제'),hidden()]),element('LI',[text('메용20• 리저렉션 ### 상담'),hidden()])])]);
+ const rendered=read(dom);
+ assert.equal(matches('### 테스트 제목\n- 궁수, 해적 35~43제\n- 메용20• 리저렉션 ### 상담',rendered),true);
+ assert.equal(matches('### 테스트 제목\n- 궁수 해적 35~43제\n- 메용20• 리저렉션 ### 상담',rendered),false);
+});
