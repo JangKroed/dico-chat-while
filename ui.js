@@ -312,7 +312,7 @@ function renderSchedule() {
     elements.scheduleLabel.textContent = "일정이 중지되어 있습니다";
     elements.scheduleDetail.textContent = conflict ? "최신 설정을 먼저 불러오세요." : isDirty() ? "변경한 설정을 먼저 저장하세요." : "다음 차례를 유지한 채 시작할 수 있어요.";
   } else {
-    elements.scheduleLabel.textContent = `다음 메시지 ${channel.nextIndex === 1 ? "B" : "A"}`;
+    elements.scheduleLabel.textContent = `${channel.slowmodeUntil ? "슬로우 모드 대기 · " : ""}다음 메시지 ${channel.nextIndex === 1 ? "B" : "A"}`;
     const remaining = formatRemaining(channel.nextRunAt);
     const exact = formatDateTime(channel.nextRunAt);
     elements.scheduleDetail.textContent = remaining && exact ? `${remaining} · ${exact}` : "다음 실행 시간을 계산하고 있어요.";

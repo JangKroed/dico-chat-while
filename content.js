@@ -60,6 +60,21 @@
     }
     return null;
   }
+  // Read only the composer countdown, never message text or the channel's
+  // configured slowmode duration (which may not apply to this member).
+  function slowmode(editor) {
+    const form = editor?.closest('form') || editor?.parentElement;
+    const nodes = [...(form?.querySelectorAll?.('[class*="slowModeCooldown"], [class*="slowmodeCooldown"]') || [])]
+      .filter(node => node.getClientRects().length > 0);
+    let seconds = 0;
+    for (const node of nodes) {
+      const text = (node.textContent || '').trim();
+      const match = text.match(/^(?:(\d{1,2}):)?(\d{1,3}):(\d{2})$/);
+      if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) continue;
+      seconds = Math.max(seconds, Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
+    }
+    return {slowmodeDetected:nodes.length > 0, cooldownMs:Math.min(seconds,21600)*1000};
+  }
   function inspect(target) {
     if (!target || !matchesTarget(target)) return { ok: false, error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
     const found = editors();
@@ -81,9 +96,9 @@
         }
       }
     }
-    return { ok: true };
+    return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.14';
+  const CONTENT_VERSION = '0.2.15';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -98,7 +113,7 @@
       selectionInside: Boolean(editor && selection?.anchorNode && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)),
       selectionCollapsed: Boolean(selection?.isCollapsed), draftLength: draft.length,
       draftEmpty: !draft, textMatches: draft === normalize(text), composing,
-      targetMatches: matchesTarget(target),
+      targetMatches: matchesTarget(target), ...slowmode(editor),
     };
   }
   function reportTrace(delivery, stage, data = {}) {
@@ -198,6 +213,7 @@
     try {
       let result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
+      if (result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
       const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id });
       if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
       result = inspect(target);
@@ -251,6 +267,11 @@
       }
       if (!matchesTarget(target) || !editor.isConnected || normalize(editor.innerText || editor.textContent || '') !== normalize(delivery.text)) {
         return { status: 'uncertain', error: '전송 직전에 채널이나 입력 내용이 변경되었습니다. 초안을 확인해 주세요.' };
+      }
+      const cooldown = slowmode(editor);
+      if (cooldown.cooldownMs > 0) {
+        trace('slowmode-wait', cooldown);
+        return {status:'deferred',retryAfterMs:cooldown.cooldownMs,draftPrepared:true};
       }
       watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence));
       trace('before-enter');

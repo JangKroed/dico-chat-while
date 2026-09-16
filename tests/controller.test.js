@@ -248,3 +248,41 @@ test('재시도 전에 늦게 게시된 흔적이 발견되면 재전송 없이 
  assert.equal(calls,1);assert.equal(r.state.enabled,false);assert.equal(r.state.pending.id,original);
  await r.controller.resolvePending('sent');assert.equal(r.state.nextIndex,1);assert.equal(r.state.draftRetrySince,null);
 });
+
+test('슬로우 모드가 남아 있으면 입력하지 않고 A 차례로 대기한 뒤 한 번 전송한다', async () => {
+  const r = await configured();
+  r.io.inspect = async () => ({ok:true,cooldownMs:65000});
+  await r.controller.start();
+  assert.equal(r.sent.length,0);
+  assert.equal(r.state.enabled,true);
+  assert.equal(r.state.pending,null);
+  assert.equal(r.state.nextIndex,0);
+  assert.equal(r.alarm,1066500);
+  r.advance(66.5);
+  r.io.inspect = async () => ({ok:true,cooldownMs:0});
+  await r.controller.tick();
+  assert.deepEqual(r.sent,['공지 A']);
+  assert.equal(r.state.nextIndex,1);
+  assert.equal(r.state.slowmodeUntil,null);
+});
+test('입력 후 제한을 발견하면 재시도 횟수 없이 대기하고 수동 게시 흔적은 보호한다',async()=>{
+ const r=await configured();
+ r.io.send=async()=>({status:'deferred',retryAfterMs:1000,draftPrepared:true});
+ await r.controller.start();
+ assert.equal(r.state.pending,null);
+ assert.equal(r.state.draftRetries,0);
+ assert.equal(r.state.nextIndex,0);
+ assert.equal(r.state.draftRetrySince,1000000);
+ assert.equal(r.alarm,1030000);
+ r.advance(30);
+ r.io.inspect=async()=>({ok:false,code:'POSSIBLY_SENT',error:'게시 흔적'});
+ await r.controller.tick();
+ assert.equal(r.state.enabled,false);
+ assert.ok(r.state.pending);
+});
+test('슬로우 모드 대기 중 중지하면 알람을 해제하고 재개 시 현재 제한을 다시 확인한다',async()=>{
+ const r=await configured();r.io.inspect=async()=>({ok:true,cooldownMs:120000});
+ await r.controller.start();await r.controller.stop();r.advance(130);
+ await r.controller.tick();assert.equal(r.sent.length,0);assert.equal(r.alarm,null);
+ r.io.inspect=async()=>({ok:true});await r.controller.start();assert.deepEqual(r.sent,['공지 A']);
+});

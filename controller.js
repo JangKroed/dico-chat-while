@@ -11,6 +11,7 @@ export const initialState = () => ({
   error: null,
   history: [],
   lastSentAt: null,
+  slowmodeUntil: null,
   draftRetries: 0,
   draftRetrySince: null,
   draftRetryPending: null,
@@ -54,6 +55,19 @@ export function createController(io) {
     log(state, 'error', error);
     await persist(state);
     await io.cancel();
+    return state;
+  };
+  const deferSlowmode = async (state, milliseconds) => {
+    state.pending = null;
+    state.error = null;
+    // Alarm-based waiting survives worker suspension and does not occupy a
+    // delivery timeout. The countdown is checked again before the next send.
+    state.nextRunAt = io.now() + Math.max(30000, Math.min(21600000, milliseconds) + 1500);
+    state.slowmodeUntil = state.nextRunAt;
+    log(state, 'info', '슬로우 모드 해제를 기다립니다. 문구 차례는 유지합니다.');
+    await persist(state);
+    try { await io.schedule(state.nextRunAt); }
+    catch { return pause(state, '슬로우 모드 대기 예약을 등록하지 못했습니다.'); }
     return state;
   };
   const requireEditable = state => {
@@ -136,6 +150,8 @@ export function createController(io) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) state.pending = state.draftRetryPending;
         return pause(state, result.error);
       }
+      if (Number.isFinite(result.cooldownMs) && result.cooldownMs > 0) return deferSlowmode(state, result.cooldownMs);
+      state.slowmodeUntil = null;
       state.pending = { id: io.id(), index: state.nextIndex, text: state.messages[state.nextIndex], scheduledAt: state.nextRunAt, startedAt: io.now() };
       // Keep a watchdog alarm in case the worker is terminated during delivery.
       try { await io.schedule(io.now() + 60000); }
@@ -147,6 +163,13 @@ export function createController(io) {
       let response;
       try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
+      if (response?.status === 'deferred' && Number.isFinite(response.retryAfterMs) && response.retryAfterMs > 0) {
+        if (response.draftPrepared) {
+          state.draftRetrySince ||= state.pending.startedAt;
+          state.draftRetryPending ||= state.pending;
+        }
+        return deferSlowmode(state, response.retryAfterMs);
+      }
       if (response?.status === 'draft-retained' && (state.draftRetries || 0) < 3) {
         state.draftRetries = (state.draftRetries || 0) + 1;
         state.draftRetrySince ||= state.pending.startedAt;

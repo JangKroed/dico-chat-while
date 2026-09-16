@@ -5,11 +5,14 @@ import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,diagnosticEvents} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
 const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678'};
-async function deliver(ignoreEnter=false, draft='') {
+async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false) {
  const traces=[], nodes=[];let listener, check;
- const editor={innerText:draft,isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>({querySelector:()=>null}),contains:n=>n===editor,
+ let pasted=false;
+ const countdown={textContent:cooldownText,getClientRects:()=>[1]};
+ const form={querySelector:()=>null,querySelectorAll:()=>cooldownText && (!cooldownAfterPaste || pasted)?[countdown]:[]};
+ const editor={innerText:draft,isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>form,contains:n=>n===editor,
   focus:()=>{document.activeElement=editor;},dispatchEvent:event=>{
-   if(event.type==='paste'){editor.innerText=event.clipboardData.text;event.defaultPrevented=true;}
+   if(event.type==='paste'){pasted=true;editor.innerText=event.clipboardData.text;event.defaultPrevented=true;}
    if(event.type==='keydown'&&!ignoreEnter){
     event.defaultPrevented=true;editor.innerText='';
     nodes.push({id:'message-content-'+((BigInt(Date.now())-1420070400000n)<<22n),innerText:'PRIVATE MESSAGE',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check();
@@ -75,4 +78,20 @@ test('공지 A/B가 아닌 개인 초안은 입력과 Enter 없이 보존한다'
  const {result,traces}=await deliver(false,'MY PRIVATE DRAFT');
  assert.equal(result.status,'blocked');
  assert.equal(traces.some(t=>t.stage==='before-paste'||t.stage==='enter-dispatched'),false);
+});
+
+test('슬로우 모드 01:05 중에는 붙여넣기와 Enter 없이 대기로 반환한다',async()=>{
+ const {result,traces}=await deliver(false,'','01:05');
+ assert.equal(result.status,'deferred');assert.equal(result.retryAfterMs,65000);
+ assert.equal(traces.some(t=>t.stage==='before-paste'||t.stage==='enter-dispatched'),false);
+});
+test('붙여넣기 후 슬로우 모드가 나타나면 Enter 없이 초안 보호 정보를 반환한다',async()=>{
+ const {result,traces}=await deliver(false,'','00:08',true);
+ assert.equal(result.status,'deferred');assert.equal(result.draftPrepared,true);
+ assert.equal(traces.some(t=>t.stage==='enter-dispatched'),false);
+ assert.equal(traces.find(t=>t.stage==='slowmode-wait').data.cooldownMs,8000);
+});
+test('슬로우 모드 00:00은 정상 전송하며 설정 안내 문구를 남은 시간으로 오인하지 않는다',async()=>{
+ assert.equal((await deliver(false,'','00:00')).result.status,'confirmed');
+ assert.equal((await deliver(false,'','Slowmode is enabled. 2 minutes')).result.status,'confirmed');
 });
