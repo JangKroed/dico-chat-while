@@ -62,7 +62,7 @@ test('전송 처리 중에는 다음 타이머 대신 입력·전송 확인 중�
  const fn=ui.slice(ui.indexOf('function renderSchedule()'),ui.indexOf('\nconst historyLabels'));
  const elements={scheduleLabel:{},scheduleDetail:{}};
  const channel={enabled:true,pending:{index:1},nextIndex:1,nextRunAt:100};
- runInNewContext(fn+'\nrenderSchedule();',{selectedChannel:()=>channel,elements,formatRemaining:()=>{throw Error('pending must not render a timer');}});
+ runInNewContext(fn+'\nrenderSchedule();',{selectedChannel:()=>channel,reportScheduleDisplay:()=>{},elements,formatRemaining:()=>{throw Error('pending must not render a timer');}});
  assert.match(elements.scheduleLabel.textContent,/B 입력·전송 확인 중/);
  assert.match(elements.scheduleDetail.textContent,/전송 확인 후/);
 });
@@ -112,4 +112,18 @@ test('확인 생략 모드에서는 Enter가 무시돼도 게시 감시 없이 �
 test('확인 생략이어도 개인 초안과 슬로우 모드 검사는 유지한다',async()=>{
  assert.equal((await deliver(false,'개인 초안','',false,false,true)).result.status,'blocked');
  assert.equal((await deliver(false,'','00:08',false,false,true)).result.status,'deferred');
+});
+
+test('전송 단계에 실제 페이지·예약·이벤트 시각과 설정 식별자를 연결한다',()=>{
+ const state={revision:4,channels:[{id:'stable-a',intervalSeconds:63,target:{tabId:9,guildId:'123',channelId:'456'},prepared:{id:'attempt',scheduledAt:10000,index:1}}]};
+ const e=deliveryTraceEvent({id:'attempt',stage:'enter-dispatched',data:{observedPath:'/channels/123/789',eventAt:1789551000000,scheduledAt:1789550999000,latenessMs:1000}},state,9);
+ assert.equal(e.channelKey,'stable-a');assert.equal(e.discordChannelId,'456');assert.equal(e.observedChannelId,'789');assert.equal(e.deliveryMessage,'B');
+ assert.equal(e.eventAt,1789551000000);assert.equal(e.scheduledAt,1789550999000);assert.equal(e.latenessMs,1000);
+});
+
+test('완료 저장 직후 도착한 Enter 로그도 마지막 시도 ID와 탭으로 검증한다',()=>{
+ const state={channels:[{id:'a',target:{tabId:9},lastDeliveryId:'done',nextIndex:1}]};
+ const message={id:'done',stage:'enter-dispatched',data:{messageIndex:0,deliveryPhase:'commit'}};
+ const event=deliveryTraceEvent(message,state,9);assert.equal(event.deliveryId,'done');assert.equal(event.deliveryMessage,'A');assert.equal(event.deliveryPhase,'commit');
+ assert.equal(deliveryTraceEvent(message,state,8),null);assert.equal(deliveryTraceEvent({...message,id:'old'},state,9),null);
 });

@@ -26,3 +26,30 @@ test('미검증 시도를 전송 성공으로 기록하지 않는다',()=>{
  const events=diagnosticEvents(before,after);assert.ok(events.some(e=>e.kind==='delivery-unverified'));
  assert.equal(events.some(e=>e.kind==='delivery-confirmed'),false);
 });
+
+test('채널 순서가 바뀌어도 설정·채팅방·탭 식별자와 이전 주기를 추적한다',()=>{
+ const a={id:'stable-a',intervalSeconds:63,settingsRevision:1,target:{guildId:'123',channelId:'456',tabId:7}};
+ const b={id:'stable-b',intervalSeconds:123,target:{guildId:'123',channelId:'789',tabId:8}};
+ const events=diagnosticEvents({channels:[a,b]},{revision:9,channels:[b,{...a,intervalSeconds:93,settingsRevision:2}]},1000);
+ const e=events.find(e=>e.kind==='settings-changed');
+ assert.equal(e.channelKey,'stable-a');assert.equal(e.channel,2);assert.equal(e.discordChannelId,'456');
+ assert.equal(e.tabId,7);assert.equal(e.previousIntervalSeconds,63);assert.equal(e.intervalSeconds,93);assert.equal(e.rootRevision,9);
+});
+
+test('팝업에 표시된 값과 저장된 값을 나란히 남겨 채널 혼선을 구분한다',async()=>{
+ const {uiDiagnostic}=await import('../diagnostics.js');
+ const state={revision:8,channels:[{id:'a',intervalSeconds:63,target:{channelId:'456'}},{id:'b',intervalSeconds:123,target:{channelId:'789'}}]};
+ const e=uiDiagnostic({channelKey:'a',formChannelKey:'b',displayedIntervalSeconds:123,displayedDiscordChannelId:'789',displayedRootRevision:7,displayedNextRunAt:6000,displayedRemainingSeconds:5,text:'SECRET'},state,1000);
+ assert.equal(e.channelKey,'a');assert.equal(e.formChannelKey,'b');assert.equal(e.intervalSeconds,63);assert.equal(e.displayedIntervalSeconds,123);
+ assert.equal(e.discordChannelId,'456');assert.equal(e.displayedDiscordChannelId,'789');assert.equal(e.rootRevision,8);assert.equal(e.displayedRootRevision,7);
+ assert.equal(JSON.stringify(e).includes('SECRET'),false);
+ assert.equal(uiDiagnostic({channelKey:'missing'},state),null);
+});
+
+test('상세 로그가 밀려도 Enter와 설정 변경 타임라인은 보존한다',async()=>{
+ const {appendDiagnostics}=await import('../diagnostics.js');let saved={diagnosticLog:[],diagnosticTimeline:[]};
+ const api={storage:{local:{get:async()=>saved,set:async v=>{saved={...saved,...v};}}}};
+ await appendDiagnostics(api,[{kind:'settings-changed',channelKey:'a'},{kind:'delivery-trace',stage:'enter-dispatched',channelKey:'a'},...Array.from({length:600},()=>({kind:'delivery-trace',stage:'observation'}))]);
+ assert.equal(saved.diagnosticLog.length,500);assert.equal(saved.diagnosticTimeline.length,2);
+ assert.equal(saved.diagnosticTimeline[0].kind,'settings-changed');assert.equal(saved.diagnosticTimeline[1].stage,'enter-dispatched');
+});

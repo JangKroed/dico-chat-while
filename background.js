@@ -1,7 +1,7 @@
 import { recoverLoading } from './loading-recovery.js';
 import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
-import { recordDiagnostics, appendDiagnostics, deliveryTraceEvent } from './diagnostics.js';
+import { recordDiagnostics, appendDiagnostics, deliveryTraceEvent, channelDiagnostic, uiDiagnostic } from './diagnostics.js';
 import { notifyChannelErrors } from './notifications.js';
 import { waitForReady, tabReadiness } from './readiness.js';
 import { createChannelQueue } from './channel-queue.js';
@@ -18,7 +18,7 @@ const enqueue = (action, operation = 'background-event', key = 'control') => {
   const next = queue.run(key, action);
   void next.catch(async error => {
     const reason=String(error?.message || error).replace(/https?:\/\/\S+/g,'[URL]').slice(0,500);
-    try { await appendDiagnostics(chrome,[{at:new Date().toISOString(),kind:'runtime-error',operation,reason}]); } catch {}
+    try { await appendDiagnostics(chrome,[{at:new Date().toISOString(),kind:'runtime-error',channelKey:key,operation,reason}]); } catch {}
     console.warn('Dico While:', operation, reason);
   });
   return next;
@@ -30,6 +30,13 @@ const withTimeout = (promise, milliseconds) => {
     new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('응답 시간 초과')), milliseconds); }),
   ]).finally(() => clearTimeout(timer));
 };
+function traceChannel(channelId,kind,details={}) {
+  const at=new Date().toISOString();
+  return manager.getState().then(state=>{
+    const index=state.channels.findIndex(c=>c.id===channelId);
+    return appendDiagnostics(chrome,[{...channelDiagnostic(state.channels[index],index,state.revision),channelKey:channelId,at,kind,...details}]);
+  }).catch(()=>{});
+}
 async function inspect(target) {
   if (!target) return { ok: false, error: '대상 채널을 선택해 주세요.' };
   const state = await manager.getState();
@@ -74,8 +81,11 @@ const manager = createChannelManager({
     await chrome.action.setBadgeText({ text: active ? String(active) : error ? '!' : '' });
     await chrome.action.setBadgeBackgroundColor({ color: active ? '#7565e8' : '#c75454' });
   },
-  schedule: (channelId, when) => chrome.alarms.create(ALARM_PREFIX + channelId, { when }),
-  cancel: channelId => chrome.alarms.clear(ALARM_PREFIX + channelId),
+  schedule: async (channelId, when) => {
+    await chrome.alarms.create(ALARM_PREFIX + channelId, { when });
+    void traceChannel(channelId,'alarm-scheduled',{alarmName:ALARM_PREFIX+channelId,alarmScheduledAt:when});
+  },
+  cancel: async channelId => { const removed=await chrome.alarms.clear(ALARM_PREFIX+channelId);void traceChannel(channelId,'alarm-cancelled',{removed});return removed; },
   inspect,
   prepare: (target, delivery) => isStopped(delivery.channelId)
     ? Promise.resolve({status:'blocked',error:'중지 요청으로 입력 준비를 취소했습니다.'})
@@ -186,6 +196,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       .then(backup=>respond({ok:true,backup})).catch(error=>respond({ok:false,error:error.message}));
     return true;
   }
+  if (message?.type === 'DICO_UI_SCHEDULE') {
+    manager.getState().then(async state=>{
+      const event=uiDiagnostic(message,state);
+      if(event) await appendDiagnostics(chrome,[event]);
+      respond({ok:Boolean(event)});
+    }).catch(()=>respond({ok:false}));
+    return true;
+  }
   if (message?.type === 'DICO_GET') {
     manager.getState().then(state => respond({ ok: true, state })).catch(error => respond({ ok: false, error: error.message }));
     return true;
@@ -200,6 +218,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'DICO_STOP_ALL') { stopAllRequested = true; startsAfterStopAll.clear(); }
   if (message?.type === 'DICO_START') { stopRequested.delete(message.channelId); startsAfterStopAll.add(message.channelId); }
   if (message?.type === 'DICO_START_ALL') { stopRequested.clear(); stopAllRequested = false; }
+  const requestedAt=Date.now();
+  if(message.channelId) void traceChannel(message.channelId,'control-request',{
+    operation:String(message.type || '').slice(0,60),requestedAt,
+    ...(message.type==='DICO_SAVE'?{requestedIntervalSeconds:Number.isFinite(message.settings?.intervalSeconds)?message.settings.intervalSeconds:null,expectedSettingsRevision:message.expectedRevision ?? null,requestedSkipConfirmation:message.settings?.skipConfirmation===true}:{}),
+    ...(message.type==='DICO_BIND'?{requestedTabId:Number.isInteger(message.tabId)?message.tabId:null}:{}),
+  });
   const action = async () => {
     switch (message?.type) {
       case 'DICO_IMPORT_SETTINGS': return manager.restoreSettings(message.backup);
@@ -236,14 +260,19 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       default: throw new Error('지원하지 않는 요청입니다. 확장 프로그램과 설정 페이지를 새로고침해 주세요.');
     }
   };
-  enqueue(action, String(message?.type || 'unknown'), message.channelId || (message?.type === 'DICO_STOP_ALL' ? 'stop-all' : 'control')).then(state => respond({ ok: true, state })).catch(async error => {
+  enqueue(action, String(message?.type || 'unknown'), message.channelId || (message?.type === 'DICO_STOP_ALL' ? 'stop-all' : 'control')).then(state => { if(message.channelId) void traceChannel(message.channelId,'control-completed',{operation:message.type,requestedAt}); respond({ ok: true, state }); }).catch(async error => {
+    if(message.channelId) void traceChannel(message.channelId,'control-failed',{operation:message.type,requestedAt});
     respond({ ok: false, error: error.message, state: await manager.getState() });
   });
   return true;
 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === EMAIL_ALARM) { void flushEmailReport(chrome).catch(()=>{}); return; }
-  if (alarm.name.startsWith(ALARM_PREFIX)) void enqueue(() => manager.tick(alarm.name.slice(ALARM_PREFIX.length)), 'alarm-delivery', alarm.name.slice(ALARM_PREFIX.length));
+  if (alarm.name.startsWith(ALARM_PREFIX)) {
+    const id=alarm.name.slice(ALARM_PREFIX.length),firedAt=Date.now();
+    void traceChannel(id,'alarm-fired',{alarmName:alarm.name,alarmScheduledAt:alarm.scheduledTime,firedAt,alarmLatenessMs:firedAt-alarm.scheduledTime});
+    void enqueue(()=>{void traceChannel(id,'alarm-processing',{firedAt,queueWaitMs:Date.now()-firedAt});return manager.tick(id);},'alarm-delivery',id);
+  }
 });
 chrome.runtime.onInstalled.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
 chrome.runtime.onStartup.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));

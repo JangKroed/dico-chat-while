@@ -279,3 +279,20 @@ test('첫 채널의 입력 준비가 지연돼도 둘째 채널은 독립적으�
   assert.equal(r.state.channels.find(c=>c.id===second).nextIndex,1);
  } finally {release();await a;}
 });
+
+test('63초와 123초 확인 생략 채널을 동시에 실행해도 예약과 실제 대상이 뒤바뀌지 않는다',async()=>{
+ const {r,first,second}=await pair();
+ for(const [id,intervalSeconds] of [[first,63],[second,123]]) {
+  const c=(await r.manager.getState()).channels.find(c=>c.id===id);
+  await r.manager.updateSettings(id,{...settings(id,intervalSeconds),skipConfirmation:true},c.settingsRevision);
+ }
+ r.io.send=async(destination,delivery)=>{r.sent.push({destination,...delivery});return {status:'unverified'};};
+ await r.manager.startAll();
+ assert.equal(r.alarms.get(first),1063000);assert.equal(r.alarms.get(second),1123000);
+ r.advance(63);await Promise.all([r.manager.tick(first),r.manager.tick(second)]);
+ assert.equal(r.alarms.get(first),1126000);assert.equal(r.alarms.get(second),1123000);
+ r.advance(60);await Promise.all([r.manager.tick(second),r.manager.tick(first)]);
+ assert.equal(r.alarms.get(first),1126000);assert.equal(r.alarms.get(second),1246000);
+ assert.deepEqual(r.sent.map(s=>s.destination.tabId),[7,8,7,8]);
+ assert.deepEqual(r.state.channels.map(c=>c.intervalSeconds),[63,123]);
+});

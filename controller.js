@@ -100,6 +100,7 @@ export function createController(io) {
   };
   const confirmed = async (state, verified=true) => {
     state.lastOutcome=verified?'confirmed':'unverified';
+    state.lastDeliveryId=state.pending.id;
     state.prepared = null;
     state.draftRetries = 0;
     state.draftRetrySince = null;

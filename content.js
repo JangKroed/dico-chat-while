@@ -144,7 +144,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.20';
+  const CONTENT_VERSION = '0.2.21';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -166,7 +166,7 @@
     try {
       // Never wait for telemetry before typing; record only allowlisted metadata.
       const request = chrome.runtime.sendMessage({type:'DICO_TRACE',id:delivery.id,stage,version:CONTENT_VERSION,
-        data:{...data,elapsedMs:Date.now()-delivery.startedAt,latenessMs:delivery.startedAt-delivery.scheduledAt}});
+        data:{...data,messageIndex:delivery.index,deliveryPhase:delivery.phase || 'send',eventAt:Date.now(),scheduledAt:delivery.scheduledAt,startedAt:delivery.startedAt,observedPath:location.pathname,elapsedMs:Date.now()-delivery.startedAt,latenessMs:Date.now()-delivery.scheduledAt}});
       request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }

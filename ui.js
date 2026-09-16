@@ -256,7 +256,9 @@ function renderChannelList() {
     name.textContent = channel.name;
     const detail = document.createElement("span");
     detail.textContent = channel.target?.title || "Discord 탭 미연결";
-    select.append(name, detail);
+    const timing=document.createElement('span');
+    timing.textContent=`주기 ${channel.intervalSeconds}초 · 채팅방 ID ${channel.target?.channelId || '미연결'}`;
+    select.append(name, detail, timing);
 
     const status = channelTone(channel);
     const badge = document.createElement("span");
@@ -303,8 +305,24 @@ function renderPending() {
     : "";
 }
 
+let lastScheduleTraceKey='',lastScheduleTraceAt=0;
+function reportScheduleDisplay(channel) {
+  if(!channel)return;
+  const now=Date.now();
+  const key=JSON.stringify([channel.id,channel.intervalSeconds,channel.nextRunAt,channel.settingsRevision,channel.target?.channelId,loadedBase?.channelId]);
+  if(key===lastScheduleTraceKey && now-lastScheduleTraceAt<10000)return;
+  lastScheduleTraceKey=key;lastScheduleTraceAt=now;
+  void sendMessage('DICO_UI_SCHEDULE',{channelKey:channel.id,displayedAt:now,
+    displayedRootRevision:rootState.revision,displayedSettingsRevision:channel.settingsRevision,
+    displayedIntervalSeconds:Number(elements.interval.value),displayedNextRunAt:channel.nextRunAt,
+    displayedMode:channel.pending?'pending':!channel.enabled?'stopped':channel.prepared?.phase==='ready'?'ready':channel.prepared?'preparing':'waiting',
+    displayedRemainingSeconds:channel.enabled && !channel.pending && Number.isFinite(channel.nextRunAt)?Math.max(0,Math.ceil((channel.nextRunAt-now)/1000)):null,
+    displayedDiscordChannelId:channel.target?.channelId || null,formChannelKey:loadedBase?.channelId,draftDirty:isDirty(),
+  }).catch(()=>{});
+}
 function renderSchedule() {
   const channel = selectedChannel();
+  reportScheduleDisplay(channel);
   if (!channel) {
     elements.scheduleLabel.textContent = "선택한 채널이 없습니다";
     elements.scheduleDetail.textContent = "채널을 추가해 주세요.";
