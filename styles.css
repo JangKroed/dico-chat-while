@@ -944,3 +944,23 @@ input[aria-invalid="true"] {
 #error-notifications-enabled { width: auto; min-height: auto; accent-color: #7565e8; margin-right: 6px; }
 
 #mail-enabled { width: auto; min-height: auto; accent-color: #7565e8; }
+
+/* Static guide; no runtime state required. */
+.tutorial-page .options-shell { max-width: 1120px; }
+.guide-intro { margin-bottom: 20px; }
+.guide-intro p, .guide-section p { line-height: 1.8; }
+.guide-nav { display: flex; flex-wrap: wrap; gap: 10px; margin: 24px 0; }
+.guide-nav a { color: #d5cfff; background: #24233e; border: 1px solid #454163; border-radius: 30px; padding: 10px 18px; text-decoration: none; }
+.guide-nav a:hover, .guide-nav a:focus-visible { background: #3c3563; }
+.guide-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px; }
+.guide-section { padding: 26px; scroll-margin-top: 24px; }
+.guide-section h2 { font-size: 21px; margin-bottom: 18px; line-height: 1.5; }
+.guide-section ol, .guide-section ul { padding-left: 22px; line-height: 1.8; }
+.guide-section li + li { margin-top: 12px; }
+.guide-tip { color: #c8c4dd; border-left: 3px solid #8d7bff; padding-left: 14px; margin-top: 20px; }
+.guide-sequence { color: #ded8ff; background: #24233e; padding: 14px; border-radius: 12px; }
+.guide-section details { border-top: 1px solid #35344e; padding: 16px 0; }
+.guide-section summary, .mail-settings summary { cursor: pointer; font-weight: 700; line-height: 1.6; }
+.guide-link { display: inline-block; text-decoration: none; margin-top: 12px; }
+.mail-settings > p { margin: 12px 0; }
+@media (max-width: 760px) { .guide-grid { grid-template-columns: 1fr; } .guide-section { padding: 20px; } }

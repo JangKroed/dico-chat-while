@@ -7,7 +7,7 @@ async function refresh() {
     toggle.checked = preferences.errorNotificationsEnabled !== false;
     const permission = await chrome.notifications.getPermissionLevel();
     status.textContent = permission === 'granted'
-      ? '오류 발생 시 이 기기에 알립니다. 알림을 누르면 설정 페이지가 열립니다.'
+      ? '오류 발생 시 이 기기에 알립니다. 알림을 누르면 사용 가이드가 열립니다.'
       : 'Chrome 알림이 차단되어 있습니다. 운영체제의 알림 설정에서 Chrome을 허용하세요.';
   } catch (error) { status.textContent = `알림 설정을 확인하지 못했습니다: ${error.message}`; }
 }
@@ -23,7 +23,7 @@ testButton.addEventListener('click', async () => {
     if (await chrome.notifications.getPermissionLevel() !== 'granted') throw new Error('운영체제 알림 설정에서 Chrome 알림을 허용하세요.');
     await chrome.notifications.create('dico-error:test', {
       type: 'basic', iconUrl: chrome.runtime.getURL('notification-icon.png'),
-      title: 'DICO · 테스트 알림', message: '오류 알림 테스트입니다. 이 알림을 누르면 설정 페이지가 열립니다.',
+      title: 'DICO · 테스트 알림', message: '오류 알림 테스트입니다. 이 알림을 누르면 사용 가이드가 열립니다.',
     });
     status.textContent = '테스트 알림을 요청했습니다. 보이지 않으면 Chrome 알림 허용 및 방해금지 모드를 확인하세요.';
   } catch (error) { status.textContent = `알림 실패: ${error.message}`; }
