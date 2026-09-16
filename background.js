@@ -1,3 +1,4 @@
+import { recoverLoading } from './loading-recovery.js';
 import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
 import { recordDiagnostics, appendDiagnostics } from './diagnostics.js';
@@ -28,26 +29,38 @@ const withTimeout = (promise, milliseconds) => {
 };
 async function inspect(target) {
   if (!target) return { ok: false, error: '대상 채널을 선택해 주세요.' };
-  const tab = await chrome.tabs.get(target.tabId);
-  const channel = parseChannel(tab.url);
-  if (!channel || channel.channelId !== target.channelId || channel.guildId !== target.guildId) {
-    return { ok: false, error: '대상 탭이 다른 페이지로 이동했습니다. 원래 채널을 열거나 대상을 다시 선택해 주세요.' };
-  }
-  if (tab.discarded || tab.frozen) return { ok: false, error: '대상 탭이 메모리 절약 등으로 중지되었습니다. 탭을 열고 다시 시작해 주세요.' };
   const state = await manager.getState();
-  const channelId = state.channels.find(item => item.target?.tabId === target.tabId)?.id;
-  const message = { type: 'DICO_INSPECT', target };
-  let injected = false;
-  return waitForReady(async () => {
-    try { return await withTimeout(chrome.tabs.sendMessage(target.tabId, message), 1500); }
-    catch {
-      if (!injected) {
-        injected = true;
-        await chrome.scripting.executeScript({ target: { tabId: target.tabId }, files: ['content.js'] });
-      }
-      return { ok: false, code: 'CONNECTING', retryable: true, error: 'Discord 입력창 연결을 기다리고 있습니다.' };
+  const channel = state.channels.find(item => item.target?.tabId === target.tabId);
+  const cancelled = () => stopAllRequested || stopRequested.has(channel?.id);
+  const key = `loadingRecovery:${target.tabId}`;
+  const probe = () => waitForReady(async () => {
+    let tab;
+    try { tab = await chrome.tabs.get(target.tabId); }
+    catch { return {ok:false,code:'TAB_MISSING',error:'전송용 탭이 닫혔습니다.'}; }
+    if (!tab) return {ok:false,code:'TAB_MISSING',error:'전송용 탭이 닫혔습니다.'};
+    const parsed = parseChannel(tab.url);
+    if (!parsed || parsed.channelId !== target.channelId || parsed.guildId !== target.guildId) {
+      return {ok:false,code:'WRONG_CHANNEL',error:'대상 탭이 다른 페이지로 이동했습니다. 로그인 상태와 채널을 확인하세요.'};
     }
-  }, {cancelled: () => stopAllRequested || stopRequested.has(channelId)});
+    if (tab.discarded || tab.frozen) return {ok:false,code:'TAB_SUSPENDED',error:'전송용 탭이 메모리 절약으로 중지되었습니다.'};
+    if (tab.status === 'loading') return {ok:false,code:'PAGE_LOADING',retryable:true,error:'Discord 페이지 로딩 중입니다.'};
+    try { return await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),1000); }
+    catch {
+      try { await chrome.scripting.executeScript({target:{tabId:target.tabId},files:['content.js']}); } catch {}
+      return {ok:false,code:'CONNECTING',retryable:true,error:'Discord 입력창 연결을 기다리고 있습니다.'};
+    }
+  },{attempts:15,cancelled});
+  // A pending delivery is never reloaded or sent again automatically.
+  if (!target.managed || channel?.pending) return probe();
+  return recoverLoading({probe,cancelled,
+    readCount:async()=> (await chrome.storage.local.get(key))[key] || 0,
+    saveCount:count=>chrome.storage.local.set({[key]:count}),
+    reload:()=>chrome.tabs.reload(target.tabId),
+    onAttempt:async(attempt,code)=>{
+      await chrome.storage.local.set({loadingRecoveryStatus:{channelId:channel?.id,attempt,at:Date.now()}});
+      try { await appendDiagnostics(chrome,[{at:new Date().toISOString(),kind:'loading-recovery',channel:state.channels.indexOf(channel)+1,attempt,reason:code}]); } catch {}
+    },
+  }).finally(()=>chrome.storage.local.set({loadingRecoveryStatus:null}));
 }
 const manager = createChannelManager({
   load: async () => (await chrome.storage.local.get('state')).state,
@@ -89,15 +102,6 @@ async function recoverChannels(options) {
   return manager.recover(options);
 }
 
-async function waitUntilLoaded(tabId) {
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    const tab = await chrome.tabs.get(tabId);
-    if (tab.status === 'complete') return tab;
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error('전송용 탭 로딩이 지연되었습니다. 로그인 상태를 확인하고 다시 시작해 주세요.');
-}
 async function startChannel(channelId) {
   const state = await manager.getState();
   const channel = state.channels.find(item => item.id === channelId);
@@ -126,7 +130,7 @@ async function startChannel(channelId) {
     if (!tab) throw new Error('전송용 창을 생성하지 못했습니다.');
     await manager.bind(channelId, { ...channel.target, tabId: tab.id, managed: true, windowManaged: true });
   }
-  await waitUntilLoaded(tab.id);
+  await chrome.storage.local.set({[`loadingRecovery:${tab.id}`]:0});
   if (stopAllRequested || stopRequested.has(channelId)) throw new Error('전송용 탭 준비 중 시작이 취소되었습니다.');
   return manager.start(channelId);
 }

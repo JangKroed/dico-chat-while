@@ -19,6 +19,7 @@
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
       <section class="card" aria-labelledby="notification-title">
         <h2 id="notification-title">오류 알림</h2>
+        <p id="recovery-status" class="field-help" role="status" hidden></p>
         <button id="download-diagnostics" class="button button-secondary button-small" type="button">진단 로그 다운로드</button>
         <p id="diagnostic-status" class="field-help" role="status">최근 500개 진단 기록을 보관합니다. 공지 문구·계정 정보는 포함하지 않습니다.</p>
         <label><input id="error-notifications-enabled" type="checkbox" checked> 모든 채널의 오류 알림 받기</label>
@@ -159,6 +160,7 @@
       </div>
     </main>
     <script type="module" src="ui.js"></script>
+    <script type="module" src="recovery-status.js"></script>
     <script type="module" src="backup-settings-ui.js"></script>
     <script type="module" src="email-settings.js"></script>
     <script type="module" src="notification-settings.js"></script>
