@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null,managed=false}={}) {
+function rig({lag=0,fault=null,managed=false,structured=false}={}) {
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  const nodes=[],events=[],traces=[];
  const form={querySelector:()=>null,querySelectorAll:()=>cooldown?[{textContent:cooldown,getClientRects:()=>[1]}]:[]};
@@ -13,7 +13,7 @@ function rig({lag=0,fault=null,managed=false}={}) {
   events.push({type:event.type,at:clock});
   if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;}
   if(event.type==='keydown'){
-   assert.equal(editor.innerText,'A');event.defaultPrevented=true;editor.innerText='';
+   assert.equal(editor.innerText.trim(),'A');event.defaultPrevented=true;editor.innerText='';
    nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:'A',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check();
   }
  }};
@@ -26,6 +26,13 @@ function rig({lag=0,fault=null,managed=false}={}) {
  if(fault==='selection_outside')selection.anchorNode=null;
  if(fault==='composing')composition();
  if(fault==='editor_detached')editor.isConnected=false;}};
+ if(structured){
+  let actualText='';Object.defineProperty(editor,'innerText',{get:()=>actualText?'\n'+actualText+'\n':'',set:value=>{actualText=value;}});
+  editor.querySelector=selector=>selector.includes('data-slate-void')?{}:null;
+  const node=(attrs,children=[])=>({nodeType:1,tagName:'SPAN',childNodes:children,getAttribute:key=>attrs[key]??null,get textContent(){return children.map(c=>c.textContent).join('');}});
+  Object.defineProperty(editor,'childNodes',{get(){return [node({'data-slate-node':'element'},[node({'data-slate-string':'true'},[{nodeType:3,textContent:actualText}]),node({'data-slate-void':'true'},[node({'data-slate-spacer':'true'},[node({'data-slate-zero-width':'z'},[{nodeType:3,textContent:'\ufeff'}])])])])];}});
+  editor.nodeType=1;editor.tagName='DIV';
+ }
  const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:['A','B'],expectedText:'A'};
  const delivery={id:'attempt',index:0,text:'A',startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
@@ -95,4 +102,11 @@ test('복구는 다른 입력칸·변경된 문구·조합 중인 입력을 건�
   const r=rig({fault,managed:true});assert.equal((await r.request('DICO_PREPARE')).status,'blocked');
   assert.equal(r.traces.some(e=>e.stage==='editor-recovered'),false);assert.equal(r.events.some(e=>e.type==='keydown'),false);
  }
+});
+
+test('실제 전송 경로에서 Slate 보조 void가 있어도 정확한 문구를 준비·전송한다',async()=>{
+ const r=rig({managed:true,structured:true});assert.equal((await r.request('DICO_PREPARE')).status,'prepared');
+ r.tick(3000);assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ assert.ok(r.traces.some(t=>t.data.editorReadMode==='slate'));
 });

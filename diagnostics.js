@@ -67,8 +67,8 @@ export function appendDiagnostics(api,events) {
 }
 
 const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prepared','prepared-verified','paste-dispatched','stability-failed','editor-recovered']);
-const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected','draftMatchesA','draftMatchesB','draftHasVoid','whitespaceOnlyDifference'];
-const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds','eventAt','scheduledAt','startedAt','maxStableMs','stableRequiredMs','stableWaitMs','expectedLength','messageALength','messageBLength','draftLineCount','expectedLineCount'];
+const TRACE_BOOLEANS = ['pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected','draftMatchesA','draftMatchesB','draftHasVoid','whitespaceOnlyDifference','unsupportedEditorContent'];
+const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds','eventAt','scheduledAt','startedAt','maxStableMs','stableRequiredMs','stableWaitMs','expectedLength','messageALength','messageBLength','draftLineCount','expectedLineCount','renderedDraftLength'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   const index=state.channels.findIndex(c=>c.target?.tabId===tabId && (c.pending?.id===message.id || c.prepared?.id===message.id || c.lastDeliveryId===message.id));
   if(index<0 || !TRACE_STAGES.has(message.stage)) return null;
@@ -83,6 +83,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   const checks=['channel_changed','editor_detached','editor_count','editor_replaced','text_mismatch','composing','focus_lost','selection_missing','selection_not_collapsed','selection_outside'];
   if(Array.isArray(message.data?.failedChecks))event.failedChecks=checks.filter(key=>message.data.failedChecks.includes(key));
   if(message.data?.failureCounts)event.failureCounts=Object.fromEntries(checks.filter(key=>Number.isInteger(message.data.failureCounts[key])).map(key=>[key,Math.max(0,Math.min(10000,message.data.failureCounts[key]))]));
+  if(['slate','rendered'].includes(message.data?.editorReadMode))event.editorReadMode=message.data.editorReadMode;
   if(['confirmed','uncertain','blocked','draft-retained','deferred','prepared','unverified'].includes(message.data?.result)) event.result=message.data.result;
   if (['empty','replace-next','reuse-next'].includes(message.data?.draftAction)) event.draftAction=message.data.draftAction;
   return event;
@@ -91,6 +92,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
 export function inspectionDiagnostic(result,channel,index,revision,now=Date.now()) {
   const event={...channelDiagnostic(channel,index,revision),at:new Date(now).toISOString(),kind:'inspection-failed'};
   const data=result.diagnostics || {};
+  if(['slate','rendered'].includes(data.editorReadMode))event.editorReadMode=data.editorReadMode;
   if(/^[A-Z_]{1,40}$/.test(result.code || ''))event.code=result.code;
   if(/^\d+\.\d+\.\d+$/.test(data.contentVersion || ''))event.contentVersion=data.contentVersion;
   for(const key of TRACE_BOOLEANS)if(typeof data[key]==='boolean')event[key]=data[key];

@@ -34,7 +34,45 @@
     .filter(element => element.getClientRects().length > 0 && element.getAttribute('aria-disabled') !== 'true');
   const matchesTarget = target => location.origin === 'https://discord.com' &&
     new RegExp(`^/channels/${target.guildId}/${target.channelId}(?:/\\d+)?/?$`).test(location.pathname);
-  const hasDraft = editor => Boolean(normalize(editor.innerText || editor.textContent || '') || editor.querySelector('[data-slate-void="true"]'));
+  function editorContent(editor) {
+    const raw=editor?.innerText || editor?.textContent || '';
+    if(!editor?.childNodes)return {text:raw,mode:'rendered',unsupported:Boolean(editor?.querySelector?.('[data-slate-void="true"]'))};
+    let unsupported=false,unsupportedElement=false,sawString=false,sawBlock=false;
+    const attr=(node,key)=>node.getAttribute?.(key);
+    const emptySpacer=node=>{
+      if(node.nodeType===3)return /^[\s\u200b\ufeff]*$/.test(node.textContent || '');
+      if(node.nodeType!==1 || !['SPAN','BR'].includes(node.tagName))return false;
+      if(['contenteditable','role','alt','src'].some(key=>attr(node,key)!==null && attr(node,key)!==undefined))return false;
+      return [...node.childNodes].every(emptySpacer);
+    };
+    const read=node=>{
+      if(node.nodeType===3){if(/\S/.test(node.textContent || ''))unsupported=true;return {text:'',block:false};}
+      if(node.nodeType!==1)return {text:'',block:false};
+      if(attr(node,'data-slate-void')==='true'){
+        const children=[...node.childNodes].filter(n=>n.nodeType!==3 || /\S/.test(n.textContent || ''));
+        if(!children.length || !children.every(n=>attr(n,'data-slate-spacer')==='true' && emptySpacer(n)))unsupported=unsupportedElement=true;
+        return {text:'',block:false};
+      }
+      if(attr(node,'data-slate-zero-width')!==null && attr(node,'data-slate-zero-width')!==undefined){sawString=true;if(!/^[\s\u200b\ufeff]*$/.test(node.textContent || ''))unsupported=true;return {text:'',block:false};}
+      if(attr(node,'data-slate-string')==='true'){
+        sawString=true;
+        const plain=n=>n.nodeType===3 || (n.nodeType===1 && n.tagName==='SPAN' && attr(n,'data-slate-void')!=='true' && attr(n,'contenteditable')!=='false' && [...n.childNodes].every(plain));
+        if(![...node.childNodes].every(plain))unsupported=true;
+        return {text:node.textContent || '',block:false};
+      }
+      const block=attr(node,'data-slate-node')==='element' && attr(node,'data-slate-inline')!=='true';
+      sawBlock ||=block;
+      if(['IMG','VIDEO','AUDIO','INPUT','BUTTON'].includes(node.tagName) || attr(node,'contenteditable')==='false')unsupported=unsupportedElement=true;
+      const children=[...node.childNodes].map(read).filter(child=>child.text || child.block);
+      let text='';children.forEach((child,index)=>{if(index && (child.block || children[index-1].block))text+='\n';text+=child.text;});
+      return {text,block};
+    };
+    const result=read(editor);
+    if(!sawString && !sawBlock)return {text:raw,mode:'rendered',unsupported:unsupportedElement || Boolean(editor.querySelector?.('[data-slate-void="true"]'))};
+    return {text:result.text,mode:'slate',unsupported};
+  }
+  const editorText=editor=>{const result=editorContent(editor);return result.unsupported?'\u0000'+result.text:result.text;};
+  const hasDraft = editor => Boolean(normalize(editorText(editor)) || editorContent(editor).unsupported);
   function avatarUserId(scope) {
     for (const image of scope.querySelectorAll('img')) {
       const source = image.getAttribute('src') || '';
@@ -126,7 +164,7 @@
     const found = editors();
     if (found.length === 0) return { ok: false, code: 'EDITOR_LOADING', retryable: true, error: '아직 사용할 수 있는 채팅 입력창이 없습니다(0개).' };
     if (found.length > 1) return { ok: false, code: 'EDITOR_AMBIGUOUS', error: `채팅 입력창이 ${found.length}개입니다. 전송용 창에서 열린 스레드나 메시지 편집을 닫아 주세요.` };
-    if (hasDraft(found[0]) && (!target.messages?.some(text => normalize(text) === normalize(found[0].innerText || found[0].textContent || '')) || found[0].querySelector('[data-slate-void="true"]'))) return { ok: false, code:'DRAFT_MISMATCH', error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
+    if (hasDraft(found[0]) && (!target.messages?.some(text => normalize(text) === normalize(editorText(found[0]))) || editorContent(found[0]).unsupported)) return { ok: false, code:'DRAFT_MISMATCH', error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
     const form = found[0].closest('form') || found[0].parentElement;
     if (form.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) {
       return { ok: false, error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
@@ -144,14 +182,14 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.23';
+  const CONTENT_VERSION = '0.2.24';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
   function draftEvidence(target,editor) {
-    const draft=normalize(editor?.innerText || editor?.textContent || '');
+    const draft=normalize(editorContent(editor).text);
     const expected=normalize(target.expectedText || ''),messages=target.messages || [];
-    return {expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
+    return {editorReadMode:editorContent(editor).mode,unsupportedEditorContent:editorContent(editor).unsupported,renderedDraftLength:normalize(editor?.innerText || editor?.textContent || '').length,expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
       draftMatchesA:typeof messages[0]==='string' && draft===normalize(messages[0]),draftMatchesB:typeof messages[1]==='string' && draft===normalize(messages[1]),
       draftHasVoid:Boolean(editor?.querySelector('[data-slate-void="true"]')),
       whitespaceOnlyDifference:draft!==expected && draft.replace(/\s/g,'')===expected.replace(/\s/g,''),
@@ -159,7 +197,7 @@
   }
   function traceSnapshot(target, text, originalEditor) {
     const found = editors(), editor = found[0], selection = window.getSelection();
-    const draft = normalize(editor?.innerText || editor?.textContent || '');
+    const draft = normalize(editorContent(editor).text);
     return {
       pageHidden: document.hidden, documentFocused: document.hasFocus(),
       editorCount: found.length, editorFocused: editor === document.activeElement,
@@ -167,7 +205,7 @@
       selectionRanges: selection?.rangeCount || 0,
       selectionInside: Boolean(editor && selection?.anchorNode && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)),
       selectionCollapsed: Boolean(selection?.isCollapsed), draftLength: draft.length,
-      draftEmpty: !draft, textMatches: draft === normalize(text), composing,
+      draftEmpty: !draft, textMatches: !editorContent(editor).unsupported && draft === normalize(text), composing,
       targetMatches: matchesTarget(target), ...slowmode(editor), ...draftEvidence({...target,expectedText:text},editor),
     };
   }
@@ -198,7 +236,7 @@
     const check = () => {
       if (finished) return;
       const liveEditor = currentEditor();
-      const empty = liveEditor && !normalize(liveEditor.innerText || liveEditor.textContent || '');
+      const empty = liveEditor && !normalize(editorText(liveEditor));
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
@@ -247,9 +285,9 @@
     timer = setTimeout(() => {
       check();
       const liveEditor = currentEditor();
-      const retained = liveEditor && normalize(liveEditor.innerText || liveEditor.textContent || '') === normalize(text);
+      const retained = liveEditor && normalize(editorText(liveEditor)) === normalize(text);
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
-      finish({status:retryDraft ? 'draft-retained' : 'uncertain',error:liveEditor && normalize(liveEditor.innerText || liveEditor.textContent || '')
+      finish({status:retryDraft ? 'draft-retained' : 'uncertain',error:liveEditor && normalize(editorText(liveEditor))
         ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
         : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
     }, 25000);
@@ -262,10 +300,10 @@
     const found = editors();
     if (found.length !== 1) return unknown('draft-or-editor');
     const editor = found[0];
-    const draft = normalize(editor.innerText || editor.textContent || '');
+    const draft = normalize(editorText(editor));
     const nextText = [0,1].includes(delivery.index) ? target.messages?.[1-delivery.index] : undefined;
     const form = editor.closest?.('form') || editor.parentElement;
-    if (editor.querySelector('[data-slate-void="true"]') || form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) return unknown('draft-or-editor');
+    if (editorContent(editor).unsupported || form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) return unknown('draft-or-editor');
     const user = ownUserId(target);
     if (!user) return unknown('author-unknown');
     const candidates = new Set();
@@ -306,7 +344,7 @@
       const found=editors(),selection=window.getSelection();
       const checks={channel_changed:!matchesTarget(target),editor_detached:!editor.isConnected,
         editor_count:found.length!==1,editor_replaced:found[0]!==editor,
-        text_mismatch:normalize(editor.innerText || editor.textContent || '')!==normalize(text),
+        text_mismatch:normalize(editorText(editor))!==normalize(text),
         composing,focus_lost:document.activeElement!==editor,
         selection_missing:!selection || !selection.rangeCount,
         selection_not_collapsed:!selection?.isCollapsed,
@@ -367,7 +405,7 @@
       if (seenDeliveries.size > 100) seenDeliveries.delete(seenDeliveries.values().next().value);
       if (delivery.phase==='commit') {
         if (!Number.isFinite(delivery.scheduledAt) || Date.now()<delivery.scheduledAt) return {status:'blocked',error:'아직 전송 예약 시각이 아닙니다.'};
-        if (normalize(editor.innerText || editor.textContent || '')!==normalize(delivery.text)) return {status:'blocked',error:'준비한 문구가 변경되었습니다. 입력창을 보존하고 중지합니다.'};
+        if (normalize(editorText(editor))!==normalize(delivery.text)) return {status:'blocked',error:'준비한 문구가 변경되었습니다. 입력창을 보존하고 중지합니다.'};
         editor.focus();
         const selection=window.getSelection(), range=document.createRange();
         range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
@@ -391,7 +429,7 @@
         }
         const live = editors()[0];
         if (live !== editor) return {status:'blocked',error:'입력창이 교체되었습니다. 다음 시작 때 다시 확인해 주세요.'};
-        const reuseDraft = normalize(editor.innerText || editor.textContent || '') === normalize(delivery.text);
+        const reuseDraft = normalize(editorText(editor)) === normalize(delivery.text);
         trace(reuseDraft ? 'draft-reused' : 'draft-replaced');
         if (reuseDraft) {
           const range = document.createRange();
@@ -413,7 +451,7 @@
         } else await new Promise(resolve => setTimeout(resolve,150));
         trace('after-paste', {pastePrevented:paste.defaultPrevented});
         const currentEditors = editors();
-        if (currentEditors.length !== 1 || normalize(currentEditors[0].innerText || currentEditors[0].textContent || '') !== normalize(delivery.text)) {
+        if (currentEditors.length !== 1 || normalize(editorText(currentEditors[0])) !== normalize(delivery.text)) {
           return { status: 'uncertain', error: 'Discord 편집기에 문구가 반영되지 않았습니다. 페이지를 새로고침하고 남은 초안을 확인해 주세요.' };
         }
         editor = currentEditors[0];
@@ -421,7 +459,7 @@
         if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
           return { status: 'uncertain', error: '문구 입력 후 예약이 취소되었습니다. 남은 초안을 확인해 주세요.' };
         }
-        if (!matchesTarget(target) || !editor.isConnected || normalize(editor.innerText || editor.textContent || '') !== normalize(delivery.text)) {
+        if (!matchesTarget(target) || !editor.isConnected || normalize(editorText(editor)) !== normalize(delivery.text)) {
           return { status: 'uncertain', error: '전송 직전에 채널이나 입력 내용이 변경되었습니다. 초안을 확인해 주세요.' };
         }
 
@@ -431,7 +469,7 @@
         }
       }
       const finalSelection=window.getSelection();
-      if (!matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || normalize(editor.innerText || editor.textContent || '')!==normalize(delivery.text)) return {status:'blocked',error:'Enter 직전 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'};
+      if (!matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || normalize(editorText(editor))!==normalize(delivery.text)) return {status:'blocked',error:'Enter 직전 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'};
       const cooldown = slowmode(editor);
       if (cooldown.cooldownMs > 0) {
         trace('slowmode-wait', cooldown);
