@@ -82,16 +82,16 @@ test('전송 시각에 제한이 남으면 준비된 문구를 보존하고 Ente
    const event=deliveryTraceEvent(failure,{channels:[{id:'channel-a',target:{tabId:7},prepared:{id:r.delivery.id}}]},7);
    let saved;const api={storage:{local:{get:async()=>({}),set:async value=>{saved=value;}}}};
    await appendDiagnostics(api,[event]);assert.ok(saved.diagnosticTimeline[0].failedChecks.includes(fault));assert.ok(saved.diagnosticTimeline[0].failureCounts[fault]>0);
-   assert.ok(r.traces.some(t=>t.stage==='paste-dispatched'));assert.equal(JSON.stringify(failure).includes('WRONG'),false);
+   assert.ok(r.traces.some(t=>t.stage==='paste-dispatched'));if(fault==='text_mismatch')assert.equal(failure.data.textContext.actual,'WRONG');
   }
  });
 
-test('재시작 검사에서 개인 초안을 차단한 이유를 본문 없이 반환한다',async()=>{
+test('재시작 검사에서 개인 초안을 차단한 이유를 문구와 함께 반환한다',async()=>{
  const r=rig();r.editor.innerText='A extra';
  const result=await r.request('DICO_INSPECT');assert.equal(result.code,'DRAFT_MISMATCH');
  assert.equal(result.diagnostics.draftLength,7);assert.equal(result.diagnostics.expectedLength,1);
  assert.equal(result.diagnostics.draftMatchesA,false);assert.equal(result.diagnostics.draftMatchesB,false);
- assert.equal(JSON.stringify(result).includes('A extra'),false);
+ assert.equal(result.diagnostics.textContext.actual,'A extra');
 });
 
 test('전용 창에서 정확한 문구 입력 후 커서·포커스가 남아도 재입력 없이 복구한다',async()=>{

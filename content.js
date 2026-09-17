@@ -255,14 +255,14 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.29';
+  const CONTENT_VERSION = '0.2.30';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
   function draftEvidence(target,editor) {
     const draft=normalize(editorContent(editor).text);
     const expected=normalize(target.expectedText || ''),messages=target.messages || [];
-    return {rawTextMatches:!editorContent(editor).unsupported && draft===expected,emojiEquivalent:composerMatches(editor,target.expectedText || '') && draft!==expected,unicodeEmojiCount:editorContent(editor).unicodeEmojiCount || 0,editorReadMode:editorContent(editor).mode,unsupportedEditorContent:editorContent(editor).unsupported,renderedDraftLength:normalize(editor?.innerText || editor?.textContent || '').length,expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
+    return {textContext:{expected:target.expectedText || '',actual:editorContent(editor).text,rendered:editor?.innerText || editor?.textContent || '',messageA:messages[0] || '',messageB:messages[1] || ''},rawTextMatches:!editorContent(editor).unsupported && draft===expected,emojiEquivalent:composerMatches(editor,target.expectedText || '') && draft!==expected,unicodeEmojiCount:editorContent(editor).unicodeEmojiCount || 0,editorReadMode:editorContent(editor).mode,unsupportedEditorContent:editorContent(editor).unsupported,renderedDraftLength:normalize(editor?.innerText || editor?.textContent || '').length,expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
       draftMatchesA:typeof messages[0]==='string' && composerMatches(editor,messages[0]),draftMatchesB:typeof messages[1]==='string' && composerMatches(editor,messages[1]),
       draftHasVoid:Boolean(editor?.querySelector('[data-slate-void="true"]')),
       whitespaceOnlyDifference:draft!==expected && draft.replace(/\s/g,'')===expected.replace(/\s/g,''),

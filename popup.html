@@ -20,7 +20,7 @@
         <h2 id="notification-title">오류 알림</h2>
         <p id="recovery-status" class="field-help" role="status" hidden></p>
         <button id="download-diagnostics" class="button button-secondary button-small" type="button">진단 로그 다운로드</button>
-        <p id="diagnostic-status" class="field-help" role="status">상세 기록 500개·핵심 기록 2,000개를 보관합니다. 채팅방·탭 식별 ID를 포함하며 공지 문구·인증키는 제외합니다.</p>
+        <p id="diagnostic-status" class="field-help" role="status">최대 상세 기록 500개·핵심 기록 2,000개를 보관합니다. 채팅방·탭 식별 ID를 포함하며 설정 문구와 입력창 초안을 포함합니다. 인증키는 제외합니다.</p>
         <label><input id="error-notifications-enabled" type="checkbox" checked> 모든 채널의 오류 알림 받기</label>
         <p id="notification-status" class="field-help" role="status">알림 설정 확인 중…</p>
         <button id="test-notification" class="button button-secondary button-small" type="button">테스트 알림</button>
@@ -130,7 +130,7 @@
             <summary>오류 로그 이메일 자동 발송</summary>
             <p class="field-help">수신: didlsdydgh@gmail.com · Google Apps Script 배포가 필요합니다. 연결 키는 Gmail 비밀번호가 아닙니다.</p>
             <p><a href="mail-relay/SETUP.html" target="_blank">메일 연결 튜토리얼 열기</a></p>
-            <label><input id="mail-enabled" type="checkbox"> 새 오류 로그 자동 발송에 동의하고 켜기</label>
+            <label><input id="mail-enabled" type="checkbox"> 문구·입력창 초안이 포함된 오류 로그 자동 발송에 동의하고 켜기</label>
             <label class="field-label" for="mail-url">Apps Script 웹 앱 URL</label><input id="mail-url" type="url" autocomplete="off">
             <label class="field-label" for="mail-key">연결 키</label><input id="mail-key" type="password" autocomplete="off">
             <button id="mail-save" class="button button-secondary" type="button">메일 설정 저장</button>

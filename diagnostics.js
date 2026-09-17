@@ -1,5 +1,5 @@
 import { queueEmailReport } from './email-report.js';
-// Explicit allowlist: never serialize channel state, message bodies or credentials.
+// Explicit allowlist: capture requested composer text, never arbitrary state or credentials.
 const numericId = value => /^\d{1,20}$/.test(String(value ?? '')) ? String(value) : null;
 export function channelDiagnostic(channel = {}, index = -1, revision = null) {
   const delivery=channel.pending || channel.prepared;
@@ -59,7 +59,7 @@ let writes = Promise.resolve();
 export function appendDiagnostics(api,events) {
   const next=writes.then(async()=>{
   const {diagnosticLog=[],diagnosticTimeline=[]} = await api.storage.local.get(['diagnosticLog','diagnosticTimeline']);
-  await api.storage.local.set({diagnosticLog:[...diagnosticLog,...events].slice(-500),diagnosticTimeline:[...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed','editor-recovered'].includes(e.stage))].slice(-2000)});
+  await api.storage.local.set({diagnosticLog:boundedDiagnosticHistory([...diagnosticLog,...events],500,1500000),diagnosticTimeline:boundedDiagnosticHistory([...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed','editor-recovered'].includes(e.stage))],2000,2500000)});
   await queueEmailReport(api,events);
   });
   writes=next.catch(()=>{});
@@ -73,6 +73,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   const index=state.channels.findIndex(c=>c.target?.tabId===tabId && (c.pending?.id===message.id || c.prepared?.id===message.id || c.lastDeliveryId===message.id));
   if(index<0 || !TRACE_STAGES.has(message.stage)) return null;
   const event={...channelDiagnostic(state.channels[index],index,state.revision),at:new Date(now).toISOString(),kind:'delivery-trace',channel:index+1,deliveryId:message.id,stage:message.stage};
+  if(['stability-failed','exception','before-enter','finished'].includes(message.stage) && message.data?.textContext)event.textContext=diagnosticTextContext(message.data.textContext);
   if([0,1].includes(message.data?.messageIndex))event.deliveryMessage=message.data.messageIndex===1?'B':'A';
   if(['prepare','commit','send'].includes(message.data?.deliveryPhase))event.deliveryPhase=message.data.deliveryPhase;
   if (/^\d+\.\d+\.\d+$/.test(message.version||'')) event.contentVersion=message.version;
@@ -92,10 +93,36 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
 export function inspectionDiagnostic(result,channel,index,revision,now=Date.now()) {
   const event={...channelDiagnostic(channel,index,revision),at:new Date(now).toISOString(),kind:'inspection-failed'};
   const data=result.diagnostics || {};
+  if(data.textContext)event.textContext=diagnosticTextContext(data.textContext);
   if(['slate','rendered'].includes(data.editorReadMode))event.editorReadMode=data.editorReadMode;
   if(/^[A-Z_]{1,40}$/.test(result.code || ''))event.code=result.code;
   if(/^\d+\.\d+\.\d+$/.test(data.contentVersion || ''))event.contentVersion=data.contentVersion;
   for(const key of TRACE_BOOLEANS)if(typeof data[key]==='boolean')event[key]=data[key];
   for(const key of TRACE_NUMBERS)if(Number.isFinite(data[key]))event[key]=Math.max(-86400000,Math.min(86400000,Math.round(data[key])));
   return event;
+}
+
+// UTF-16 offsets match JavaScript length diagnostics. Preserve whitespace and emoji.
+export function diagnosticTextContext(data={}) {
+  const result={},truncatedFields=[];
+  for(const key of ['expected','actual','rendered','messageA','messageB']) {
+    if(typeof data[key]!=='string')continue;
+    result[key]=data[key].slice(0,4000);
+    if(data[key].length>4000)truncatedFields.push(key);
+  }
+  if(typeof result.expected==='string' && typeof result.actual==='string'){
+    let index=0;while(index<result.expected.length && index<result.actual.length && result.expected[index]===result.actual[index])index++;
+    result.firstDifferenceIndex=index===result.expected.length && index===result.actual.length?-1:index;
+  }
+  result.truncatedFields=truncatedFields;
+  return result;
+}
+export function boundedDiagnosticHistory(events,count,byteLimit){
+  const kept=[];let size=0;
+  for(let i=events.length-1;i>=0 && kept.length<count;i--){
+    const bytes=JSON.stringify(events[i]).length*2;
+    if(size+bytes>byteLimit)break;
+    kept.push(events[i]);size+=bytes;
+  }
+  return kept.reverse();
 }

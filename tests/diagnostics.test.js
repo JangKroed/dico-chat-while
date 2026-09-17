@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {diagnosticEvents,recordDiagnostics} from '../diagnostics.js';
+import {diagnosticEvents,recordDiagnostics,diagnosticTextContext,boundedDiagnosticHistory,deliveryTraceEvent} from '../diagnostics.js';
 const before={channels:[{id:'1',enabled:true,messages:['SECRET','SECRET'],name:'PRIVATE',ownUserId:'USER',target:{url:'PRIVATE_URL'}}]};
 test('자동 중지와 사용자 중지를 구분하고 비공개 필드를 제외한다',()=>{
  const after=structuredClone(before);after.channels[0].enabled=false;after.channels[0].error='연결 끊김';
@@ -58,4 +58,22 @@ test('남은 초안의 A/B 일치 여부와 길이만 기록하며 원문은 버
  const {inspectionDiagnostic}=await import('../diagnostics.js');
  const e=inspectionDiagnostic({code:'DRAFT_MISMATCH',diagnostics:{draftLength:109,expectedLength:108,draftMatchesA:false,draftMatchesB:false,whitespaceOnlyDifference:true,draftHasVoid:false,body:'SECRET',token:'SECRET'}},{id:'a',target:{tabId:7}},0,2);
  assert.equal(e.kind,'inspection-failed');assert.equal(e.code,'DRAFT_MISMATCH');assert.equal(e.expectedLength,108);assert.equal(e.draftMatchesA,false);assert.equal(e.whitespaceOnlyDifference,true);assert.equal(JSON.stringify(e).includes('SECRET'),false);
+});
+
+test('문구 원문·개행·이모지와 최초 차이 위치를 남기며 추가 비공개 필드는 버린다',()=>{
+ const data=diagnosticTextContext({expected:'공지 :moneybag:\n A',actual:'공지 💰\n A',rendered:'공지 :moneybag:\n\n A',messageA:'A',messageB:'B',token:'SECRET'});
+ assert.equal(data.expected,'공지 :moneybag:\n A');assert.equal(data.actual,'공지 💰\n A');assert.equal(data.firstDifferenceIndex,3);assert.equal(data.token,undefined);
+ const long=diagnosticTextContext({actual:'x'.repeat(5000)});assert.equal(long.actual.length,4000);assert.deepEqual(long.truncatedFields,['actual']);
+});
+test('상세 로그와 타임라인은 본문 용량 한도 내에서 최신 기록을 보존한다',()=>{
+ const records=Array.from({length:30},(_,i)=>({index:i,text:'가'.repeat(2000)}));
+ const kept=boundedDiagnosticHistory(records,20,20000);assert.equal(kept.at(-1).index,29);assert.ok(kept.length<20);
+ assert.ok(kept.reduce((sum,e)=>sum+JSON.stringify(e).length*2,0)<=20000);
+});
+test('오류 전송 로그에 본문을 보존하고 잘못된 전송 ID는 거부한다',()=>{
+ const state={channels:[{id:'a',target:{tabId:7},prepared:{id:'attempt'}}]};
+ const message={id:'attempt',stage:'stability-failed',data:{textContext:{expected:'A :moneybag:',actual:'A 💰',messageA:'A :moneybag:',messageB:'B',token:'SECRET'}}};
+ assert.equal(deliveryTraceEvent(message,state,7).textContext.actual,'A 💰');
+ assert.equal(deliveryTraceEvent(message,state,8),null);
+ assert.equal(deliveryTraceEvent({...message,stage:'observation'},state,7).textContext,undefined);
 });

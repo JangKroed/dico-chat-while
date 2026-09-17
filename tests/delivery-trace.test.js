@@ -29,12 +29,12 @@ async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAft
  const result=await new Promise(resolve=>listener({type:'DICO_DELIVER',target:{...target,skipConfirmation,lastSentAt:alreadyPosted?Date.now()-1000:null,messages:['PRIVATE MESSAGE','OTHER ANNOUNCEMENT']},delivery:{id:'attempt',index:0,text:'PRIVATE MESSAGE',startedAt:Date.now(),scheduledAt:Date.now()-500}},{id:'ext'},resolve));
  return {result,traces};
 }
-test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부를 문구 없이 기록한다',async()=>{
+test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부와 전송 문구를 기록한다',async()=>{
  const {result,traces}=await deliver();assert.equal(result.status,'confirmed');
  assert.deepEqual(traces.map(t=>t.stage),['received','draft-replaced','before-paste','paste-dispatched','after-paste','before-enter','observation','enter-dispatched','finished']);
  assert.equal(traces.find(t=>t.stage==='after-paste').data.textMatches,true);
  assert.equal(traces.find(t=>t.stage==='enter-dispatched').data.enterPrevented,true);
- assert.equal(JSON.stringify(traces).includes('PRIVATE MESSAGE'),false);
+ assert.equal(traces.find(t=>t.stage==='before-enter').data.textContext.expected,'PRIVATE MESSAGE');
 });
 test('Enter가 무시되는 입력창을 재현하면 잔류·이벤트 미처리·새 메시지 없음이 기록된다',async()=>{
  const {result,traces}=await deliver(true);assert.equal(result.status,'draft-retained');assert.match(result.error,/문구가 남아/);
