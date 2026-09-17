@@ -562,6 +562,10 @@ elements.bindButton.addEventListener("click", async () => {
   if (!isPopup && !value) return setNotice("연결할 Discord 탭을 선택하세요.", "error");
   const payload = { channelId: selectedId };
   if (value) payload.tabId = Number(value);
+  else {
+    try { payload.windowId = (await chrome.windows.getCurrent()).id; }
+    catch { return setNotice("현재 창을 확인하지 못했습니다. 목록에서 Discord 탭을 선택해 주세요.", "error"); }
+  }
   await performAction("DICO_BIND", payload, "선택한 설정에 Discord 채널을 연결했습니다.");
 });
 

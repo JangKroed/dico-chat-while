@@ -78,10 +78,9 @@ h2 {
 }
 
 .popup-page {
-  width: 380px;
+  width: 100%;
   max-width: 100%;
-  min-height: 560px;
-  max-height: 600px;
+  min-height: 100vh;
   overflow-y: auto;
 }
 
@@ -967,3 +966,11 @@ input[aria-invalid="true"] {
 
 .skip-confirmation { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
 .skip-confirmation input { width: 16px; height: 16px; flex: 0 0 16px; accent-color: #8b76ff; }
+
+/* The Chrome side panel can be narrower than the previous popup. */
+@media (max-width: 360px) {
+  .popup-page .app-shell { padding: 10px; }
+  .popup-page .topbar { flex-wrap: wrap; }
+  .popup-page .topbar .status-badge { margin-left: auto; }
+  .popup-page .two-columns { grid-template-columns: 1fr; }
+}

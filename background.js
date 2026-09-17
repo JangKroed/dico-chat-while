@@ -239,7 +239,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       case 'DICO_BIND': {
         let tab;
         if (Number.isInteger(message.tabId)) tab = await chrome.tabs.get(message.tabId);
-        else [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        else [tab] = await chrome.tabs.query(Number.isInteger(message.windowId) ? {active:true,windowId:message.windowId} : {active:true,lastFocusedWindow:true});
         if (!tab) throw new Error('Discord 탭을 먼저 열고 선택해 주세요.');
         let slowmodeSeconds=null;
         const target=parseChannel(tab.url);
@@ -280,6 +280,8 @@ chrome.alarms.onAlarm.addListener(alarm => {
     void enqueue(()=>{void traceChannel(id,'alarm-processing',{firedAt,queueWaitMs:Date.now()-firedAt});return manager.tick(id);},'alarm-delivery',id);
   }
 });
+// Reapply when the worker starts, including install, update and browser restart.
+void enqueue(() => chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true}), 'configure-side-panel');
 chrome.runtime.onInstalled.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
 chrome.runtime.onStartup.addListener(() => void enqueue(() => recoverChannels(), 'recover-channels'));
 function enqueueForTab(tabId, action) {
