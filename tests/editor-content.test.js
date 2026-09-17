@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
+const emojiSource=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8');
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
 const t=text=>({nodeType:3,textContent:text});
 const el=(attrs={},children=[],tag='SPAN')=>({nodeType:1,tagName:tag,childNodes:children,getAttribute:key=>attrs[key]??null,get textContent(){return children.map(c=>c.textContent).join('');}});
 const leaf=text=>el({'data-slate-string':'true'},[t(text)]);
 const line=(...children)=>el({'data-slate-node':'element'},children,'DIV');
-function read(editor){const ctx={};const begin=source.indexOf('  function editorContent('),end=source.indexOf('  const hasDraft',begin);assert.ok(begin>=0);runInNewContext(source.slice(begin,end)+'\nglobalThis.read=editorContent;',ctx);return ctx.read(editor);}
+const readerContext={};runInNewContext(emojiSource,readerContext);
+const begin=source.indexOf('  function editorContent('),end=source.indexOf('  const hasDraft',begin);assert.ok(begin>=0);runInNewContext(source.slice(begin,end)+'\nglobalThis.read=editorContent;',readerContext);
+const read=editor=>readerContext.read(editor);
 test('표시용 줄바꿈 대신 Slate 문단과 문자열을 읽고 원래 공백을 보존한다',()=>{
  const editor=el({},[line(leaf('공지  A')),line(leaf('둘째 줄')),line(leaf('')),line(leaf('마지막'))]);editor.innerText='공지  A\n\n둘째 줄\n\n\n마지막';
  const result=read(editor);assert.equal(result.text,'공지  A\n둘째 줄\n\n마지막');assert.equal(result.mode,'slate');assert.equal(result.unsupported,false);
@@ -46,4 +49,18 @@ test('실제 Discord moneybag shortcode와 연결된 숨김 설명을 Unicode �
 });
 test('다른 설명·커스텀 이모지·알 수 없는 shortcode는 추측하지 않는다',()=>{
  for(const item of [discordMoneybag({},'다른 내용'),discordMoneybag({src:'https://cdn.discordapp.com/emojis/123.png'}),discordMoneybag({'data-name':':other:'}),discordMoneybag({alt:':unknown:','data-name':':unknown:'},':unknown:')])assert.equal(read(el({},[line(item)])).unsupported,true);
+});
+
+test('특정 문구 목록 없이 번들 전체 이모지 이름을 같은 이미지 구조로 읽는다',()=>{
+ const ctx={};runInNewContext(emojiSource,ctx);
+ for(const [name,value] of Object.entries(ctx.__dicoEmojiNames)){
+  const node=discordMoneybag({alt:name,'data-name':name},name);
+  const result=read(el({},[line(leaf('**공지** '),node,leaf(' __한글 ABC 123__'))]));
+  assert.equal(result.unsupported,false,name);assert.equal(result.text,'**공지** '+value+' __한글 ABC 123__',name);
+ }
+});
+test('국기·키캡·피부색·가족 합성 이모지를 Unicode alt로도 읽는다',()=>{
+ for(const value of ['🇰🇷','1️⃣','👍🏽','👨‍👩‍👧‍👦','🏴󠁧󠁢󠁥󠁮󠁧󠁿']){
+  const result=read(el({},[line(emoji(value))]));assert.equal(result.unsupported,false,value);assert.equal(result.text,value);
+ }
 });

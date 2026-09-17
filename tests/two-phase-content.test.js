@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
-const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null,managed=false,structured=false}={}) {
+const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
+function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null}={}) {
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  const nodes=[],events=[],traces=[];
  const form={querySelector:()=>null,querySelectorAll:()=>cooldown?[{textContent:cooldown,getClientRects:()=>[1]}]:[]};
@@ -13,8 +13,8 @@ function rig({lag=0,fault=null,managed=false,structured=false}={}) {
   events.push({type:event.type,at:clock});
   if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;}
   if(event.type==='keydown'){
-   assert.equal(editor.innerText.trim(),'A');event.defaultPrevented=true;editor.innerText='';
-   nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:'A',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check();
+   assert.equal(editor.innerText.trim(),message);event.defaultPrevented=true;editor.innerText='';
+   nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:'A',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
   }
  }};
  const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:()=>({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
@@ -30,11 +30,16 @@ function rig({lag=0,fault=null,managed=false,structured=false}={}) {
   let actualText='';Object.defineProperty(editor,'innerText',{get:()=>actualText?'\n'+actualText+'\n':'',set:value=>{actualText=value;}});
   editor.querySelector=selector=>selector.includes('data-slate-void')?{}:null;
   const node=(attrs,children=[])=>({nodeType:1,tagName:'SPAN',childNodes:children,getAttribute:key=>attrs[key]??null,get textContent(){return children.map(c=>c.textContent).join('');}});
-  Object.defineProperty(editor,'childNodes',{get(){return [node({'data-slate-node':'element'},[node({'data-slate-string':'true'},[{nodeType:3,textContent:actualText}]),node({'data-slate-void':'true'},[node({'data-slate-spacer':'true'},[node({'data-slate-zero-width':'z'},[{nodeType:3,textContent:'\ufeff'}])])])])];}});
+  Object.defineProperty(editor,'childNodes',{configurable:true,get(){return [node({'data-slate-node':'element'},[node({'data-slate-string':'true'},[{nodeType:3,textContent:actualText}]),node({'data-slate-void':'true'},[node({'data-slate-spacer':'true'},[node({'data-slate-zero-width':'z'},[{nodeType:3,textContent:'\ufeff'}])])])])];}});
+  if(emojiName)Object.defineProperty(editor,'childNodes',{get(){
+   const leaf=value=>node({'data-slate-string':'true'},[{nodeType:3,textContent:value}]);
+   const image=()=>{const img=node({class:'emoji','data-type':'emoji','data-name':emojiName,alt:emojiName,src:'/assets/abc123.svg','aria-describedby':'emoji-label'});img.tagName='IMG';return node({'data-slate-void':'true','data-slate-inline':'true'},[img,node({id:'emoji-label',class:'hiddenVisually_test'},[{nodeType:3,textContent:emojiName}]),node({'data-slate-spacer':'true'},[node({'data-slate-zero-width':'z'},[{nodeType:3,textContent:'\ufeff'}])])]);};
+   return actualText.split('\n').map(value=>node({'data-slate-node':'element'},value.split(emojiValue).flatMap((part,i)=>i?[image(),leaf(part)]:[leaf(part)])));
+  }});
   editor.nodeType=1;editor.tagName='DIV';
  }
- const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:['A','B'],expectedText:'A'};
- const delivery={id:'attempt',index:0,text:'A',startedAt:clock,scheduledAt:clock+3000};
+ const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)};
+ const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},Date:DateMock,
  chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt)}}}},
@@ -109,4 +114,17 @@ test('실제 전송 경로에서 Slate 보조 void가 있어도 정확한 문구
  r.tick(3000);assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
  assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
  assert.ok(r.traces.some(t=>t.data.editorReadMode==='slate'));
+});
+
+test('서식·이모지 초안을 준비/재사용한 뒤 재입력 없이 예약 시각에 Enter 한 번',async()=>{
+ for(const [emojiName,emojiValue] of [[':moneybag:','💰'],[':flag_kr:','🇰🇷'],[':thumbsup::skin-tone-4:','👍🏽'],[':one:','1️⃣']]){
+  for(const reuse of [false,true]){
+   const message='### 제목 '+emojiValue+'\n- __한글 ABC__ **123** '+emojiValue+'\nhttps://example.com/?q=a_b';
+   const r=rig({structured:true,message,emojiName,emojiValue});if(reuse)r.editor.innerText=message;
+   assert.equal((await r.request('DICO_PREPARE')).status,'prepared',emojiName);
+   r.tick(Math.max(0,r.delivery.scheduledAt-r.now()));assert.equal((await r.request('DICO_DELIVER')).status,'unverified',emojiName);
+   assert.equal(r.events.filter(e=>e.type==='paste').length,reuse?0:1);
+   assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+  }
+ }
 });

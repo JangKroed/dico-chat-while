@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Dico While · 교대 공지",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "description": "선택한 Discord 채널에서 두 공지를 번갈아 예약합니다. 중지해도 다음 문구 순서를 기억합니다.",
   "minimum_chrome_version": "120",
   "permissions": [
@@ -29,6 +29,7 @@
         "https://discord.com/channels/*"
       ],
       "js": [
+        "emoji-data.js",
         "content.js"
       ],
       "run_at": "document_idle"

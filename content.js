@@ -3,7 +3,7 @@
   globalThis.__dicoWhileLoaded = true;
   let busy = false;
   const seenDeliveries = new Set();
-  const normalize = text => text.replace(/\r\n/g, '\n').replace(/\u200b/g, '').trim();
+  const normalize = text => text.replace(/\r\n/g, '\n').replace(/\u200b/g, '').replace(/(\p{Emoji})\uFE0F/gu, '$1').trim();
   // Support heading/list rendering without weakening author or freshness checks.
   const comparableLines = text => normalize(text).split('\n').map(line => line.trim()).filter(Boolean).join('\n');
   const matchesRenderedText = (source, rendered) => {
@@ -47,9 +47,9 @@
     };
     const unicodeEmoji=node=>{
       const images=[],descriptions=[];let invalid=false;
-      // Discord renders this standard Unicode emoji as a shortcode image.
-      // Only accept the observed built-in asset shape; custom emoji stay blocked.
-      const aliases={':moneybag:':'💰'};
+      // Resolve built-in emoji names using the offline Unicode table.
+      const aliases=globalThis.__dicoEmojiNames || {};
+      const known=editorContent.knownEmoji ||= new Set(Object.values(aliases));
       const visit=n=>{
         if(n.nodeType===3){if(!/^[\s\u200b\ufeff]*$/.test(n.textContent || ''))invalid=true;return;}
         if(n.nodeType!==1){invalid=true;return;}
@@ -60,7 +60,7 @@
             /^(?:https:\/\/discord\.com)?\/assets\/[a-f0-9]+\.svg$/.test(attr(n,'src') || '');
           const value=builtIn && Object.hasOwn(aliases,alt)?aliases[alt]:alt;
           if(!/(?:^|\s)emoji(?:_|\s|$)/.test(attr(n,'class') || '') ||
-            !/^\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*$/u.test(value))invalid=true;
+            !(known.has(value) || /^(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*)$/u.test(value)))invalid=true;
           images.push({value,alt,description:attr(n,'aria-describedby')});return;
         }
         if(n.tagName!=='SPAN'){invalid=true;return;}
@@ -214,7 +214,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.26';
+  const CONTENT_VERSION = '0.2.27';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);

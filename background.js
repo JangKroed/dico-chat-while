@@ -57,7 +57,7 @@ async function inspect(target) {
       return result;
     }
     catch {
-      try { await chrome.scripting.executeScript({target:{tabId:target.tabId},files:['content.js']}); } catch {}
+      try { await chrome.scripting.executeScript({target:{tabId:target.tabId},files:['emoji-data.js','content.js']}); } catch {}
       return {ok:false,code:'CONNECTING',retryable:true,error:'Discord 입력창 연결을 기다리고 있습니다.'};
     }
   },{attempts:15,cancelled});
@@ -247,7 +247,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           const probe=()=>withTimeout(chrome.tabs.sendMessage(tab.id,{type:'DICO_CHANNEL_LIMIT',target}),5000);
           try { slowmodeSeconds=(await probe())?.slowmodeSeconds; }
           catch {
-            try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']}); slowmodeSeconds=(await probe())?.slowmodeSeconds; } catch {}
+            try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['emoji-data.js','content.js']}); slowmodeSeconds=(await probe())?.slowmodeSeconds; } catch {}
           }
         }
         return manager.bind(message.channelId, { tabId: tab.id, url: tab.url, title: tab.title, slowmodeSeconds });

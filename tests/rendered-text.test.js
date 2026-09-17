@@ -27,3 +27,11 @@ test('Discord 숨김 쉼표는 제외하고 실제 문장 쉼표는 보존한다
  assert.equal(matches('### 테스트 제목\n- 궁수, 해적 35~43제\n- 메용20• 리저렉션 ### 상담',rendered),true);
  assert.equal(matches('### 테스트 제목\n- 궁수 해적 35~43제\n- 메용20• 리저렉션 ### 상담',rendered),false);
 });
+
+test('이모지 표시 선택자만 정규화하고 문구·공백 차이는 유지한다',()=>{
+ const normalize=runInNewContext(helpers+'\nnormalize');
+ assert.equal(normalize('❤️ 1️⃣'),normalize('❤ 1⃣'));
+ assert.notEqual(normalize('공지  A'),normalize('공지 A'));
+ assert.notEqual(normalize('👍🏽'),normalize('👍'));
+ assert.notEqual(normalize('🇰🇷'),normalize('🇺🇸'));
+});
