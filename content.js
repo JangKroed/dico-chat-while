@@ -264,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.32';
+  const CONTENT_VERSION = '0.2.33';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -357,7 +357,8 @@
           detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
         }
         if (!empty) { detail = '입력창이 비워졌는지 확인하지 못했습니다.'; continue; }
-        finish({status:'confirmed'}); return;
+        evidence.messageId=id;
+        finish({status:'confirmed',messageId:id}); return;
       }
     };
     observer = new MutationObserver(check);
@@ -376,7 +377,7 @@
     return {promise,cancel:()=>finish({status:'uncertain',error:'입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.'})};
   }
   function reconcile(target, delivery) {
-    const unknown = reason => ({status:'uncertain', reason});
+    const unknown = (reason, messageId) => ({status:'uncertain', reason, ...(messageId ? {messageId} : {})});
     if (!target || !matchesTarget(target)) return unknown('wrong-channel');
     if (!delivery?.id || typeof delivery.text !== 'string' || !Number.isFinite(delivery.startedAt)) return unknown('invalid-delivery');
     const found = editors();
@@ -389,7 +390,7 @@
     const user = ownUserId(target);
     if (!user) return unknown('author-unknown');
     const candidates = new Set();
-    let nextAlreadyPosted = false;
+    let nextAlreadyPosted = null;
     for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
       const rendered = messageText(node);
       const currentMatch = matchesRenderedText(delivery.text, rendered);
@@ -399,12 +400,15 @@
       if (row.querySelector('[class*="isSending"], [class*="isFailed"]') || row.matches('[class*="isSending"], [class*="isFailed"]')) continue;
       const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
       const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
+      // Server snowflake time can be ahead of the local acknowledgement clock.
+      // Use the acknowledged server ID as an independent high-water mark.
+      if (id && /^\d{17,20}$/.test(target.lastConfirmedMessageId || '') && BigInt(id)<=BigInt(target.lastConfirmedMessageId)) continue;
       // No backwards tolerance: an older identical announcement is not proof.
       if (!id || created < delivery.startedAt || created > Date.now() + 2000 || authorId(row) !== user) continue;
       if (currentMatch) candidates.add(id);
-      if (nextMatch && !currentMatch) nextAlreadyPosted = true;
+      if (nextMatch && !currentMatch) nextAlreadyPosted = id;
     }
-    if (nextAlreadyPosted) return unknown('next-already-posted');
+    if (nextAlreadyPosted) return unknown('next-already-posted',nextAlreadyPosted);
     if (candidates.size !== 1) return unknown(candidates.size ? 'multiple-matches' : 'no-proof');
     let draftAction = 'empty';
     if (draft) {
@@ -412,7 +416,7 @@
       else if (composerMatches(editor,delivery.text)) draftAction = 'replace-next';
       else return unknown('foreign-draft');
     }
-    return {status:'confirmed',draftAction};
+    return {status:'confirmed',draftAction,messageId:[...candidates][0]};
   }
   async function stableEditor(target, text, editor, duration, report) {
     const began=Date.now(); let stableSince=null,maxStableMs=0,textStableSince=null,repaired=false;
@@ -468,7 +472,7 @@
     try {
       if (!target.skipConfirmation && Number.isFinite(target.lastSentAt) && target.lastSentAt > 0) {
         const previous = reconcile(target, {...delivery,startedAt:target.lastSentAt + 1});
-        trace('prior-post-check',{result:previous.status,reconciliationReason:previous.reason || 'confirmed'});
+        trace('prior-post-check',{result:previous.status,reconciliationReason:previous.reason || 'confirmed',messageId:previous.messageId});
         if (previous.status === 'confirmed') {
           trace('prior-post-confirmed', {result:'confirmed',draftAction:previous.draftAction});
           return previous;
@@ -570,7 +574,7 @@
       trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
       if (target.skipConfirmation) { trace('finished',{result:'unverified'}); return {status:'unverified'}; }
       const outcome = await watcher.promise;
-      trace('finished', {result:outcome.status});
+      trace('finished', {result:outcome.status,messageId:outcome.messageId});
       return outcome;
     } catch {
       trace('exception');

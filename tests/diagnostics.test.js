@@ -77,3 +77,10 @@ test('오류 전송 로그에 본문을 보존하고 잘못된 전송 ID는 거�
  assert.equal(deliveryTraceEvent(message,state,8),null);
  assert.equal(deliveryTraceEvent({...message,stage:'observation'},state,7).textContext,undefined);
 });
+
+test('충돌 후보와 마지막 확인 게시 ID를 채널별 진단에 보존한다',()=>{
+ const state={channels:[{id:'one',target:{tabId:7},pending:{id:'delivery'},lastConfirmedMessageId:'1548966122731216936'}]};
+ const event=deliveryTraceEvent({id:'delivery',stage:'prior-post-check',data:{messageId:'1548966122731216937',reconciliationReason:'next-already-posted'}},state,7,1000);
+ assert.equal(event.messageId,'1548966122731216937');
+ assert.equal(event.lastConfirmedMessageId,'1548966122731216936');
+});

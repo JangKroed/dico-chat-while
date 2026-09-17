@@ -15,6 +15,7 @@ export const initialState = () => ({
   error: null,
   history: [],
   lastSentAt: null,
+  lastConfirmedMessageId: null,
   slowmodeUntil: null,
   draftRetries: 0,
   draftRetrySince: null,
@@ -67,7 +68,7 @@ export function createController(io) {
   };
   const persist = async state => { await io.save(state); return state; };
   const scheduleNext = state => io.schedule(io.prepare && !state.prepared ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
-  const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
+  const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,lastConfirmedMessageId:state.lastConfirmedMessageId,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
   const pause = async (state, error) => {
     state.prepared = null;
     state.enabled = false;
@@ -109,7 +110,8 @@ export function createController(io) {
       log(state,'info',`슬로우 모드 ${seconds}초에 여유 3초를 더해 주기를 ${minimum}초로 조정했습니다.`);
     }
   };
-  const confirmed = async (state, verified=true) => {
+  const confirmed = async (state, verified=true, receipt=null) => {
+    if (receipt && /^\d{17,20}$/.test(receipt.messageId || '')) state.lastConfirmedMessageId=receipt.messageId;
     state.lastOutcome=verified?'confirmed':'unverified';
     state.lastDeliveryId=state.pending.id;
     state.prepared = null;
@@ -130,10 +132,11 @@ export function createController(io) {
   const recheck = async state => {
     if (!io.reconcile) return false;
     try {
-      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation, messages:state.messages}, state.pending);
+      const result = await io.reconcile({...state.target, ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastConfirmedMessageId:state.lastConfirmedMessageId, messages:state.messages}, state.pending);
       log(state, 'info', result?.status === 'confirmed' ? '게시 기록 재확인으로 본인의 전송을 확인했습니다.' : '게시 기록 재확인에서 전송을 확정하지 못했습니다.');
       if (result?.status === 'confirmed' && result.draftAction === 'replace-next') log(state,'info','이미 게시된 공지 초안은 다음 전송 시 현재 차례 문구로 교체합니다.');
       if (result?.status === 'confirmed' && result.draftAction === 'reuse-next') log(state,'info','다음 차례의 초안을 보존합니다. 다음 전송 시 재사용합니다.');
+      if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')) state.lastConfirmedMessageId=result.messageId;
       return result?.status === 'confirmed';
     } catch { log(state, 'info', '게시 기록 재확인에 연결하지 못했습니다.'); return false; }
   };
@@ -158,7 +161,7 @@ export function createController(io) {
       if (!channel || !Number.isInteger(target.tabId) || target.tabId < 0) {
         throw new Error('Discord 서버의 텍스트 채널을 열고 팝업에서 선택해 주세요. DM은 지원하지 않습니다.');
       }
-      if (state.target?.guildId!==channel.guildId || state.target?.channelId!==channel.channelId) { state.slowmodeSeconds=null; state.lastSentAt=null; }
+      if (state.target?.guildId!==channel.guildId || state.target?.channelId!==channel.channelId) { state.slowmodeSeconds=null; state.lastSentAt=null; state.lastConfirmedMessageId=null; }
       applySlowmode(state,target.slowmodeSeconds);
       // Reconnecting the same room from an ordinary tab must not lose its sender.
       if (!target.managed && state.target?.managed &&
@@ -243,7 +246,7 @@ export function createController(io) {
         let prepared;
         try { prepared=await io.prepare(destination(state),state.prepared); }
         catch { prepared={status:'blocked',error:'입력 준비 응답을 받지 못했습니다. 남은 초안을 보존하고 중지합니다.'}; }
-        if (prepared?.status==='confirmed') { state.pending=state.prepared; return confirmed(state); }
+        if (prepared?.status==='confirmed') { state.pending=state.prepared; return confirmed(state,true,prepared); }
         if (prepared?.status!=='prepared') return pause(state,prepared?.error || '문구 입력 준비를 완료하지 못했습니다.');
         state.prepared.phase='ready';
         state.prepared.readyAt=io.now();
@@ -267,7 +270,7 @@ export function createController(io) {
       }
       await persist(state);
       let response;
-      try { response = await io.send({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, lastSentAt: state.lastSentAt, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince }, state.pending); }
+      try { response = await io.send(destination(state), state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
       if (state.skipConfirmation && (!response?.status || ['unverified','uncertain'].includes(response.status))) return confirmed(state,false);
       if (response?.status === 'uncertain' && await recheck(state)) response = {status:'confirmed'};
@@ -292,7 +295,7 @@ export function createController(io) {
         catch { return pause(state, '초안 재확인 예약을 등록하지 못했습니다.'); }
         return state;
       }
-      if (response?.status === 'confirmed') return confirmed(state);
+      if (response?.status === 'confirmed') return confirmed(state,true,response);
       if (response?.status === 'blocked') state.pending = null;
       return pause(state, response?.error || '전송 결과가 불확실합니다. 채널에서 확인해 주세요.');
     },

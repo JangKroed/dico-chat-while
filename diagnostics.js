@@ -9,7 +9,7 @@ export function channelDiagnostic(channel = {}, index = -1, revision = null) {
     intervalSeconds:channel.intervalSeconds ?? null,slowmodeSeconds:channel.slowmodeSeconds ?? null,
     slowmodeUntil:channel.slowmodeUntil ?? null,skipConfirmation:channel.skipConfirmation===true,
     nextRunAt:channel.nextRunAt ?? null,lastAttemptOrConfirmedAt:channel.lastSentAt ?? null,
-    lastOutcome:channel.lastOutcome ?? null,lastDeliveryId:channel.lastDeliveryId ?? null,enabled:channel.enabled===true,
+    lastOutcome:channel.lastOutcome ?? null,lastDeliveryId:channel.lastDeliveryId ?? null,lastConfirmedMessageId:channel.lastConfirmedMessageId ?? null,enabled:channel.enabled===true,
     ...(delivery?{deliveryId:delivery.id,deliveryScheduledAt:delivery.scheduledAt,deliveryStartedAt:delivery.startedAt,deliveryMessage:delivery.index===1?'B':'A',deliveryPhase:channel.pending?'commit':delivery.phase}:{}),
     pending:Boolean(channel.pending),nextMessage:channel.nextIndex===1?'B':'A'};
 }
@@ -74,6 +74,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   if(index<0 || !TRACE_STAGES.has(message.stage)) return null;
   const event={...channelDiagnostic(state.channels[index],index,state.revision),at:new Date(now).toISOString(),kind:'delivery-trace',channel:index+1,deliveryId:message.id,stage:message.stage};
   if(['stability-failed','exception','before-enter','finished'].includes(message.stage) && message.data?.textContext)event.textContext=diagnosticTextContext(message.data.textContext);
+  if(/^\d{17,20}$/.test(message.data?.messageId || ''))event.messageId=message.data.messageId;
   if(['confirmed','wrong-channel','invalid-delivery','draft-or-editor','author-unknown','next-already-posted','multiple-matches','no-proof','foreign-draft'].includes(message.data?.reconciliationReason))event.reconciliationReason=message.data.reconciliationReason;
   if([0,1].includes(message.data?.messageIndex))event.deliveryMessage=message.data.messageIndex===1?'B':'A';
   if(['prepare','commit','send'].includes(message.data?.deliveryPhase))event.deliveryPhase=message.data.deliveryPhase;

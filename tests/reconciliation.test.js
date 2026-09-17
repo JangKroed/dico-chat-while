@@ -68,3 +68,17 @@ test('수동 확인 전 A 게시를 B의 순서 충돌로 다시 판단하지 �
  assert.equal(r.api.reconcile(r.target,next).reason,'next-already-posted');
  assert.equal(r.api.reconcile(r.target,{...next,startedAt:now+1}).reason,'no-proof');
 });
+
+test('서버 시각이 로컬 확인보다 앞서도 이미 확인한 게시 ID는 다음 순서 충돌이 아니다',()=>{
+ const r=rig();r.setNodes([r.node]);
+ r.target.lastConfirmedMessageId=r.node.id.slice(16);
+ const next={...r.delivery,index:1,text:'다음 공지',startedAt:r.delivery.startedAt-1000};
+ assert.equal(r.api.reconcile(r.target,next).reason,'no-proof');
+ // A genuinely newer opposite-turn message must still stop the sequence.
+ r.setNodes([{...r.node,id:'message-content-'+(BigInt(r.target.lastConfirmedMessageId)+1n)}]);
+ assert.equal(r.api.reconcile(r.target,next).reason,'next-already-posted');
+});
+test('재확인 결과는 확인된 게시 ID를 반환한다',()=>{
+ const r=rig();r.setNodes([r.node]);
+ assert.equal(r.api.reconcile(r.target,r.delivery).messageId,r.node.id.slice(16));
+});

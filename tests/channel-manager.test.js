@@ -296,3 +296,31 @@ test('63초와 123초 확인 생략 채널을 동시에 실행해도 예약과 �
  assert.deepEqual(r.sent.map(s=>s.destination.tabId),[7,8,7,8]);
  assert.deepEqual(r.state.channels.map(c=>c.intervalSeconds),[63,123]);
 });
+
+for (const intervals of [[120,60,60],[60,120,60]]) {
+ test(`3채널 ${intervals.join('/')}초는 저장 순서를 뒤집어도 각 ID의 주기로 6분간 실행된다`,async()=>{
+  const r=rig();await r.manager.getState();await r.manager.add();await r.manager.add();
+  const ids=r.state.channels.map(c=>c.id),started=r.io.now(),actual=new Map(ids.map(id=>[id,[]]));
+  for(let i=0;i<ids.length;i++)await configure(r,ids[i],20+i,ids[i],intervals[i]);
+  r.io.prepare=async()=>({status:'prepared'});
+  r.io.send=async(destination,delivery)=>{
+   const i=ids.indexOf(delivery.channelId);
+   assert.equal(destination.channelId,String(20+i));
+   actual.get(delivery.channelId).push({at:r.io.now()-started,index:delivery.index});
+   return {status:'confirmed'};
+  };
+  await r.manager.startAll();
+  const root=r.state;root.channels.reverse();await r.io.save(root);
+  while(true){
+   const at=Math.min(...r.alarms.values());if(at>started+360000)break;
+   r.advance((at-r.io.now())/1000);
+   const due=[...r.alarms].filter(([,when])=>when<=at).map(([id])=>id);
+   await Promise.all(due.map(id=>r.manager.tick(id)));
+  }
+  for(let i=0;i<ids.length;i++){
+   const expected=Array.from({length:360/intervals[i]+1},(_,n)=>({at:n*intervals[i]*1000,index:n%2}));
+   assert.deepEqual(actual.get(ids[i]),expected);
+   assert.equal(r.state.channels.find(c=>c.id===ids[i]).intervalSeconds,intervals[i]);
+  }
+ });
+}

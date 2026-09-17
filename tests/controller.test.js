@@ -415,3 +415,17 @@ test('미확인 결과·다른 기록·미래 기록은 확인 시각 복구에 
   const r=rig({lastOutcome,lastSentAt:500000,history});assert.equal((await r.controller.getState()).lastSentAt,500000);
  }
 });
+
+test('확인된 게시 ID는 저장·재시작 후 다음 채널 검사에도 전달된다',async()=>{
+ const r=await configured(),messageId='1548966122731216936';
+ r.io.send=async()=>({status:'confirmed',messageId});
+ await r.controller.start();
+ assert.equal(r.state.lastConfirmedMessageId,messageId);
+ const restarted=createController(r.io);
+ r.io.send=async destination=>{
+  assert.equal(destination.lastConfirmedMessageId,messageId);
+  return {status:'confirmed',messageId:'1548966122731216937'};
+ };
+ r.advance(30);await restarted.tick();
+ assert.equal(r.state.lastConfirmedMessageId,'1548966122731216937');
+});

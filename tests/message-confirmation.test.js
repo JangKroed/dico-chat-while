@@ -20,7 +20,7 @@ test('입력창이 비워지기 전 전송 중 상태와 최종 ID 변경을 연
  const r=rig();const watcher=r.api.watchMessage(r.editor,'공지',null,Date.now());
  r.setNodes([r.node]);r.row.sending=true;r.check();
  r.node.id=snowflake();r.row.sending=false;r.editor.innerText='';r.check();
- assert.equal((await watcher.promise).status,'confirmed');
+ const receipt=await watcher.promise;assert.equal(receipt.status,'confirmed');assert.equal(receipt.messageId,r.node.id.slice(16));
 });
 test('본문 제목을 작성자 헤더로 오인하지 않고 이전 작성자를 찾는다',()=>{
  const r=rig();
