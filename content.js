@@ -46,22 +46,34 @@
       return [...node.childNodes].every(emptySpacer);
     };
     const unicodeEmoji=node=>{
-      const images=[];let invalid=false;
+      const images=[],descriptions=[];let invalid=false;
+      // Discord renders this standard Unicode emoji as a shortcode image.
+      // Only accept the observed built-in asset shape; custom emoji stay blocked.
+      const aliases={':moneybag:':'💰'};
       const visit=n=>{
         if(n.nodeType===3){if(!/^[\s\u200b\ufeff]*$/.test(n.textContent || ''))invalid=true;return;}
         if(n.nodeType!==1){invalid=true;return;}
         if(attr(n,'data-slate-spacer')==='true'){if(!emptySpacer(n))invalid=true;return;}
         if(n.tagName==='IMG'){
           const alt=attr(n,'alt') || '';
+          const builtIn=attr(n,'data-type')==='emoji' && attr(n,'data-name')===alt &&
+            /^(?:https:\/\/discord\.com)?\/assets\/[a-f0-9]+\.svg$/.test(attr(n,'src') || '');
+          const value=builtIn && Object.hasOwn(aliases,alt)?aliases[alt]:alt;
           if(!/(?:^|\s)emoji(?:_|\s|$)/.test(attr(n,'class') || '') ||
-            !/^\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*$/u.test(alt))invalid=true;
-          images.push(alt);return;
+            !/^\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*$/u.test(value))invalid=true;
+          images.push({value,alt,description:attr(n,'aria-describedby')});return;
         }
         if(n.tagName!=='SPAN'){invalid=true;return;}
+        if(/(?:^|\s)hiddenVisually(?:_|\s|$)/.test(attr(n,'class') || '')){descriptions.push(n);return;}
         [...n.childNodes].forEach(visit);
       };
       [...node.childNodes].forEach(visit);
-      return !invalid && images.length===1?images[0]:null;
+      if(invalid || images.length!==1 || descriptions.length>1)return null;
+      const image=images[0];
+      // Ignore only the image's exact, text-only accessibility description.
+      if(descriptions.some(n=>!attr(n,'id') || attr(n,'id')!==image.description ||
+        n.textContent!==image.alt || ![...n.childNodes].every(c=>c.nodeType===3)))return null;
+      return image.value;
     };
     const read=node=>{
       if(node.nodeType===3){if(/\S/.test(node.textContent || ''))unsupported=true;return {text:'',block:false};}
@@ -202,7 +214,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.25';
+  const CONTENT_VERSION = '0.2.26';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);

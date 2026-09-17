@@ -35,3 +35,15 @@ test('사용자 공지의 💰 두 개와 Markdown 기호를 누락 없이 읽�
 test('shortcode·일반 이미지·이모지 뒤 숨은 텍스트는 허용하지 않는다',()=>{
  for(const item of [emoji(':moneybag:'),emoji('hello'),el({'data-slate-void':'true'},[el({alt:'💰'},[],'IMG')]),el({'data-slate-void':'true'},[emoji(),t('hidden')])])assert.equal(read(el({},[line(item)])).unsupported,true);
 });
+// Structure observed in the user's Discord composer on 2026-09-17.
+const discordMoneybag=(overrides={},label=':moneybag:')=>el({'data-slate-node':'element','data-slate-inline':'true','data-slate-void':'true',contenteditable:'false'},[
+ el({class:'emoji','data-type':'emoji','data-name':':moneybag:',alt:':moneybag:','aria-describedby':'emoji-description',src:'/assets/60e4658040396168.svg',...overrides},[],'IMG'),
+ el({id:'emoji-description',class:'hiddenVisually_b18fe2'},[t(label)]),
+ el({'data-slate-spacer':'true'},[el({'data-slate-node':'text'},[el({'data-slate-leaf':'true'},[el({'data-slate-zero-width':'z','data-slate-length':'0'},[t('\ufeff')])])])])]);
+test('실제 Discord moneybag shortcode와 연결된 숨김 설명을 Unicode 한 글자로 읽는다',()=>{
+ const result=read(el({},[line(leaf('한타임 '),discordMoneybag(),leaf('**1600** | 반타임 '),discordMoneybag(),leaf('**800**'))]));
+ assert.equal(result.text,'한타임 💰**1600** | 반타임 💰**800**');assert.equal(result.unsupported,false);assert.equal(result.unicodeEmojiCount,2);
+});
+test('다른 설명·커스텀 이모지·알 수 없는 shortcode는 추측하지 않는다',()=>{
+ for(const item of [discordMoneybag({},'다른 내용'),discordMoneybag({src:'https://cdn.discordapp.com/emojis/123.png'}),discordMoneybag({'data-name':':other:'}),discordMoneybag({alt:':unknown:','data-name':':unknown:'},':unknown:')])assert.equal(read(el({},[line(item)])).unsupported,true);
+});
