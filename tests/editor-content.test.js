@@ -64,3 +64,35 @@ test('국기·키캡·피부색·가족 합성 이모지를 Unicode alt로도 �
   const result=read(el({},[line(emoji(value))]));assert.equal(result.unsupported,false,value);assert.equal(result.text,value);
  }
 });
+
+runInNewContext(source.slice(source.indexOf('  const normalize'),source.indexOf('  // Support heading')),readerContext);
+const matches=(editor,text)=>readerContext.composerMatches(editor,text);
+test('실제 이모지 위치에서만 shortcode 대체를 허용한다',()=>{
+ const editor=el({},[line(leaf('가격 '),discordMoneybag(),leaf(' 1600 / 문자 :moneybag:'))]);
+ assert.equal(matches(editor,'가격 :moneybag: 1600 / 문자 :moneybag:'),true);
+ assert.equal(matches(editor,'가격 💰 1600 / 문자 :moneybag:'),true);
+ assert.equal(matches(editor,'가격 :moneybag: 1600 / 문자 💰'),false);
+ for(const text of ['가격 :moneybag: 1601 / 문자 :moneybag:','가격  :moneybag: 1600 / 문자 :moneybag:','가격 :moneybag: 1600\n/ 문자 :moneybag:','가격 :unknown: 1600 / 문자 :moneybag:'])assert.equal(matches(editor,text),false,text);
+});
+test('인라인 코드·코드 블록·이스케이프·URL의 shortcode는 이미지와 같다고 보지 않는다',()=>{
+ for(const [left,right] of [['`','`'],['``','``'],['```txt\n','\n```'],['~~~\n','\n~~~'],['\\',''],['https://example.com/',''],['<https://example.com/','>']]){
+  const transformed=el({},[line(leaf(left),discordMoneybag(),leaf(right))]);
+  assert.equal(matches(transformed,left+':moneybag:'+right),false,left);
+  assert.equal(matches(el({},[line(leaf(left+':moneybag:'+right))]),left+':moneybag:'+right),true,left);
+ }
+ assert.equal(matches(el({},[line(leaf('`예제 :moneybag:` '),discordMoneybag())]),'`예제 :moneybag:` :moneybag:'),true);
+});
+test('전체 이름 목록에서 Unicode와 이름은 동일하고 잘못된 이름은 거부한다',()=>{
+ for(const [alias,value] of Object.entries(readerContext.__dicoEmojiNames)){
+  const editor=el({},[line(leaf('A '),discordMoneybag({alt:alias,'data-name':alias},alias),leaf(' B'))]);
+  assert.equal(matches(editor,'A '+alias+' B'),true,alias);
+  assert.equal(matches(editor,'A '+value+' B'),true,alias);
+  assert.equal(matches(editor,'A :definitely_unknown: B'),false,alias);
+ }
+});
+test('같은 이모지의 다른 이름과 Unicode alt도 함께 비교한다',()=>{
+ const thumb=discordMoneybag({alt:':+1:','data-name':':+1:'},':+1:');
+ assert.equal(matches(el({},[line(thumb)]),':thumbsup:'),true);
+ assert.equal(matches(el({},[line(emoji())]),':moneybag:'),true);
+ assert.equal(matches(el({},[line(thumb)]),':thumbsup::skin-tone-4:'),false);
+});

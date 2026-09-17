@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null}={}) {
+function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false}={}) {
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  const nodes=[],events=[],traces=[];
  const form={querySelector:()=>null,querySelectorAll:()=>cooldown?[{textContent:cooldown,getClientRects:()=>[1]}]:[]};
@@ -13,12 +13,12 @@ function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiN
   events.push({type:event.type,at:clock});
   if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;}
   if(event.type==='keydown'){
-   assert.equal(editor.innerText.trim(),message);event.defaultPrevented=true;editor.innerText='';
+   assert.equal(editor.innerText.trim(),convertAliases?delivery.text.replaceAll(emojiName,emojiValue):delivery.text);event.defaultPrevented=true;editor.innerText='';
    nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:'A',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
   }
  }};
  const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:()=>({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
- const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=pasteText;pasteDue=null;selection.isCollapsed=true;
+ const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
  if(fault==='text_mismatch')editor.innerText='WRONG';
  if(fault==='focus_lost')document.activeElement=null;
  if(fault==='foreign_focus')document.activeElement={};
@@ -46,7 +46,7 @@ function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiN
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{tick(ms);fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {editor,events,traces,delivery,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {editor,events,traces,delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve))};
 }
 test('늦은 문구 반영 뒤 1초 안정 확인하고 예약 시각 이후 Enter만 보낸다',async()=>{
@@ -127,4 +127,41 @@ test('서식·이모지 초안을 준비/재사용한 뒤 재입력 없이 예�
    assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
   }
  }
+});
+
+test('로그의 shortcode 190/191자 → 실제 이모지 174/175자 불일치를 재현한다',async()=>{
+ const original='### 166풀이속숍 집뿌쩔 머쉬킹 끝나고 바로 시작하세요\n- __궁수,해적,전사 공용 35~43제 명중 방어구, 무기 대여로 2탐 후 3차까지__\n- 템대여 무보증금, 스초 X , 한타임 💰**1600** | 반타임 💰**800**\n- 메용20 · 리저렉션 · 깔끔한 심파컨\n### 직업/렙 상담 DM주세요';
+ for(const ending of ['', '.'])for(const reuse of [false,true]){
+  const message=(original+ending).replaceAll('💰',':moneybag:');
+  const r=rig({structured:true,message,emojiName:':moneybag:',emojiValue:'💰',convertAliases:true});
+  assert.equal(message.length,190+ending.length);
+  if(reuse)r.editor.innerText=original+ending;
+  const prepared=await r.request('DICO_PREPARE');assert.equal(prepared.status,'prepared',JSON.stringify(prepared));
+  r.tick(Math.max(0,r.delivery.scheduledAt-r.now()));assert.equal((await r.request('DICO_DELIVER')).status,'unverified');
+  assert.equal(r.events.filter(e=>e.type==='paste').length,reuse?0:1);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ }
+});
+
+test('A/B/A/B 각 차례에 이전 초안은 교체하고 현재 초안은 재사용한다',async()=>{
+ const r=rig({structured:true,message:'A :moneybag:',emojiName:':moneybag:',emojiValue:'💰',convertAliases:true});
+ r.target.messages=['A :moneybag:','B :moneybag:'];
+ for(const [turn,index] of [0,1,0,1].entries()){
+  Object.assign(r.delivery,{id:'cycle-'+turn,index,text:r.target.messages[index],startedAt:r.now(),scheduledAt:r.now()+3000});
+  r.editor.innerText=(turn%2===0?r.target.messages[1-index]:r.target.messages[index]).replaceAll(':moneybag:','💰');
+  const before=r.events.filter(e=>e.type==='paste').length;
+  assert.equal((await r.request('DICO_PREPARE')).status,'prepared');
+  assert.equal(r.events.filter(e=>e.type==='paste').length-before,turn%2===0?1:0);
+  r.tick(Math.max(0,r.delivery.scheduledAt-r.now()));assert.equal((await r.request('DICO_DELIVER')).status,'unverified');
+  assert.equal(r.events.filter(e=>e.type==='keydown').length,turn+1);
+ }
+});
+test('shortcode 준비 후 가격이 바뀌면 Enter 없이 중단하고 변환 진단도 보존한다',async()=>{
+ const r=rig({structured:true,message:'가격 :moneybag: 1600',emojiName:':moneybag:',emojiValue:'💰',convertAliases:true});
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');
+ const trace=r.traces.find(t=>t.data?.emojiEquivalent===true);assert.ok(trace);assert.equal(trace.data.rawTextMatches,false);
+ const event=deliveryTraceEvent(trace,{channels:[{id:'channel-a',target:{tabId:7},prepared:{id:r.delivery.id}}]},7);
+ let saved;await appendDiagnostics({storage:{local:{get:async()=>({}),set:async value=>{saved=value;}}}},[event]);
+ assert.equal(saved.diagnosticLog[0].emojiEquivalent,true);assert.equal(saved.diagnosticLog[0].rawTextMatches,false);
+ r.editor.innerText='가격 💰 1601';r.tick(3000);
+ assert.equal((await r.request('DICO_DELIVER')).status,'blocked');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
 });
