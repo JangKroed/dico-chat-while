@@ -8,9 +8,12 @@
   const comparableLines = text => normalize(text).split('\n').map(line => line.trim()).filter(Boolean).join('\n');
   const matchesRenderedText = (source, rendered) => {
     if (normalize(source) === normalize(rendered)) return true;
-    // Unsupported constructs stay conservative (code, links, emphasis, etc.).
-    if (/[`*_\[\]<>]/.test(source) || source.includes('~~')) return false;
-    const plain = source.split('\n').map(line => line
+    // Parse only supported, paired emphasis; code/links/escapes stay conservative.
+    if (/[`\\\[\]<>]/.test(source)) return false;
+    let formatted=source.replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g,'$1').replace(/__(?=\S)([^_\n]*?\S)__/g,'$1');
+    if(/[*_]/.test(formatted) || formatted.includes('~~'))return false;
+    formatted=formatted.replace(/:[a-zA-Z0-9_+-]+:(?::skin-tone-[2-6]:)*/g,alias=>globalThis.__dicoEmojiNames?.[alias] || alias);
+    const plain = formatted.split('\n').map(line => line
       .replace(/^ {0,3}#{1,3} +/, '')
       .replace(/^ {0,3}[-+] +/, '')).join('\n');
     return comparableLines(plain) === comparableLines(rendered);
@@ -25,6 +28,12 @@
       if (element.getAttribute('aria-hidden') === 'true' ||
           /(?:^|\s)hiddenVisually[_\s]/.test(element.getAttribute('class') || '')) return '';
       if (element.tagName === 'BR') return '\n';
+      if (element.tagName === 'IMG') {
+        const alt=element.getAttribute('alt') || '';
+        if(!/(?:^|\s)emoji(?:_|\s|$)/.test(element.getAttribute('class') || ''))return '\u0000';
+        const names=globalThis.__dicoEmojiNames || {};
+        return names[alt] || (Object.values(names).includes(alt)?alt:'\u0000');
+      }
       const text = [...element.childNodes].map(read).join('');
       return /^(H[1-6]|LI|UL|OL|P|DIV|BLOCKQUOTE)$/.test(element.tagName) ? `\n${text}\n` : text;
     };
@@ -255,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.30';
+  const CONTENT_VERSION = '0.2.31';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);

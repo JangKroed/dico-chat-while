@@ -9,7 +9,7 @@ test('제목과 목록의 렌더링 후 텍스트를 비교한다',()=>{
  assert.equal(matches('### 166 전사\n- 공수, 해적\n- 매물20\n### 직업 상담 DM주세요','166 전사\n\n공수, 해적\n매물20\n\n직업 상담 DM주세요'),true);
  assert.equal(matches('공지 A','공지 B'),false);
  assert.equal(matches('### 공지 A','공지 B'),false);
- assert.equal(matches('**공지**','공지'),false);
+ assert.equal(matches('**공지**','공지'),true);
  assert.equal(matches('가격 -20','가격 20'),false);
 });
 
@@ -34,4 +34,14 @@ test('이모지 표시 선택자만 정규화하고 문구·공백 차이는 유
  assert.notEqual(normalize('공지  A'),normalize('공지 A'));
  assert.notEqual(normalize('👍🏽'),normalize('👍'));
  assert.notEqual(normalize('🇰🇷'),normalize('🇺🇸'));
+});
+
+test('사용자 공지의 밑줄·굵게와 이모지 게시 결과를 비교한다',()=>{
+ const input='### 공지\n- __궁수,해적 35~43제__\n- 한타임 💰**1600** | 반타임 💰**800**\n### DM주세요';
+ const output='공지\n궁수,해적 35~43제\n한타임 💰1600 | 반타임 💰800\nDM주세요';
+ assert.equal(matches(input,output),true);
+ assert.equal(matches(input,output.replace('1600','1601')),false);
+ assert.equal(matches('`**1600**`','1600'),false);
+ assert.equal(matches('**1600','1600'),false);
+ assert.equal(matches('[1600](https://example.com)','1600'),false);
 });

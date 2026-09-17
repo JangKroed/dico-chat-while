@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
-const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
+const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
 function rig(){
  let nodes=[],check,timeout,poll;
  const editor={isConnected:true,innerText:'공지',getClientRects:()=>[1],getAttribute:()=>null};
@@ -54,5 +54,22 @@ test('전송 이전에 이미 있던 메시지와 Discord 실패 상태는 성�
   r.setNodes([r.node]);r.row.failed=!existing;r.editor.innerText='';
   r.row.querySelectorAll=()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}];
   r.timeout();assert.equal((await watcher.promise).status,'uncertain');
+ }
+});
+
+test('제목·밑줄·굵게·이모지 게시 DOM을 본인 새 메시지로 확인한다',async()=>{
+ const text=value=>({nodeType:3,textContent:value});
+ const element=(tag,children=[],attrs={})=>({nodeType:1,tagName:tag,childNodes:children,getAttribute:key=>attrs[key]??null});
+ const emoji=()=>element('IMG',[],{class:'emoji','data-type':'emoji',alt:':moneybag:'});
+ const input='### 공지\n- __궁수,해적 35~43제__\n- 한타임 💰**1600** | 반타임 💰**800**';
+ for(const fault of [null,'price','author','old','failed']){
+  const r=rig();const watcher=r.api.watchMessage(r.editor,input,'123456789012345678',Date.now());
+  r.node.childNodes=[element('H3',[text('공지')]),element('UL',[
+   element('LI',[element('U',[text('궁수,해적 35~43제')])]),
+   element('LI',[text('한타임 '),emoji(),element('STRONG',[text(fault==='price'?'1601':'1600')]),text(' | 반타임 '),emoji(),element('STRONG',[text('800')])])])];
+  r.node.id=fault==='old'?'message-content-100000000000000000':snowflake();r.editor.innerText='';
+  r.row.failed=fault==='failed';r.row.querySelectorAll=()=>[{getAttribute:()=>'/avatars/'+(fault==='author'?'999999999999999999':'123456789012345678')+'/a.png'}];
+  r.setNodes([r.node]);r.check();if(fault)r.timeout();
+  assert.equal((await watcher.promise).status,fault?'uncertain':'confirmed',fault || 'success');
  }
 });
