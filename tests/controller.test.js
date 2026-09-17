@@ -429,3 +429,19 @@ test('확인된 게시 ID는 저장·재시작 후 다음 채널 검사에도 �
  r.advance(30);await restarted.tick();
  assert.equal(r.state.lastConfirmedMessageId,'1548966122731216937');
 });
+
+test('구버전 게시 복구 ID를 준비 단계에서 저장하여 Enter 전 검사에도 전달한다',async()=>{
+ const r=await configured(),id='1550162736732966983';
+ await r.controller.start();await r.controller.stop();
+ r.io.prepare=async target=>{
+  assert.equal(target.lastOutcome,'confirmed');
+  return {status:'prepared',priorAcknowledgedId:id};
+ };
+ r.io.send=async target=>{
+  assert.equal(target.lastConfirmedMessageId,id);
+  return {status:'confirmed',messageId:'1550162736732966984'};
+ };
+ await r.controller.start();
+ assert.equal(r.state.lastConfirmedMessageId,'1550162736732966984');
+ assert.equal(r.state.enabled,true);
+});

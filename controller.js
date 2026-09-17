@@ -68,7 +68,7 @@ export function createController(io) {
   };
   const persist = async state => { await io.save(state); return state; };
   const scheduleNext = state => io.schedule(io.prepare && !state.prepared ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
-  const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,lastConfirmedMessageId:state.lastConfirmedMessageId,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
+  const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,lastConfirmedMessageId:state.lastConfirmedMessageId,lastOutcome:state.lastOutcome,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
   const pause = async (state, error) => {
     state.prepared = null;
     state.enabled = false;
@@ -248,6 +248,7 @@ export function createController(io) {
         catch { prepared={status:'blocked',error:'입력 준비 응답을 받지 못했습니다. 남은 초안을 보존하고 중지합니다.'}; }
         if (prepared?.status==='confirmed') { state.pending=state.prepared; return confirmed(state,true,prepared); }
         if (prepared?.status!=='prepared') return pause(state,prepared?.error || '문구 입력 준비를 완료하지 못했습니다.');
+        if(/^\d{17,20}$/.test(prepared.priorAcknowledgedId || ''))state.lastConfirmedMessageId=prepared.priorAcknowledgedId;
         state.prepared.phase='ready';
         state.prepared.readyAt=io.now();
         state.nextRunAt=Math.max(state.nextRunAt,io.now());

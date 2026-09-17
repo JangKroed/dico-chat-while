@@ -264,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.33';
+  const CONTENT_VERSION = '0.2.34';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -391,6 +391,7 @@
     if (!user) return unknown('author-unknown');
     const candidates = new Set();
     let nextAlreadyPosted = null;
+    const oppositePosts=new Map();
     for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
       const rendered = messageText(node);
       const currentMatch = matchesRenderedText(delivery.text, rendered);
@@ -406,7 +407,15 @@
       // No backwards tolerance: an older identical announcement is not proof.
       if (!id || created < delivery.startedAt || created > Date.now() + 2000 || authorId(row) !== user) continue;
       if (currentMatch) candidates.add(id);
-      if (nextMatch && !currentMatch) nextAlreadyPosted = id;
+      if (nextMatch && !currentMatch) { nextAlreadyPosted = id; oppositePosts.set(id,created); }
+    }
+    // Migration only: the old watcher accepted server timestamps up to 2s ahead
+    // of the local clock, but did not persist the acknowledged message ID.
+    if (!target.lastConfirmedMessageId && target.lastOutcome==='confirmed' &&
+        Number.isFinite(target.lastSentAt) && delivery.startedAt===target.lastSentAt+1 &&
+        !draft && candidates.size===0 && oppositePosts.size===1 &&
+        oppositePosts.get(nextAlreadyPosted)<=target.lastSentAt+2000) {
+      return unknown('acknowledged-legacy-post',nextAlreadyPosted);
     }
     if (nextAlreadyPosted) return unknown('next-already-posted',nextAlreadyPosted);
     if (candidates.size !== 1) return unknown(candidates.size ? 'multiple-matches' : 'no-proof');
@@ -464,7 +473,7 @@
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
     busy = true;
     let entered = false;
-    let watcher, originalEditor;
+    let watcher, originalEditor, priorAcknowledgedId;
     const trace = (stage, extra = {}) => {
       try { return reportTrace(delivery, stage, {...traceSnapshot(target, delivery.text, originalEditor), ...extra}); } catch {}
     };
@@ -473,6 +482,7 @@
       if (!target.skipConfirmation && Number.isFinite(target.lastSentAt) && target.lastSentAt > 0) {
         const previous = reconcile(target, {...delivery,startedAt:target.lastSentAt + 1});
         trace('prior-post-check',{result:previous.status,reconciliationReason:previous.reason || 'confirmed',messageId:previous.messageId});
+        if(previous.reason==='acknowledged-legacy-post') priorAcknowledgedId=previous.messageId;
         if (previous.status === 'confirmed') {
           trace('prior-post-confirmed', {result:'confirmed',draftAction:previous.draftAction});
           return previous;
@@ -555,7 +565,7 @@
 
         if(delivery.phase==='prepare') {
           trace('prepared', {result:'prepared'});
-          return {status:'prepared'};
+          return {status:'prepared',priorAcknowledgedId};
         }
       }
       const finalSelection=window.getSelection();

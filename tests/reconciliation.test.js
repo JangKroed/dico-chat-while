@@ -82,3 +82,18 @@ test('재확인 결과는 확인된 게시 ID를 반환한다',()=>{
  const r=rig();r.setNodes([r.node]);
  assert.equal(r.api.reconcile(r.target,r.delivery).messageId,r.node.id.slice(16));
 });
+
+test('구버전 성공 기록은 2초 이내의 유일한 이전 차례 게시와 빈 초안일 때만 복구한다',()=>{
+ for(const offset of [1717,1815,2001]){
+  const r=rig();r.setNodes([r.node]);
+  r.target.lastOutcome='confirmed';r.target.lastSentAt=r.delivery.startedAt-offset;
+  const next={...r.delivery,index:1,text:'다음 공지',startedAt:r.target.lastSentAt+1};
+  assert.equal(r.api.reconcile(r.target,next).reason,offset<=2000?'acknowledged-legacy-post':'next-already-posted');
+  r.target.lastOutcome='unverified';
+  assert.equal(r.api.reconcile(r.target,next).reason,'next-already-posted');
+  r.target.lastOutcome='confirmed';r.editor.innerText='개인 초안';
+  assert.equal(r.api.reconcile(r.target,next).reason,'next-already-posted');
+  r.editor.innerText='';r.setNodes([r.node,{...r.node,id:'message-content-'+(BigInt(r.node.id.slice(16))+1n)}]);
+  assert.equal(r.api.reconcile(r.target,next).reason,'next-already-posted');
+ }
+});

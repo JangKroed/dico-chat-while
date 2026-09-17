@@ -75,7 +75,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   const event={...channelDiagnostic(state.channels[index],index,state.revision),at:new Date(now).toISOString(),kind:'delivery-trace',channel:index+1,deliveryId:message.id,stage:message.stage};
   if(['stability-failed','exception','before-enter','finished'].includes(message.stage) && message.data?.textContext)event.textContext=diagnosticTextContext(message.data.textContext);
   if(/^\d{17,20}$/.test(message.data?.messageId || ''))event.messageId=message.data.messageId;
-  if(['confirmed','wrong-channel','invalid-delivery','draft-or-editor','author-unknown','next-already-posted','multiple-matches','no-proof','foreign-draft'].includes(message.data?.reconciliationReason))event.reconciliationReason=message.data.reconciliationReason;
+  if(['acknowledged-legacy-post','confirmed','wrong-channel','invalid-delivery','draft-or-editor','author-unknown','next-already-posted','multiple-matches','no-proof','foreign-draft'].includes(message.data?.reconciliationReason))event.reconciliationReason=message.data.reconciliationReason;
   if([0,1].includes(message.data?.messageIndex))event.deliveryMessage=message.data.messageIndex===1?'B':'A';
   if(['prepare','commit','send'].includes(message.data?.deliveryPhase))event.deliveryPhase=message.data.deliveryPhase;
   if (/^\d+\.\d+\.\d+$/.test(message.version||'')) event.contentVersion=message.version;
