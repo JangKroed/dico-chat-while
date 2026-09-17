@@ -31,7 +31,7 @@ async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAft
 }
 test('실제 content 전달 경로: 붙여넣기와 Enter 처리 여부와 전송 문구를 기록한다',async()=>{
  const {result,traces}=await deliver();assert.equal(result.status,'confirmed');
- assert.deepEqual(traces.map(t=>t.stage),['received','draft-replaced','before-paste','paste-dispatched','after-paste','before-enter','observation','enter-dispatched','finished']);
+ assert.deepEqual(traces.map(t=>t.stage),['received','authorization-request','authorization-response','draft-replaced','before-paste','paste-dispatched','after-paste','before-enter','observation','enter-dispatched','finished']);
  assert.equal(traces.find(t=>t.stage==='after-paste').data.textMatches,true);
  assert.equal(traces.find(t=>t.stage==='enter-dispatched').data.enterPrevented,true);
  assert.equal(traces.find(t=>t.stage==='before-enter').data.textContext.expected,'PRIVATE MESSAGE');
@@ -46,7 +46,7 @@ test('진단 수신은 전송 ID와 탭을 검증하고 비공개 필드를 제�
  const state={channels:[{target:{tabId:9},pending:{id:'attempt'}}]};
  const m={id:'attempt',stage:'before-enter',version:'0.2.12',data:{editorFocused:true,draftLength:14,text:'SECRET',token:'SECRET',url:'SECRET'}};
  assert.equal(deliveryTraceEvent(m,state,8),null);
- assert.equal(deliveryTraceEvent({...m,id:'other'},state,9),null);
+ assert.equal(deliveryTraceEvent({...m,id:'other'},state,9).staleDelivery,true);
  assert.equal(deliveryTraceEvent({...m,stage:'injected'},state,9),null);
  const e=deliveryTraceEvent(m,state,9);assert.equal(e.editorFocused,true);assert.equal(JSON.stringify(e).includes('SECRET'),false);
 });
@@ -125,5 +125,5 @@ test('완료 저장 직후 도착한 Enter 로그도 마지막 시도 ID와 탭�
  const state={channels:[{id:'a',target:{tabId:9},lastDeliveryId:'done',nextIndex:1}]};
  const message={id:'done',stage:'enter-dispatched',data:{messageIndex:0,deliveryPhase:'commit'}};
  const event=deliveryTraceEvent(message,state,9);assert.equal(event.deliveryId,'done');assert.equal(event.deliveryMessage,'A');assert.equal(event.deliveryPhase,'commit');
- assert.equal(deliveryTraceEvent(message,state,8),null);assert.equal(deliveryTraceEvent({...message,id:'old'},state,9),null);
+ assert.equal(deliveryTraceEvent(message,state,8),null);assert.equal(deliveryTraceEvent({...message,id:'old'},state,9).staleDelivery,true);
 });

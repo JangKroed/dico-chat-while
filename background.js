@@ -1,3 +1,4 @@
+import { diagnosticRequest } from './diagnostic-request.js';
 import { recoverLoading } from './loading-recovery.js';
 import { exportSettings } from './settings-backup.js';
 import { EMAIL_ALARM, flushEmailReport } from './email-report.js';
@@ -95,14 +96,14 @@ const manager = createChannelManager({
   inspect,
   prepare: (target, delivery) => isStopped(delivery.channelId)
     ? Promise.resolve({status:'blocked',error:'중지 요청으로 입력 준비를 취소했습니다.'})
-    : withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_PREPARE',target,delivery}),10000),
+    : diagnosticRequest(()=>chrome.tabs.sendMessage(target.tabId,{type:'DICO_PREPARE',target,delivery}),{timeoutMs:10000,operation:'prepare',record:event=>appendDiagnostics(chrome,[{...event,channelKey:delivery.channelId,deliveryId:delivery.id,tabId:target.tabId,at:new Date(event.eventAt).toISOString()}])}),
   waitUntil: async (id, when) => {
     while (!isStopped(id) && Date.now()<when) await new Promise(resolve=>setTimeout(resolve,Math.min(250,when-Date.now())));
     if (isStopped(id)) throw new Error('중지 요청으로 전송 대기를 취소했습니다.');
   },
   send: (target, delivery) => isStopped(delivery.channelId)
     ? Promise.resolve({ status: 'blocked', error: '중지 요청으로 전송을 취소했습니다.' })
-    : withTimeout(chrome.tabs.sendMessage(target.tabId, { type: 'DICO_DELIVER', target, delivery }), 35000),
+    : diagnosticRequest(()=>chrome.tabs.sendMessage(target.tabId,{type:'DICO_DELIVER',target,delivery}),{timeoutMs:35000,operation:'send',record:event=>appendDiagnostics(chrome,[{...event,channelKey:delivery.channelId,deliveryId:delivery.id,tabId:target.tabId,at:new Date(event.eventAt).toISOString()}])}),
   reconcile: async (target, delivery) => {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (isStopped(delivery.channelId)) break;

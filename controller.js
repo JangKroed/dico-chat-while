@@ -245,7 +245,8 @@ export function createController(io) {
         catch { return pause(state,'입력 준비 복구용 예약을 등록하지 못했습니다.'); }
         let prepared;
         try { prepared=await io.prepare(destination(state),state.prepared); }
-        catch { prepared={status:'blocked',error:'입력 준비 응답을 받지 못했습니다. 남은 초안을 보존하고 중지합니다.'}; }
+        // A rejected transport is not proof of an empty composer; never resend here.
+        catch(error) { prepared={status:'blocked',error:`입력 준비 응답 실패 (${String(error?.message || error).slice(0,500)}). 남은 초안을 보존하고 중지합니다.`}; }
         if (prepared?.status==='confirmed') { state.pending=state.prepared; return confirmed(state,true,prepared); }
         if (prepared?.status!=='prepared') return pause(state,prepared?.error || '문구 입력 준비를 완료하지 못했습니다.');
         if(/^\d{17,20}$/.test(prepared.priorAcknowledgedId || ''))state.lastConfirmedMessageId=prepared.priorAcknowledgedId;

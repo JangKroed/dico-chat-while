@@ -10,7 +10,7 @@ test('다운로드 파일에 채널·실제 탭·알람·보존 타임라인을 
  const channels=[{id:'a',intervalSeconds:63,messages:['공지 A 💰','공지 B :moneybag:'],ownUserId:'SECRET',target:{tabId:7,channelId:'456',guildId:'123',title:'SECRET'}},{id:'b',intervalSeconds:123,target:{tabId:8,channelId:'789',guildId:'123'}}];
  const code=readFileSync(new URL('../diagnostic-settings.js',import.meta.url),'utf8').replace(/^import .*;\n/,'');
  runInNewContext(code,{
-  channelDiagnostic,diagnosticTextContext,JSON,Date,Promise,setTimeout:()=>{},navigator:{userAgent:'test'},
+  readDiagnosticArchive:async()=>[{kind:"archived"}],channelDiagnostic,diagnosticTextContext,JSON,Date,Promise,setTimeout:()=>{},navigator:{userAgent:'test'},
   document:{querySelector:selector=>selector==='#download-diagnostics'?{addEventListener:(_,fn)=>click=fn}:status,createElement:()=>({click(){}})},
   Blob:class{constructor(parts){report=JSON.parse(parts[0]);}},URL:class extends URL{static createObjectURL(){return 'blob:test';}},
   chrome:{runtime:{getManifest:()=>({version:'test'})},storage:{local:{get:async()=>({state:{revision:8,channels},diagnosticLog:[{kind:'recent'}],diagnosticTimeline:[{kind:'settings-changed'}],mailConfig:{key:'SECRET'}})}},
@@ -19,7 +19,7 @@ test('다운로드 파일에 채널·실제 탭·알람·보존 타임라인을 
  });
  await click();
  assert.equal(report.channels[0].textContext.messageA,'공지 A 💰');assert.equal(report.channels[0].textContext.messageB,'공지 B :moneybag:');
- assert.equal(report.schemaVersion,4);assert.equal(report.channels[0].discordChannelId,'456');assert.equal(report.tabs[0].observedChannelId,'999');
+ assert.equal(report.archive[0].kind,"archived");assert.equal(report.schemaVersion,5);assert.equal(report.channels[0].discordChannelId,'456');assert.equal(report.tabs[0].observedChannelId,'999');
  assert.equal(report.tabs[1].unavailable,true);assert.equal(report.alarms.length,1);assert.equal(report.alarms[0].channelKey,'a');
  assert.equal(report.timeline[0].kind,'settings-changed');assert.equal(JSON.stringify(report).includes('SECRET'),false);
  assert.match(status.textContent,/저장했습니다/);

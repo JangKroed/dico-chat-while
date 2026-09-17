@@ -75,7 +75,7 @@ test('오류 전송 로그에 본문을 보존하고 잘못된 전송 ID는 거�
  const message={id:'attempt',stage:'stability-failed',data:{textContext:{expected:'A :moneybag:',actual:'A 💰',messageA:'A :moneybag:',messageB:'B',token:'SECRET'}}};
  assert.equal(deliveryTraceEvent(message,state,7).textContext.actual,'A 💰');
  assert.equal(deliveryTraceEvent(message,state,8),null);
- assert.equal(deliveryTraceEvent({...message,stage:'observation'},state,7).textContext,undefined);
+ assert.equal(deliveryTraceEvent({...message,stage:'observation'},state,7).textContext.actual,'A 💰');
 });
 
 test('충돌 후보와 마지막 확인 게시 ID를 채널별 진단에 보존한다',()=>{

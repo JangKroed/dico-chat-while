@@ -264,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.34';
+  const CONTENT_VERSION = '0.2.35';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -492,7 +492,10 @@
       let result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
       if (delivery.phase!=='prepare' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
+      // Distinguish a blocked worker/permission reply from slow editor preparation.
+      trace('authorization-request');
       const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase });
+      trace('authorization-response',{authorized:authorization?.allowed===true});
       if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
       result = inspect(target);
       if (!result.ok) return { status: 'blocked', error: result.error };
@@ -586,8 +589,8 @@
       const outcome = await watcher.promise;
       trace('finished', {result:outcome.status,messageId:outcome.messageId});
       return outcome;
-    } catch {
-      trace('exception');
+    } catch(error) {
+      trace('exception',{exception:{name:error?.name,message:error?.message,stack:error?.stack}});
       watcher?.cancel();
       return { status: entered ? 'uncertain' : 'blocked', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
     } finally { busy = false; }
