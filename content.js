@@ -37,7 +37,7 @@
   function editorContent(editor) {
     const raw=editor?.innerText || editor?.textContent || '';
     if(!editor?.childNodes)return {text:raw,mode:'rendered',unsupported:Boolean(editor?.querySelector?.('[data-slate-void="true"]'))};
-    let unsupported=false,unsupportedElement=false,sawString=false,sawBlock=false;
+    let unsupported=false,unsupportedElement=false,sawString=false,sawBlock=false,unicodeEmojiCount=0;
     const attr=(node,key)=>node.getAttribute?.(key);
     const emptySpacer=node=>{
       if(node.nodeType===3)return /^[\s\u200b\ufeff]*$/.test(node.textContent || '');
@@ -45,10 +45,30 @@
       if(['contenteditable','role','alt','src'].some(key=>attr(node,key)!==null && attr(node,key)!==undefined))return false;
       return [...node.childNodes].every(emptySpacer);
     };
+    const unicodeEmoji=node=>{
+      const images=[];let invalid=false;
+      const visit=n=>{
+        if(n.nodeType===3){if(!/^[\s\u200b\ufeff]*$/.test(n.textContent || ''))invalid=true;return;}
+        if(n.nodeType!==1){invalid=true;return;}
+        if(attr(n,'data-slate-spacer')==='true'){if(!emptySpacer(n))invalid=true;return;}
+        if(n.tagName==='IMG'){
+          const alt=attr(n,'alt') || '';
+          if(!/(?:^|\s)emoji(?:_|\s|$)/.test(attr(n,'class') || '') ||
+            !/^\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*$/u.test(alt))invalid=true;
+          images.push(alt);return;
+        }
+        if(n.tagName!=='SPAN'){invalid=true;return;}
+        [...n.childNodes].forEach(visit);
+      };
+      [...node.childNodes].forEach(visit);
+      return !invalid && images.length===1?images[0]:null;
+    };
     const read=node=>{
       if(node.nodeType===3){if(/\S/.test(node.textContent || ''))unsupported=true;return {text:'',block:false};}
       if(node.nodeType!==1)return {text:'',block:false};
       if(attr(node,'data-slate-void')==='true'){
+        const emoji=unicodeEmoji(node);
+        if(emoji){unicodeEmojiCount++;sawString=true;return {text:emoji,block:false};}
         const children=[...node.childNodes].filter(n=>n.nodeType!==3 || /\S/.test(n.textContent || ''));
         if(!children.length || !children.every(n=>attr(n,'data-slate-spacer')==='true' && emptySpacer(n)))unsupported=unsupportedElement=true;
         return {text:'',block:false};
@@ -69,7 +89,7 @@
     };
     const result=read(editor);
     if(!sawString && !sawBlock)return {text:raw,mode:'rendered',unsupported:unsupportedElement || Boolean(editor.querySelector?.('[data-slate-void="true"]'))};
-    return {text:result.text,mode:'slate',unsupported};
+    return {text:result.text,mode:'slate',unsupported,unicodeEmojiCount};
   }
   const editorText=editor=>{const result=editorContent(editor);return result.unsupported?'\u0000'+result.text:result.text;};
   const hasDraft = editor => Boolean(normalize(editorText(editor)) || editorContent(editor).unsupported);
@@ -182,14 +202,14 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.24';
+  const CONTENT_VERSION = '0.2.25';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
   function draftEvidence(target,editor) {
     const draft=normalize(editorContent(editor).text);
     const expected=normalize(target.expectedText || ''),messages=target.messages || [];
-    return {editorReadMode:editorContent(editor).mode,unsupportedEditorContent:editorContent(editor).unsupported,renderedDraftLength:normalize(editor?.innerText || editor?.textContent || '').length,expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
+    return {unicodeEmojiCount:editorContent(editor).unicodeEmojiCount || 0,editorReadMode:editorContent(editor).mode,unsupportedEditorContent:editorContent(editor).unsupported,renderedDraftLength:normalize(editor?.innerText || editor?.textContent || '').length,expectedLength:expected.length,messageALength:normalize(messages[0] || '').length,messageBLength:normalize(messages[1] || '').length,
       draftMatchesA:typeof messages[0]==='string' && draft===normalize(messages[0]),draftMatchesB:typeof messages[1]==='string' && draft===normalize(messages[1]),
       draftHasVoid:Boolean(editor?.querySelector('[data-slate-void="true"]')),
       whitespaceOnlyDifference:draft!==expected && draft.replace(/\s/g,'')===expected.replace(/\s/g,''),

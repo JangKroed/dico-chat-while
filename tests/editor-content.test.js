@@ -24,3 +24,14 @@ test('이미지·멘션·알 수 없는 void와 누락될 문자열은 계속 �
 test('Slate 구조가 없으면 기존 원문으로 비교하며 임의 공백 삭제를 하지 않는다',()=>{
  assert.equal(read({innerText:'A B\nC'}).text,'A B\nC');
 });
+const emoji=(alt='💰')=>el({'data-slate-void':'true','data-slate-inline':'true'},[
+ el({'data-slate-spacer':'true'},[el({'data-slate-zero-width':'z'},[t('\ufeff')])]),
+ el({contenteditable:'false'},[el({class:'emoji emoji__test',alt},[],'IMG')])]);
+test('사용자 공지의 💰 두 개와 Markdown 기호를 누락 없이 읽는다',()=>{
+ const text='### 166풀이속숍 집뿌쩔 머쉬킹 끝나고 바로 시작하세요\n- __궁수,해적,전사 공용 35~43제 명중 방어구, 무기 대여로 2탐 후 3차까지__\n- 템대여 무보증금, 스초 X , 한타임 💰**1600** | 반타임 💰**800**\n- 메용20 · 리저렉션 · 깔끔한 심파컨\n### 직업/렙 상담 DM주세요';
+ const editor=el({},text.split('\n').map(value=>{const parts=value.split('💰');return line(...parts.flatMap((part,i)=>i?[emoji(),leaf(part)]:[leaf(part)]));}));
+ const result=read(editor);assert.equal(result.text,text);assert.equal(result.unsupported,false);assert.equal(result.unicodeEmojiCount,2);
+});
+test('shortcode·일반 이미지·이모지 뒤 숨은 텍스트는 허용하지 않는다',()=>{
+ for(const item of [emoji(':moneybag:'),emoji('hello'),el({'data-slate-void':'true'},[el({alt:'💰'},[],'IMG')]),el({'data-slate-void':'true'},[emoji(),t('hidden')])])assert.equal(read(el({},[line(item)])).unsupported,true);
+});
