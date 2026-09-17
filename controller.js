@@ -50,7 +50,18 @@ export function validateSettings(settings) {
 // All mutations are serialized by the service worker. Persist an intent BEFORE
 // touching Discord; a lost response then requires manual reconciliation.
 export function createController(io) {
-  const read = async () => ({ ...initialState(), ...await io.load() });
+  const read = async () => {
+    const state={...initialState(),...await io.load()};
+    // Older versions stored preparation time when the user confirmed a send.
+    // Recover only from an explicit, same-channel manual-confirmation history.
+    if(state.lastOutcome==='confirmed' && Number.isFinite(state.lastSentAt) && state.lastSentAt>0){
+      const acknowledged=(state.history || []).filter(entry=>entry.kind==='info' &&
+        entry.text==='사용자가 발송 완료를 확인했습니다. 다음 문구로 이어집니다.' &&
+        Number.isFinite(entry.at) && entry.at>state.lastSentAt && entry.at<=io.now());
+      if(acknowledged.length)state.lastSentAt=Math.max(...acknowledged.map(entry=>entry.at));
+    }
+    return state;
+  };
   const log = (state, kind, text) => {
     state.history = [{ at: io.now(), kind, text }, ...state.history].slice(0, 30);
   };
@@ -292,7 +303,7 @@ export function createController(io) {
       state.lastOutcome=resolution==='sent'?'confirmed':null;
       if (resolution === 'sent') {
         state.nextIndex = 1 - state.pending.index;
-        state.lastSentAt = state.pending.startedAt;
+        state.lastSentAt = io.now();
       }
       state.pending = null;
       state.prepared = null;

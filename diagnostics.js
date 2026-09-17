@@ -59,14 +59,14 @@ let writes = Promise.resolve();
 export function appendDiagnostics(api,events) {
   const next=writes.then(async()=>{
   const {diagnosticLog=[],diagnosticTimeline=[]} = await api.storage.local.get(['diagnosticLog','diagnosticTimeline']);
-  await api.storage.local.set({diagnosticLog:boundedDiagnosticHistory([...diagnosticLog,...events],500,1500000),diagnosticTimeline:boundedDiagnosticHistory([...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed','editor-recovered'].includes(e.stage))],2000,2500000)});
+  await api.storage.local.set({diagnosticLog:boundedDiagnosticHistory([...diagnosticLog,...events],500,1500000),diagnosticTimeline:boundedDiagnosticHistory([...diagnosticTimeline,...events.filter(e=>e.kind!=='delivery-trace' || ['enter-dispatched','finished','stability-failed','editor-recovered','prior-post-check'].includes(e.stage))],2000,2500000)});
   await queueEmailReport(api,events);
   });
   writes=next.catch(()=>{});
   return next;
 }
 
-const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prepared','prepared-verified','paste-dispatched','stability-failed','editor-recovered']);
+const TRACE_STAGES = new Set(['received','before-paste','after-paste','before-enter','enter-dispatched','observation','finished','exception','draft-reused','draft-replaced','slowmode-wait','reconcile','prior-post-confirmed','prior-post-check','prepared','prepared-verified','paste-dispatched','stability-failed','editor-recovered']);
 const TRACE_BOOLEANS = ['rawTextMatches','emojiEquivalent','pageHidden','documentFocused','editorFocused','editorConnected','editorReplaced','selectionInside','selectionCollapsed','textMatches','draftEmpty','composing','pastePrevented','enterPrevented','keyupPrevented','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','targetMatches','slowmodeDetected','draftMatchesA','draftMatchesB','draftHasVoid','whitespaceOnlyDifference','unsupportedEditorContent'];
 const TRACE_NUMBERS = ['elapsedMs','latenessMs','editorCount','draftLength','selectionRanges','cooldownMs','slowmodeSeconds','eventAt','scheduledAt','startedAt','maxStableMs','stableRequiredMs','stableWaitMs','expectedLength','messageALength','messageBLength','draftLineCount','expectedLineCount','renderedDraftLength','unicodeEmojiCount'];
 export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
@@ -74,6 +74,7 @@ export function deliveryTraceEvent(message, state, tabId, now=Date.now()) {
   if(index<0 || !TRACE_STAGES.has(message.stage)) return null;
   const event={...channelDiagnostic(state.channels[index],index,state.revision),at:new Date(now).toISOString(),kind:'delivery-trace',channel:index+1,deliveryId:message.id,stage:message.stage};
   if(['stability-failed','exception','before-enter','finished'].includes(message.stage) && message.data?.textContext)event.textContext=diagnosticTextContext(message.data.textContext);
+  if(['confirmed','wrong-channel','invalid-delivery','draft-or-editor','author-unknown','next-already-posted','multiple-matches','no-proof','foreign-draft'].includes(message.data?.reconciliationReason))event.reconciliationReason=message.data.reconciliationReason;
   if([0,1].includes(message.data?.messageIndex))event.deliveryMessage=message.data.messageIndex===1?'B':'A';
   if(['prepare','commit','send'].includes(message.data?.deliveryPhase))event.deliveryPhase=message.data.deliveryPhase;
   if (/^\d+\.\d+\.\d+$/.test(message.version||'')) event.contentVersion=message.version;

@@ -264,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.31';
+  const CONTENT_VERSION = '0.2.32';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -468,6 +468,7 @@
     try {
       if (!target.skipConfirmation && Number.isFinite(target.lastSentAt) && target.lastSentAt > 0) {
         const previous = reconcile(target, {...delivery,startedAt:target.lastSentAt + 1});
+        trace('prior-post-check',{result:previous.status,reconciliationReason:previous.reason || 'confirmed'});
         if (previous.status === 'confirmed') {
           trace('prior-post-confirmed', {result:'confirmed',draftAction:previous.draftAction});
           return previous;

@@ -60,3 +60,11 @@ test('A/B가 같거나 Markdown 표시가 같아도 동일 게시를 두 건으�
  const r=rig();r.target.messages=['# 공지','공지'];r.delivery.text='# 공지';r.editor.innerText='공지';r.setNodes([r.node]);
  const result=r.api.reconcile(r.target,r.delivery);assert.equal(result.status,'confirmed');assert.equal(result.draftAction,'reuse-next');
 });
+
+test('수동 확인 전 A 게시를 B의 순서 충돌로 다시 판단하지 않는다',()=>{
+ const r=rig(),now=Date.now();
+ r.node.id='message-content-'+((BigInt(now-3000)-1420070400000n)<<22n);r.setNodes([r.node]);
+ const next={...r.delivery,index:1,text:'다음 공지',startedAt:now-8000};
+ assert.equal(r.api.reconcile(r.target,next).reason,'next-already-posted');
+ assert.equal(r.api.reconcile(r.target,{...next,startedAt:now+1}).reason,'no-proof');
+});

@@ -397,3 +397,21 @@ test('확인 생략 시 응답 유실은 누락 가능성을 수용하고 진행
  await r.controller.start();assert.equal(r.state.nextIndex,blocked?0:1);assert.equal(r.state.enabled,!blocked);assert.equal(r.state.pending,null);
  }
 });
+
+test('수동 전송 확인은 입력 시작이 아니라 확인 시각을 다음 게시 검사 기준으로 저장한다',async()=>{
+ const r=await configured();r.io.send=async()=>({status:'uncertain'});await r.controller.start();
+ const started=r.state.pending.startedAt;r.advance(480);await r.controller.resolvePending('sent');
+ assert.equal(r.state.lastSentAt,started+480000);assert.equal(r.state.nextIndex,1);
+});
+test('이전 버전의 수동 확인 기록으로 잘못된 시작 시각을 복구하고 B부터 재개한다',async()=>{
+ const r=rig({messages:['공지 A','공지 B'],intervalSeconds:63,target,enabled:false,nextIndex:1,lastOutcome:'confirmed',lastSentAt:500000,history:[{at:900000,kind:'info',text:'사용자가 발송 완료를 확인했습니다. 다음 문구로 이어집니다.'}]});
+ assert.equal((await r.controller.getState()).lastSentAt,900000);
+ let checkedAt;r.io.send=async(t)=>{checkedAt=t.lastSentAt;return {status:'confirmed'};};
+ await r.controller.start();assert.equal(checkedAt,900000);assert.deepEqual(r.sent,[]);assert.equal(r.state.nextIndex,0);
+});
+test('미확인 결과·다른 기록·미래 기록은 확인 시각 복구에 사용하지 않는다',async()=>{
+ const entry={at:900000,kind:'info',text:'사용자가 발송 완료를 확인했습니다. 다음 문구로 이어집니다.'};
+ for(const [lastOutcome,history] of [['unverified',[entry]],['confirmed',[{...entry,text:'다른 기록'}]],['confirmed',[{...entry,at:2000000}]]]){
+  const r=rig({lastOutcome,lastSentAt:500000,history});assert.equal((await r.controller.getState()).lastSentAt,500000);
+ }
+});
