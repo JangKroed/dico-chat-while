@@ -12,7 +12,8 @@ CHANNEL = '1550141520282255452'
 def payload(version, ref, sha, run_url, release_url=None):
     lines = [f'✅ DICO {version} 빌드 완료', f'브랜치/태그: {ref}', f'커밋: {sha[:7]}', f'빌드 결과·ZIP 다운로드: {run_url}']
     if release_url:
-        lines.append(f'정식 배포: {release_url}')
+        lines.append(f'다운로드·업데이트 내역: {release_url}')
+        lines.append(f'설치 ZIP 바로 받기: {release_url.replace("/tag/", "/download/")}/dico-while-{version}.zip')
     else:
         lines.append('빌드 페이지 하단 Artifacts → extension-zip에서 다운로드하세요. GitHub 로그인이 필요할 수 있습니다.')
     return {'content': '\n'.join(lines), 'allowed_mentions': {'parse': []}}

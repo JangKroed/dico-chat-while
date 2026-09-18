@@ -264,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.39';
+  const CONTENT_VERSION = '0.2.40';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -430,15 +430,28 @@
     }
     return {status:'confirmed',draftAction,messageId:[...candidates][0]};
   }
-  async function stableEditor(target, text, editor, duration, report) {
+  async function stableEditor(target, text, editor, duration, report, allowDelayRecovery=false) {
     const began=Date.now(); let stableSince=null,maxStableMs=0,textStableSince=null,repaired=false;
     const failureCounts={};let lastFailedChecks=[];
+    let lastSample=began,deadline=began+5000,delayRecovered=false;
+    let maxSampleGapMs=0,sampleCount=0;
     const fail=async()=>{
       let timer;
-      try { await Promise.race([report('stability-failed',{failedChecks:lastFailedChecks,failureCounts,maxStableMs,stableRequiredMs:duration,stableWaitMs:Date.now()-began}),new Promise(resolve=>{timer=setTimeout(resolve,1500);})]); } finally { clearTimeout(timer); }
+      try { await Promise.race([report('stability-failed',{failedChecks:lastFailedChecks,failureCounts,maxStableMs,stableRequiredMs:duration,stableWaitMs:Date.now()-began,maxSampleGapMs,sampleCount}),new Promise(resolve=>{timer=setTimeout(resolve,1500);})]); } finally { clearTimeout(timer); }
       return false;
     };
-    while (Date.now()-began<5000) {
+    while (true) {
+      const now=Date.now(),gap=now-lastSample;
+      maxSampleGapMs=Math.max(maxSampleGapMs,gap);lastSample=now;
+      // A suspended/throttled page cannot supply observations. Never count the
+      // unobserved gap as stable input; allow one bounded, fresh sampling window.
+      if(gap>1500) {
+        stableSince=null;textStableSince=null;maxStableMs=0;
+        report('stability-timer-delayed',{maxSampleGapMs,sampleCount,stableWaitMs:now-began});
+        if(allowDelayRecovery && !delayRecovered && now-began<15000){delayRecovered=true;deadline=now+5000;}
+      }
+      if(now>=deadline || now-began>=20000)return fail();
+      sampleCount++;
       const found=editors(),selection=window.getSelection();
       const checks={channel_changed:!matchesTarget(target),editor_detached:!editor.isConnected,
         editor_count:found.length!==1,editor_replaced:found[0]!==editor,
@@ -512,7 +525,7 @@
         editor.focus();
         const selection=window.getSelection(), range=document.createRange();
         range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
-        if(!await stableEditor(target,delivery.text,editor,500,trace)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
+        if(!await stableEditor(target,delivery.text,editor,500,trace,true)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
         if (!(await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'}))?.allowed) return {status:'blocked',error:'전송 준비 후 중지 요청을 확인했습니다.'};
         trace('prepared-verified');
       } else {

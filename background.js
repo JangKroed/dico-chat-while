@@ -83,8 +83,8 @@ const manager = createChannelManager({
     // State is durable above. Telemetry must not hold the channel commit queue:
     // a slow log write otherwise delays preparation and permission replies.
     void recordDiagnostics(chrome, previous, state).catch(error=>console.warn('DICO diagnostics:',error.message));
-    try { await notifyChannelErrors(chrome, previous, state); }
-    catch (error) { console.warn('DICO notification:', error.message); }
+    // OS notification responses must not block channel state commits.
+    void notifyChannelErrors(chrome, previous, state).catch(error => console.warn('DICO notification:', error.message));
     const active = state.channels.filter(channel => channel.enabled).length;
     const error = state.channels.some(channel => channel.error);
     await chrome.action.setBadgeText({ text: active ? String(active) : error ? '!' : '' });

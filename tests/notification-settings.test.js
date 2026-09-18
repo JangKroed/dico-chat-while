@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
-const source=readFileSync(new URL('../notification-settings.js',import.meta.url),'utf8');
+import {createDiagnosticNotification} from '../notifications.js';
+const source=readFileSync(new URL('../notification-settings.js',import.meta.url),'utf8').replace(/^import .*;\n/,'');
 function rig(permission='granted'){
  const handlers={},status={},button={},toggle={},calls=[];
  button.addEventListener=(_,fn)=>handlers.click=fn;toggle.addEventListener=()=>{};
- runInNewContext(source,{document:{querySelector:s=>s==='#notification-status'?status:s==='#test-notification'?button:toggle},setTimeout,clearTimeout,chrome:{
- storage:{local:{get:async()=>({})},onChanged:{addListener(){}}},runtime:{getURL:p=>p},
- notifications:{getPermissionLevel:async()=>permission,clear:async id=>calls.push(['clear',id]),create:async id=>calls.push(['create',id])}
+ runInNewContext(source,{createDiagnosticNotification,document:{querySelector:s=>s==='#notification-status'?status:s==='#test-notification'?button:toggle},setTimeout,clearTimeout,chrome:{
+ storage:{local:{get:async()=>({}),set:async()=>{}},onChanged:{addListener(){}}},runtime:{getURL:p=>p,getManifest:()=>({version:'test'})},
+ notifications:{getPermissionLevel:async()=>permission,clear:async id=>calls.push(['clear',id]),create:async id=>{calls.push(['create',id]);return id},getAll:async()=>({'dico-error:test':true})}
  }});return {handlers,status,button,calls};
 }
 test('클릭 즉시 진행 상태를 표시하고 이전 알림 제거 후 새 요청 결과를 안내한다',async()=>{
