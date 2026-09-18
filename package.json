@@ -1,12 +1,13 @@
 {
   "name": "dico-chat-while",
-  "version": "0.2.37",
+  "version": "0.2.38",
   "private": true,
   "type": "module",
   "description": "현재 Discord 채널에서 두 공지를 번갈아 예약하는 Chrome 확장 프로그램",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node scripts/check.mjs"
+    "check": "node scripts/check.mjs",
+    "build": "python3 scripts/build-release.py"
   },
   "engines": {
     "node": ">=20"

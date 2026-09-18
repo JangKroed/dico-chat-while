@@ -16,6 +16,13 @@
       </header>
 
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section class="card">
+        <h2>프로그램 업데이트</h2>
+        <button id="check-update" class="button button-secondary button-small" type="button">새 버전 확인 / 알림 켜기</button>
+        <p id="update-status" class="field-help" role="status">업데이트 확인 중…</p>
+        <a id="download-update" class="button button-secondary" target="_blank" rel="noopener noreferrer" hidden>새 버전 ZIP 다운로드</a>
+        <p class="field-help">이번 방식은 새 버전 알림과 다운로드 안내를 제공합니다. 설치 파일은 자동 교체되지 않습니다. 설정을 유지하려면 기존 설치 폴더에 덮어쓰세요.</p>
+      </section>
       <section class="card" aria-labelledby="notification-title">
         <h2 id="notification-title">오류 알림</h2>
         <p id="recovery-status" class="field-help" role="status" hidden></p>
@@ -140,6 +147,7 @@
 
       <footer class="safety-note">각 채널은 연결한 Discord 탭을 따로 사용합니다. Chrome이 실행 중이고 기기가 깨어 있어야 하며, 탭이 닫히거나 절전 처리되면 해당 채널 일정이 멈출 수 있습니다. Discord 사용자 자동화 관련 약관도 확인하세요.</footer>
     </main>
+    <script type="module" src="update-settings.js"></script>
     <script type="module" src="ui.js"></script>
     <script type="module" src="recovery-status.js"></script>
     <script type="module" src="backup-settings-ui.js"></script>

@@ -1,3 +1,4 @@
+import { installUpdateChecks } from './update-check.js';
 import { diagnosticRequest } from './diagnostic-request.js';
 import { recoverLoading } from './loading-recovery.js';
 import { exportSettings } from './settings-backup.js';
@@ -315,3 +316,6 @@ chrome.notifications.onClicked.addListener(id => {
     void chrome.notifications.clear(id);
   }
 });
+
+// Update checks fetch release metadata only; they never execute downloaded code.
+installUpdateChecks(chrome);
