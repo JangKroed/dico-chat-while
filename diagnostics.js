@@ -58,8 +58,24 @@ export async function recordDiagnostics(api, previous, current) {
   if (!events.length) return;
   return appendDiagnostics(api,events);
 }
-let writes = Promise.resolve();
+// Merge bursts from independent channels before rewriting the recent cache.
+// Every caller waits for its own batch; all individual events remain in the archive.
+const pendingBatches=new WeakMap();
 export function appendDiagnostics(api,events) {
+  let batch=pendingBatches.get(api);
+  if(!batch){
+    batch={events:[],waiters:[]};pendingBatches.set(api,batch);
+    setTimeout(()=>{
+      pendingBatches.delete(api);
+      appendDiagnosticBatch(api,batch.events).then(
+        ()=>batch.waiters.forEach(w=>w.resolve()),error=>batch.waiters.forEach(w=>w.reject(error)));
+    },50);
+  }
+  batch.events.push(...events);
+  return new Promise((resolve,reject)=>batch.waiters.push({resolve,reject}));
+}
+let writes = Promise.resolve();
+function appendDiagnosticBatch(api,events) {
   const next=writes.then(async()=>{
   // Archive all events; the small local cache remains for notifications/email.
   let archiveFailure=null;

@@ -79,8 +79,9 @@ const manager = createChannelManager({
   save: async state => {
     const previous = (await chrome.storage.local.get('state')).state;
     await chrome.storage.local.set({ state });
-    try { await recordDiagnostics(chrome, previous, state); }
-    catch (error) { console.warn('DICO diagnostics:', error.message); }
+    // State is durable above. Telemetry must not hold the channel commit queue:
+    // a slow log write otherwise delays preparation and permission replies.
+    void recordDiagnostics(chrome, previous, state).catch(error=>console.warn('DICO diagnostics:',error.message));
     try { await notifyChannelErrors(chrome, previous, state); }
     catch (error) { console.warn('DICO notification:', error.message); }
     const active = state.channels.filter(channel => channel.enabled).length;

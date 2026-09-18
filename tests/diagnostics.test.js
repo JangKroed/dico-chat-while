@@ -84,3 +84,10 @@ test('충돌 후보와 마지막 확인 게시 ID를 채널별 진단에 보존�
  assert.equal(event.messageId,'1548966122731216937');
  assert.equal(event.lastConfirmedMessageId,'1548966122731216936');
 });
+
+test('동시 상세 기록을 한 번에 저장하면서 모든 이벤트를 유지한다',async()=>{
+ const {appendDiagnostics}=await import('../diagnostics.js');let stored={},writes=0;
+ const api={storage:{local:{get:async()=>stored,set:async value=>{stored={...stored,...value};writes++;}}}};
+ await Promise.all(Array.from({length:40},(_,n)=>appendDiagnostics(api,[{kind:'probe',n}])));
+ assert.equal(writes,1);assert.deepEqual(stored.diagnosticLog.map(e=>e.n),Array.from({length:40},(_,n)=>n));
+});
