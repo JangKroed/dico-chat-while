@@ -1,3 +1,4 @@
+import {createAutoUpdater,updateBusy} from './auto-update.js';
 import { installUpdateChecks } from './update-check.js';
 import { diagnosticRequest } from './diagnostic-request.js';
 import { recoverLoading } from './loading-recovery.js';
@@ -10,12 +11,13 @@ import { createChannelQueue } from './channel-queue.js';
 import { createChannelManager } from './channel-manager.js';
 import { parseChannel, validateSettings } from './controller.js';
 
+let autoUpdater;
 const ALARM_PREFIX = 'dico-channel:';
 const queue = createChannelQueue();
 const stopRequested = new Set();
 let stopAllRequested = false;
 const startsAfterStopAll = new Set();
-const isStopped = id => stopRequested.has(id) || (stopAllRequested && !startsAfterStopAll.has(id));
+const isStopped = id => autoUpdater?.locked || stopRequested.has(id) || (stopAllRequested && !startsAfterStopAll.has(id));
 const enqueue = (action, operation = 'background-event', key = 'control') => {
   const next = queue.run(key, action);
   void next.catch(async error => {
@@ -78,6 +80,7 @@ async function inspect(target) {
 const manager = createChannelManager({
   load: async () => (await chrome.storage.local.get('state')).state,
   save: async state => {
+    if(autoUpdater?.locked && updateBusy(state))throw Error('업데이트 적용 중에는 채널을 시작할 수 없습니다.');
     const previous = (await chrome.storage.local.get('state')).state;
     await chrome.storage.local.set({ state });
     // State is durable above. Telemetry must not hold the channel commit queue:
@@ -200,6 +203,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return true;
   }
   if (sender.tab || !sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
+  if (message?.type === 'DICO_UPDATER_PROBE' || message?.type === 'DICO_UPDATER_APPLY') {
+    (message.type==='DICO_UPDATER_PROBE' ? autoUpdater.probe() : autoUpdater.apply())
+      .then(result=>respond({ok:true,result})).catch(error=>respond({ok:false,error:error.message}));
+    return true;
+  }
+  if (autoUpdater?.locked && !['DICO_GET','DICO_TABS','DICO_UI_SCHEDULE','DICO_EXPORT_SETTINGS'].includes(message?.type)) {
+    respond({ok:false,error:'업데이트 적용 중입니다. 완료 후 다시 시도하세요.'});return false;
+  }
   if (message?.type === 'DICO_EXPORT_SETTINGS') {
     enqueue(async()=>exportSettings(await manager.getState()), 'settings-export')
       .then(backup=>respond({ok:true,backup})).catch(error=>respond({ok:false,error:error.message}));
@@ -234,6 +245,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     ...(message.type==='DICO_BIND'?{requestedTabId:Number.isInteger(message.tabId)?message.tabId:null}:{}),
   });
   const action = async () => {
+    if(autoUpdater?.locked)throw Error('업데이트 적용 중입니다.');
     switch (message?.type) {
       case 'DICO_IMPORT_SETTINGS': return manager.restoreSettings(message.backup);
       case 'DICO_ADD': return manager.add();
@@ -317,5 +329,16 @@ chrome.notifications.onClicked.addListener(id => {
   }
 });
 
-// Update checks fetch release metadata only; they never execute downloaded code.
-installUpdateChecks(chrome);
+// Native updates are opt-in and use a separately installed, registered helper.
+autoUpdater=createAutoUpdater(chrome,()=>manager.getState());
+// After reload the old content scripts must also be refreshed. Only tabs whose
+// drafts were verified empty before applying the update are included.
+async function finishAutoUpdate(){
+ const {updaterReloadTabs=[]}=await chrome.storage.local.get('updaterReloadTabs');
+ for(const entry of updaterReloadTabs){
+  try{const tab=await chrome.tabs.get(entry.tabId);if(tab.url===entry.url && tab.url?.startsWith('https://discord.com/channels/'))await chrome.tabs.reload(entry.tabId);}catch{}
+ }
+ await chrome.storage.local.set({updaterReloadTabs:[]});
+}
+void finishAutoUpdate().catch(()=>{});
+installUpdateChecks(chrome,()=>autoUpdater.apply());

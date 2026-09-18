@@ -25,9 +25,36 @@ jobs:
         with:
           name: extension-zip
           path: dist/*.zip
+  updater-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: python3 tests/updater/fixtures.py /tmp/dico-fixtures
+      - run: swiftc updater/Core.swift tests/updater/Tests.swift -o /tmp/dico-updater-tests && /tmp/dico-updater-tests /tmp/dico-fixtures
+      - run: bash scripts/build-updater-macos.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: updater-macos
+          path: dist/dico-updater-macos.zip
+  updater-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: ./scripts/build-updater-windows.ps1
+        shell: powershell
+      - uses: actions/upload-artifact@v6
+        with:
+          name: updater-windows
+          path: dist/dico-updater-windows.zip
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify
+    needs: [verify, updater-macos, updater-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,6 +68,11 @@ jobs:
         with:
           name: extension-zip
           path: dist
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: updater-*
+          merge-multiple: true
+          path: dist
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
@@ -51,8 +83,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: gh release create "$RELEASE_TAG" dist/*.zip --verify-tag --notes-file release-notes.md
   notify:
-    needs: [verify, release]
-    if: ${{ always() && needs.verify.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+    needs: [verify, updater-macos, updater-windows, release]
+    if: ${{ always() && needs.verify.result == 'success' && needs['updater-macos'].result == 'success' && needs['updater-windows'].result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

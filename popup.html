@@ -21,7 +21,18 @@
         <button id="check-update" class="button button-secondary button-small" type="button">새 버전 확인 / 알림 켜기</button>
         <p id="update-status" class="field-help" role="status">업데이트 확인 중…</p>
         <a id="download-update" class="button button-secondary" target="_blank" rel="noopener noreferrer" hidden>새 버전 ZIP 다운로드</a>
-        <p class="field-help">이번 방식은 새 버전 알림과 다운로드 안내를 제공합니다. 설치 파일은 자동 교체되지 않습니다. 설정을 유지하려면 기존 설치 폴더에 덮어쓰세요.</p>
+        <details class="field-help"><summary>자동 업데이트 최초 연결 · Mac / Windows</summary>
+          <p>이번 버전은 한 번만 기존 방식으로 설치하세요. 이후 보조 프로그램을 연결하면 압축 해제·덮어쓰기·확장 새로고침이 자동 처리됩니다.</p>
+          <p><a id="helper-macos" target="_blank" rel="noopener noreferrer">macOS 보조 설치 앱</a> · <a id="helper-windows" target="_blank" rel="noopener noreferrer">Windows 보조 설치 프로그램</a></p>
+          <ol><li>모든 채널을 중지하고, 보조 설치 파일의 압축을 풀어 실행하세요.</li><li>아래 확장 ID를 복사하고 현재 확장에 등록된 설치 폴더를 선택하세요. 설정 백업을 먼저 권장합니다.</li><li>설치 완료 후 아래 연결 버튼을 누르고 권한을 허용하세요.</li></ol>
+          <label>이 확장의 ID <input id="updater-extension-id" readonly aria-label="보조 프로그램 연결용 확장 ID"></label>
+          <p>Git 개발 폴더·연결 폴더는 지원하지 않습니다. 브라우저와 프로필마다 별도 설치 폴더를 사용하세요. 설치 앱은 개발자 서명/공증이 없어 OS에서 실행 확인이 필요할 수 있습니다. 보안 설정을 자동으로 해제하지 않습니다.</p>
+        </details>
+        <button id="connect-updater" class="button button-secondary button-small" type="button">보조 프로그램 연결 / 자동 적용 켜기</button>
+        <label><input id="auto-update-enabled" type="checkbox"> 새 버전이 있으면 안전한 상태에서 자동 적용</label>
+        <button id="apply-update" class="button button-secondary button-small" type="button">지금 업데이트 확인·적용</button>
+        <p id="auto-update-status" class="field-help" role="status">보조 프로그램을 최초 한 번 연결하세요.</p>
+        <p class="field-help">채널 실행 중이거나 미확인 전송·남은 초안이 있으면 기다립니다. 모두 중지하고 초안을 정리하면 자동 적용하며, 채널을 임의로 다시 시작하지 않습니다.</p>
       </section>
       <section class="card" aria-labelledby="notification-title">
         <h2 id="notification-title">오류 알림</h2>
