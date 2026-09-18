@@ -13,6 +13,23 @@ node_modules/
 !.env.example
 *.log
 
+# Exported diagnostics and personal settings (may contain messages and drafts)
+dico-diagnostics-*.json
+dico-settings-*.json
+
+# Locally packaged extension releases and signing keys
+dico-while-*.zip
+*.crx
+*.pem
+*.key
+
+# Local browser automation data and Python caches
+.playwright/
+playwright-report/
+test-results/
+__pycache__/
+*.py[cod]
+
 # OS and editor temporary files
 .DS_Store
 Thumbs.db
