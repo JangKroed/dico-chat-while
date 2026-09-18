@@ -251,8 +251,8 @@
     if (form.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) {
       return { ok: false, error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
     }
-    if (!target.skipConfirmation && !document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
-    if (!target.skipConfirmation && target.draftRetrySince) {
+    if ((!target.skipConfirmation || target.draftRetrySince) && !document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
+    if (target.draftRetrySince) {
       const expected = target.expectedText;
       for (const node of document.querySelectorAll('[data-list-id="chat-messages"] [id^="message-content-"]')) {
         const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
@@ -264,7 +264,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.35';
+  const CONTENT_VERSION = '0.2.36';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -299,7 +299,7 @@
       return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
-  function watchMessage(editor, text, userId, startedAt, report = () => {}) {
+  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false) {
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
@@ -319,6 +319,9 @@
       if (finished) return;
       const liveEditor = currentEditor();
       const empty = liveEditor && !normalize(editorText(liveEditor));
+      // Skipping server confirmation must not skip evidence that Enter submitted
+      // the composer. Never advance A/B merely because dispatchEvent returned.
+      if (submissionOnly && empty) { finish({status:'unverified'}); return; }
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
@@ -373,7 +376,7 @@
       finish({status:retryDraft ? 'draft-retained' : 'uncertain',error:liveEditor && normalize(editorText(liveEditor))
         ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
         : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
-    }, 25000);
+    }, submissionOnly ? 3000 : 25000);
     return {promise,cancel:()=>finish({status:'uncertain',error:'입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.'})};
   }
   function reconcile(target, delivery) {
@@ -578,14 +581,13 @@
         trace('slowmode-wait', cooldown);
         return {status:'deferred',retryAfterMs:cooldown.cooldownMs,draftPrepared:true};
       }
-      if (!target.skipConfirmation) watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence));
+      watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence),target.skipConfirmation);
       trace('before-enter');
       const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
       const keyup = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
       editor.dispatchEvent(keydown);
       editor.dispatchEvent(keyup);
       trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
-      if (target.skipConfirmation) { trace('finished',{result:'unverified'}); return {status:'unverified'}; }
       const outcome = await watcher.promise;
       trace('finished', {result:outcome.status,messageId:outcome.messageId});
       return outcome;

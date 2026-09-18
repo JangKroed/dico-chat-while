@@ -104,10 +104,10 @@ test('이전 확인 이후 이미 게시한 예정 문구는 초안이 있어도
  assert.equal(traces.some(t=>t.stage==='prior-post-confirmed'),true);
 });
 
-test('확인 생략 모드에서는 Enter가 무시돼도 게시 감시 없이 미검증 시도로 반환한다',async()=>{
+test('확인 생략 모드에서 Enter가 무시되면 초안 잔류를 반환하고 Enter를 반복하지 않는다',async()=>{
  const {result,traces}=await deliver(true,'','',false,false,true);
- assert.equal(result.status,'unverified');assert.equal(traces.filter(t=>t.stage==='enter-dispatched').length,1);
- assert.equal(traces.some(t=>t.stage==='observation'),false);
+ assert.equal(result.status,'draft-retained');assert.equal(traces.filter(t=>t.stage==='enter-dispatched').length,1);
+ assert.equal(traces.some(t=>t.stage==='observation'),true);
 });
 test('확인 생략이어도 개인 초안과 슬로우 모드 검사는 유지한다',async()=>{
  assert.equal((await deliver(false,'개인 초안','',false,false,true)).result.status,'blocked');

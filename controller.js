@@ -209,7 +209,6 @@ export function createController(io) {
     async tick() {
       const state = await read();
       if (!state.enabled) return state;
-      if (state.pending && state.skipConfirmation) return confirmed(state,false);
       if (state.pending && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '이전 전송 결과가 확인되지 않아 중지했습니다. 채널을 확인해 주세요.');
       if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
@@ -274,7 +273,7 @@ export function createController(io) {
       let response;
       try { response = await io.send(destination(state), state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
-      if (state.skipConfirmation && (!response?.status || ['unverified','uncertain'].includes(response.status))) return confirmed(state,false);
+      if (state.skipConfirmation && response?.status==='unverified') return confirmed(state,false);
       if (response?.status === 'uncertain' && await recheck(state)) response = {status:'confirmed'};
       if (response?.status === 'deferred' && Number.isFinite(response.retryAfterMs) && response.retryAfterMs > 0) {
         if (response.draftPrepared) {
@@ -321,7 +320,6 @@ export function createController(io) {
     },
     async recover({ preserveDue = false } = {}) {
       const state = await read();
-      if (state.pending && state.enabled && state.skipConfirmation) return confirmed(state,false);
       if (state.pending && state.enabled && await recheck(state)) return confirmed(state);
       if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
       if (!state.enabled) { await io.cancel(); return state; }

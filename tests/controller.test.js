@@ -390,11 +390,11 @@ test('채널별 확인 생략은 미검증 시도로 다음 차례를 예약하�
  await r.controller.stop();await r.controller.updateSettings({messages:['공지 A','공지 B'],intervalSeconds:30,skipConfirmation:false});
  r.io.send=async()=>({status:'uncertain'});await r.controller.start();assert.equal(r.state.enabled,false);assert.ok(r.state.pending);
 });
-test('확인 생략 시 응답 유실은 누락 가능성을 수용하고 진행하지만 입력 전 차단은 중지한다',async()=>{
+test('확인 생략이어도 응답 유실을 성공으로 취급하지 않고 차례를 보존한다',async()=>{
  for(const blocked of [false,true]){
  const r=await configured();await r.controller.updateSettings({messages:['A','B'],intervalSeconds:30,skipConfirmation:true});
  r.io.send=async()=>{if(blocked)return {status:'blocked',error:'문구 변경'};throw new Error('lost')};
- await r.controller.start();assert.equal(r.state.nextIndex,blocked?0:1);assert.equal(r.state.enabled,!blocked);assert.equal(r.state.pending,null);
+ await r.controller.start();assert.equal(r.state.nextIndex,0);assert.equal(r.state.enabled,false);assert.equal(Boolean(r.state.pending),!blocked);
  }
 });
 
@@ -444,4 +444,13 @@ test('구버전 게시 복구 ID를 준비 단계에서 저장하여 Enter 전 �
  await r.controller.start();
  assert.equal(r.state.lastConfirmedMessageId,'1550162736732966984');
  assert.equal(r.state.enabled,true);
+});
+
+test('확인 생략에서 제출 실패 후 같은 문구로 재시도하고 제출 때만 다음 차례로 이동한다',async()=>{
+ const r=await configured();await r.controller.updateSettings({messages:['A','B'],intervalSeconds:65,skipConfirmation:true});
+ const attempts=[];let retained=true;
+ r.io.send=async(_,delivery)=>{attempts.push(delivery.text);return {status:retained?'draft-retained':'unverified'}};
+ await r.controller.start();assert.equal(r.state.nextIndex,0);assert.equal(r.state.enabled,true);
+ retained=false;r.advance(65);await r.controller.tick();
+ assert.deepEqual(attempts,['A','A']);assert.equal(r.state.nextIndex,1);
 });

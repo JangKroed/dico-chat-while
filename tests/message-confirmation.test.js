@@ -73,3 +73,12 @@ test('제목·밑줄·굵게·이모지 게시 DOM을 본인 새 메시지로 �
   assert.equal((await watcher.promise).status,fault?'uncertain':'confirmed',fault || 'success');
  }
 });
+
+test('게시 확인 생략도 초안이 남으면 제출 완료로 처리하지 않는다',async()=>{
+ const r=rig();const watcher=r.api.watchMessage(r.editor,'공지',null,Date.now(),()=>{},true);
+ r.timeout();assert.equal((await watcher.promise).status,'draft-retained');
+});
+test('게시 확인 생략은 입력창이 비워지면 게시 증명 없이 제출로 기록한다',async()=>{
+ const r=rig();const watcher=r.api.watchMessage(r.editor,'공지',null,Date.now(),()=>{},true);
+ r.editor.innerText='';r.poll();assert.equal((await watcher.promise).status,'unverified');
+});

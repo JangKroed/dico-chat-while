@@ -98,7 +98,7 @@
           <p class="format-note">일반 텍스트와 일반 URL을 지원합니다. 서식이 있는 Markdown이나 커스텀 이모지는 전송 결과 확인을 위해 일시 중지될 수 있습니다.</p>
 
           <label class="skip-confirmation"><input id="skip-confirmation" type="checkbox" aria-describedby="skip-confirmation-help"> 전송 결과 확인 생략</label>
-          <p id="skip-confirmation-help" class="field-help">이 채널에서 Enter 전송 시도 후 게시 확인 없이 다음 문구로 진행합니다. 게시 기록 비교도 생략하므로 누락·중복이 생길 수 있습니다. 입력 준비·중지·슬로우 모드 검사는 유지됩니다.</p>
+          <p id="skip-confirmation-help" class="field-help">게시 완료 확인은 생략하지만 Enter 후 최대 3초 동안 입력창이 비워지는지 확인합니다. 문구가 남으면 차례를 유지하고 다음 주기에 게시 기록을 검사한 뒤 최대 3회 재시도합니다. 입력창이 비워져도 서버의 최종 게시 성공을 보장하지는 않습니다.</p>
           <label class="field-label" for="interval-seconds">전송 간격</label>
           <div class="interval-input">
             <input id="interval-seconds" name="intervalSeconds" type="number" min="30" max="86400" step="1" inputmode="numeric" aria-describedby="interval-help interval-error"><span>초</span>
