@@ -31,5 +31,6 @@
   "diagnostic-request.js",
   "update-check.js",
   "update-settings.js",
-  "auto-update.js"
+  "auto-update.js",
+  "timing-calibration.js"
 ]

@@ -241,6 +241,34 @@
     }
     return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0, cooldownMs:Math.min(seconds,21600)*1000};
   }
+  let cooldownProbeCancel = null;
+  function observeCooldown(target, delivery, enterAt, enterMono) {
+    cooldownProbeCancel?.();
+    const mono=()=>globalThis.performance?.now() ?? Date.now();
+    let timer,seen=false,last=mono(),maxGapMs=0,zeroSince=null,zeroAt=null,done=false;
+    const finish=status=>{
+      if(done)return;done=true;clearInterval(timer);
+      const elapsedMs=(status==='observed'?zeroSince:mono())-enterMono;
+      chrome.runtime.sendMessage({type:'DICO_TIMING_SAMPLE',channelId:delivery.channelId,deliveryId:delivery.id,
+        sample:{status,enterAt,observedAt:status==='observed'?zeroAt:Date.now(),elapsedMs,maxGapMs}}).catch(()=>{});
+    };
+    const check=()=>{
+      const now=mono();maxGapMs=Math.max(maxGapMs,now-last);last=now;
+      // Navigation, missing editors, drafts and missed samples make an unlock
+      // observation ambiguous. Never send a test Enter to probe the server.
+      if(!matchesTarget(target) || editors().length!==1)return finish('inconclusive');
+      const editor=editors()[0],elapsed=now-enterMono;
+      if(normalize(editorText(editor)) || elapsed>Math.min(21720000,((slowmodeSetting.seconds || 60)+120)*1000))return finish('inconclusive');
+      const cooldown=slowmode(editor);
+      if(cooldown.cooldownMs>0){seen=true;zeroSince=null;zeroAt=null;}
+      else if(seen && !cooldown.slowmodeDetected) {
+        if(zeroSince===null){zeroSince=now;zeroAt=Date.now();}
+        if(now-zeroSince>=500)return finish('observed');
+      } else if(!seen && elapsed>10000)return finish('inconclusive');
+    };
+    cooldownProbeCancel=()=>{done=true;clearInterval(timer);};
+    timer=setInterval(check,500);check();
+  }
   function inspect(target) {
     if (!target || !matchesTarget(target)) return { ok: false, error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
     const found = editors();
@@ -264,7 +292,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.41';
+  const CONTENT_VERSION = '0.2.42';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -594,6 +622,8 @@
         trace('slowmode-wait', cooldown);
         return {status:'deferred',retryAfterMs:cooldown.cooldownMs,draftPrepared:true};
       }
+      cooldownProbeCancel?.();
+      const enterAt=Date.now(),enterMono=globalThis.performance?.now() ?? enterAt;
       watcher = watchMessage(editor, delivery.text, ownUserId(target), Date.now(), evidence => trace('observation', evidence),target.skipConfirmation);
       trace('before-enter');
       const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
@@ -602,6 +632,11 @@
       editor.dispatchEvent(keyup);
       trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
       const outcome = await watcher.promise;
+      if(outcome.status==='confirmed') {
+        const confirmedAt=Date.now(),confirmationMs=(globalThis.performance?.now() ?? confirmedAt)-enterMono;
+        outcome.timing={enterAt,confirmedAt,confirmationMs,cooldownMs:slowmode(editors()[0]).cooldownMs};
+        observeCooldown(target,delivery,enterAt,enterMono);
+      }
       trace('finished', {result:outcome.status,messageId:outcome.messageId});
       return outcome;
     } catch(error) {

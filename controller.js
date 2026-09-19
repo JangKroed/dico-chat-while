@@ -1,3 +1,4 @@
+import { receiptMeasurement, cooldownMeasurement } from './timing-calibration.js';
 export const initialState = () => ({
   version: 1,
   messages: ['', ''],
@@ -6,6 +7,7 @@ export const initialState = () => ({
   ownUserId: '',
   intervalSeconds: 300,
   slowmodeSeconds: null,
+  timingCalibration: null,
   enabled: false,
   target: null,
   nextIndex: 0,
@@ -31,7 +33,7 @@ export function parseChannel(value) {
   } catch { return null; }
 }
 
-export const minimumInterval = channel => Number.isInteger(channel?.slowmodeSeconds) && channel.slowmodeSeconds>0 && channel.slowmodeSeconds<=21600 ? Math.max(30,channel.slowmodeSeconds+3) : 30;
+export const minimumInterval = channel => Number.isInteger(channel?.slowmodeSeconds) && channel.slowmodeSeconds>0 && channel.slowmodeSeconds<=21600 ? Math.max(30,channel.slowmodeSeconds+3+Math.max(0,Math.min(30,channel.timingCalibration?.extraSeconds || 0))) : 30;
 
 export function validateSettings(settings) {
   if (settings?.skipConfirmation!==undefined && typeof settings.skipConfirmation!=='boolean') throw new Error('전송 확인 옵션이 올바르지 않습니다.');
@@ -67,7 +69,7 @@ export function createController(io) {
     state.history = [{ at: io.now(), kind, text }, ...state.history].slice(0, 30);
   };
   const persist = async state => { await io.save(state); return state; };
-  const scheduleNext = state => io.schedule(io.prepare && !state.prepared ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
+  const scheduleNext = state => io.schedule(io.prepare && !state.prepared && state.timingCalibration?.status!=='measuring' ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
   const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,lastConfirmedMessageId:state.lastConfirmedMessageId,lastOutcome:state.lastOutcome,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
   const pause = async (state, error) => {
     state.prepared = null;
@@ -100,14 +102,25 @@ export function createController(io) {
     try { return await io.inspect(target); }
     catch { return { ok: false, error: '대상 탭에 연결할 수 없습니다. Discord 페이지를 확인해 주세요.' }; }
   };
+  const measuredDeadline = state => {
+    const timing=state.timingCalibration;
+    if(!timing || timing.deliveryId!==state.lastDeliveryId || !Number.isFinite(timing.enterAt) ||
+       !Number.isFinite(timing.confirmedAt))return null;
+    // A duration measured from Enter must not be added again after the receipt.
+    // Still honor a full server cooldown after confirmation as a safety bound.
+    return Math.max(timing.enterAt+state.intervalSeconds*1000,
+      timing.confirmedAt+(state.slowmodeSeconds>0?state.slowmodeSeconds+3:0)*1000,
+      timing.confirmedAt+(timing.cooldownMs>0?timing.cooldownMs+3000:0));
+  };
   const applySlowmode = (state, seconds) => {
     if (!Number.isInteger(seconds) || seconds<=0 || seconds>21600) return;
+    if(state.slowmodeSeconds!==null && state.slowmodeSeconds!==seconds)state.timingCalibration={status:'awaiting',sampleCount:0,extraSeconds:0};
     state.slowmodeSeconds=seconds;
     const minimum=minimumInterval(state);
-    if (state.enabled && Number.isFinite(state.lastSentAt) && state.lastSentAt>0) state.nextRunAt=Math.max(state.nextRunAt || 0,state.lastSentAt+minimum*1000);
+    if (state.enabled && Number.isFinite(state.lastSentAt) && state.lastSentAt>0) state.nextRunAt=Math.max(state.nextRunAt || 0,measuredDeadline({...state,intervalSeconds:Math.max(state.intervalSeconds,minimum)}) ?? state.lastSentAt+minimum*1000);
     if(state.intervalSeconds<minimum) {
       state.intervalSeconds=minimum;
-      log(state,'info',`슬로우 모드 ${seconds}초에 여유 3초를 더해 주기를 ${minimum}초로 조정했습니다.`);
+      log(state,'info',`슬로우 모드 ${seconds}초와 여유·측정 보정을 반영해 주기를 ${minimum}초로 조정했습니다.`);
     }
   };
   const confirmed = async (state, verified=true, receipt=null) => {
@@ -123,7 +136,15 @@ export function createController(io) {
     state.pending = null;
     state.lastSentAt = io.now();
     state.error = null;
-    state.nextRunAt = io.now() + state.intervalSeconds * 1000;
+    const measurement=verified?receiptMeasurement(receipt,io.now()):null;
+    if(measurement) {
+      state.timingCalibration={...state.timingCalibration,status:'measuring',deliveryId:state.lastDeliveryId,
+        sampleCount:(state.timingCalibration?.sampleCount || 0)+1,...measurement};
+      log(state,'info',`시간 측정: Enter 후 게시 확인까지 ${(measurement.confirmationMs/1000).toFixed(2)}초. 슬로우 모드 해제를 관찰합니다.`);
+    } else if(state.timingCalibration) state.timingCalibration={...state.timingCalibration,status:verified?'awaiting':'confirmation-required'};
+    // Keep the existing safe confirmation-based interval. A measured cooldown
+    // may extend this deadline, but must never accelerate an unverified send.
+    state.nextRunAt = measurement ? Math.max(io.now(),measuredDeadline(state)) : io.now() + state.intervalSeconds * 1000;
     await persist(state);
     try { await scheduleNext(state); }
     catch { return pause(state, '다음 예약을 등록하지 못해 중지했습니다.'); }
@@ -154,6 +175,24 @@ export function createController(io) {
       state.error = null;
       return persist(state);
     },
+    async recordTiming(deliveryId, sample) {
+      const state=await read();
+      if(state.lastDeliveryId!==deliveryId || state.timingCalibration?.deliveryId!==deliveryId)return state;
+      const result=cooldownMeasurement(sample,state.slowmodeSeconds);
+      if(!result || result.enterAt!==state.timingCalibration.enterAt)return state;
+      state.timingCalibration={...state.timingCalibration,status:result.extraSeconds!==null && result.extraSeconds<=30?result.status:'inconclusive',cooldownObservation:result};
+      // Large excess waits may be UI stalls or unrelated user activity. Report
+      // them without permanently inflating the channel's configured interval.
+      if(result.extraSeconds!==null && result.extraSeconds<=30) {
+        state.timingCalibration.extraSeconds=Math.max(state.timingCalibration.extraSeconds || 0,result.extraSeconds);
+        applySlowmode(state,state.slowmodeSeconds);
+        if(state.enabled && !state.pending && !state.prepared)state.nextRunAt=Math.max(io.now(),measuredDeadline(state),state.slowmodeUntil || 0);
+        log(state,'info',`시간 측정 완료: Enter부터 슬로우 모드 표시 해제까지 ${(result.elapsedMs/1000).toFixed(2)}초. 채널 최소 ${minimumInterval(state)}초 적용.`);
+      } else log(state,'info','시간 측정이 불완전하거나 관찰 지연이 큽니다. 기존 안전 주기를 유지하고 다음 발송에서 다시 측정합니다.');
+      await persist(state);
+      if(state.enabled && !state.pending)await scheduleNext(state);
+      return state;
+    },
     async bind(target) {
       const state = await read();
       requireEditable(state);
@@ -161,7 +200,8 @@ export function createController(io) {
       if (!channel || !Number.isInteger(target.tabId) || target.tabId < 0) {
         throw new Error('Discord 서버의 텍스트 채널을 열고 팝업에서 선택해 주세요. DM은 지원하지 않습니다.');
       }
-      if (state.target?.guildId!==channel.guildId || state.target?.channelId!==channel.channelId) { state.slowmodeSeconds=null; state.lastSentAt=null; state.lastConfirmedMessageId=null; }
+      if (state.target?.guildId!==channel.guildId || state.target?.channelId!==channel.channelId) { state.slowmodeSeconds=null; state.lastSentAt=null; state.lastConfirmedMessageId=null; state.timingCalibration=null; }
+      state.timingCalibration ||= {status:'awaiting',sampleCount:0,extraSeconds:0};
       applySlowmode(state,target.slowmodeSeconds);
       // Reconnecting the same room from an ordinary tab must not lose its sender.
       if (!target.managed && state.target?.managed &&

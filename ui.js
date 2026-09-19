@@ -403,7 +403,16 @@ function renderControls() {
 function render() {
   const channel=selectedChannel();
   elements.interval.min = String(minimumInterval(channel));
-  document.querySelector('#interval-help').textContent = channel?.slowmodeSeconds ? `슬로우 모드 ${channel?.slowmodeSeconds}초 + 여유 3초 · 이 채널 최소 ${minimumInterval(channel)}초` : '최소 30초 · 슬로우 모드 시간을 읽으면 채널별 최소 주기가 자동 적용됩니다.';
+  document.querySelector('#interval-help').textContent = channel?.slowmodeSeconds ? `슬로우 모드 ${channel?.slowmodeSeconds}초 + 여유 3초 + 측정 보정 ${channel?.timingCalibration?.extraSeconds || 0}초 · 이 채널 최소 ${minimumInterval(channel)}초` : '최소 30초 · 슬로우 모드 시간을 읽으면 채널별 최소 주기가 자동 적용됩니다.';
+
+  const measurement=channel?.timingCalibration;
+  const timingLabel=document.querySelector('#timing-measurement');
+  if(timingLabel)timingLabel.textContent=measurement?.status==='observed'
+    ? `자동 측정: 게시 확인 ${(measurement.confirmationMs/1000).toFixed(2)}초 · 슬로우 모드 표시 해제 ${(measurement.cooldownObservation.elapsedMs/1000).toFixed(2)}초 (Enter 기준). 채널별 최소 주기에 반영했습니다. 서버 허용 시각을 직접 측정한 값은 아닙니다.`
+    : measurement?.status==='measuring' ? `게시 확인 ${(measurement.confirmationMs/1000).toFixed(2)}초 · 슬로우 모드 해제 관찰 중`
+    : measurement?.status==='inconclusive' ? '시간 측정 불완전: 제한 표시 없음·탭 지연·입력 변경 등이 발생했습니다. 기존 주기를 유지하고 다음 정상 발송에서 다시 측정합니다.'
+    : channel?.skipConfirmation ? '시간 자동 측정에는 전송 결과 확인이 필요합니다. 확인 생략을 끄면 다음 정상 공지로 측정합니다.'
+    : '연결 시 슬로우 모드를 검사합니다. 시작 후 첫 정상 공지로 시간을 자동 측정합니다. 별도 테스트 메시지는 보내지 않습니다.';
 
   const runningCount = rootState.channels.filter(channel => channel.enabled).length;
   const pendingCount = rootState.channels.filter(channel => channel.pending && !channel.enabled).length;

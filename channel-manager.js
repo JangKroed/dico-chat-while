@@ -90,6 +90,7 @@ export function createChannelManager(io) {
 
   return {
     getState: read,
+    recordTiming: (id, deliveryId, sample) => one('recordTiming', id, deliveryId, sample),
     restoreSettings: backup => operations.exclusive(async () => {
       await initialize();
       await commit(async () => {

@@ -9,6 +9,7 @@ export function channelDiagnostic(channel = {}, index = -1, revision = null) {
   return {channel:index+1,channelKey:String(channel.id || '').slice(0,100),rootRevision:revision,
     settingsRevision:channel.settingsRevision ?? null,discordGuildId:numericId(channel.target?.guildId),
     discordChannelId:numericId(channel.target?.channelId),tabId:Number.isInteger(channel.target?.tabId)?channel.target.tabId:null,
+    timingCalibration:channel.timingCalibration ?? null,
     intervalSeconds:channel.intervalSeconds ?? null,slowmodeSeconds:channel.slowmodeSeconds ?? null,
     slowmodeUntil:channel.slowmodeUntil ?? null,skipConfirmation:channel.skipConfirmation===true,
     nextRunAt:channel.nextRunAt ?? null,lastAttemptOrConfirmedAt:channel.lastSentAt ?? null,
@@ -40,6 +41,7 @@ export function diagnosticEvents(previous, current, now = Date.now()) {
       dedicatedTab: Boolean(channel.target?.managed), dedicatedWindow: Boolean(channel.target?.windowManaged)};
     if (before && (channel.settingsRevision!==before.settingsRevision || channel.intervalSeconds!==before.intervalSeconds || channel.skipConfirmation!==before.skipConfirmation)) events.push({...base,kind:'settings-changed',previousIntervalSeconds:before.intervalSeconds,previousSettingsRevision:before.settingsRevision,previousSkipConfirmation:before.skipConfirmation===true});
     if (!before || channel.target?.channelId!==before.target?.channelId || channel.target?.tabId!==before.target?.tabId) events.push({...base,kind:'channel-binding',previousDiscordChannelId:numericId(before?.target?.channelId),previousTabId:before?.target?.tabId ?? null});
+    if(JSON.stringify(channel.timingCalibration)!==JSON.stringify(before?.timingCalibration))events.push({...base,kind:'timing-measurement'});
     if (before && channel.nextRunAt!==before.nextRunAt) events.push({...base,kind:'schedule-changed',previousNextRunAt:before.nextRunAt ?? null});
     if(channel.prepared && (channel.prepared.id!==before?.prepared?.id || channel.prepared.phase!==before?.prepared?.phase)) events.push({...base,deliveryId:channel.prepared.id,kind:channel.prepared.phase==='ready'?'preparation-ready':'preparation-started'});
     if (channel.slowmodeSeconds && channel.slowmodeSeconds !== before?.slowmodeSeconds) events.push({...base,kind:'slowmode-minimum',slowmodeSeconds:channel.slowmodeSeconds,minimumSeconds:Math.max(30,channel.slowmodeSeconds+3)});

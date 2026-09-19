@@ -195,6 +195,18 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }).catch(() => respond({ok:false}));
     return true;
   }
+  if (message?.type === 'DICO_TIMING_SAMPLE' && sender.tab) {
+    // Bind measurements to the actual sender tab, channel and latest delivery.
+    // Queue on this channel so a quick observation cannot race its receipt.
+    enqueue(async()=>{
+      const state=await manager.getState();
+      const channel=state.channels.find(c=>c.id===message.channelId && c.target?.tabId===sender.tab.id);
+      const observed=parseChannel(sender.url || sender.tab.url);
+      if(!channel || observed?.channelId!==channel.target.channelId || observed?.guildId!==channel.target.guildId)return;
+      return manager.recordTiming(channel.id,message.deliveryId,message.sample);
+    },'timing-measurement',message.channelId).then(()=>respond({ok:true})).catch(()=>respond({ok:false}));
+    return true;
+  }
   if (message?.type === 'DICO_CAN_SEND' && sender.tab) {
     manager.getState().then(state => respond({
       allowed: state.channels.some(channel =>
