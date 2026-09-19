@@ -361,7 +361,10 @@ export function createController(io) {
     async recover({ preserveDue = false } = {}) {
       const state = await read();
       if (state.pending && state.enabled && await recheck(state)) return confirmed(state);
-      if (state.pending) return pause(state, '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
+      if (state.pending) {
+        if(!state.enabled && state.error) { await io.cancel(); return state; }
+        return pause(state, state.error || '중단된 전송이 있습니다. 채널에서 발송 여부를 확인한 뒤 재개해 주세요.');
+      }
       if (!state.enabled) { await io.cancel(); return state; }
       if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
       const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });

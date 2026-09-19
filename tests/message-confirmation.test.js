@@ -82,3 +82,31 @@ test('게시 확인 생략은 입력창이 비워지면 게시 증명 없이 제
  const r=rig();const watcher=r.api.watchMessage(r.editor,'공지',null,Date.now(),()=>{},true);
  r.editor.innerText='';r.poll();assert.equal((await watcher.promise).status,'unverified');
 });
+
+test('111·333 전송 중 본문 노드가 교체돼도 같은 메시지 행에서 최종 게시를 확인한다',async()=>{
+ for(const text of ['111','333']) {
+  const r=rig();r.node.innerText=text;r.editor.innerText=text;
+  const watcher=r.api.watchMessage(r.editor,text,null,Date.now());
+  r.setNodes([r.node]);r.row.sending=true;r.check();
+  const final={id:snowflake(),innerText:text,closest:()=>r.row};
+  r.row.sending=false;r.editor.innerText='';r.setNodes([final]);r.check();r.timeout();
+  assert.equal((await watcher.promise).status,'confirmed');
+ }
+});
+test('전송 중 행과 무관한 같은 문구는 작성자 증거 없이 성공 처리하지 않는다',async()=>{
+ const r=rig();const watcher=r.api.watchMessage(r.editor,'공지',null,Date.now());
+ r.setNodes([r.node]);r.row.sending=true;r.check();
+ const foreign={...r.row,sending:false,querySelector:()=>null};
+ r.editor.innerText='';r.setNodes([{id:snowflake(),innerText:'공지',closest:()=>foreign}]);r.check();r.timeout();
+ assert.equal((await watcher.promise).status,'uncertain');
+});
+test('행 전체 교체도 전송 중 관찰한 작성자 ID가 같으면 확인하고 다른 작성자는 거부한다',async()=>{
+ for(const author of ['123456789012345678','999999999999999999']) {
+  const r=rig();const watcher=r.api.watchMessage(r.editor,'공지',null,Date.now());
+  r.row.querySelectorAll=()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}];
+  r.setNodes([r.node]);r.row.sending=true;r.check();
+  const finalRow={querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>`/avatars/${author}/a.png`}]};
+  r.setNodes([{id:snowflake(),innerText:'공지',closest:()=>finalRow}]);r.editor.innerText='';r.check();r.timeout();
+  assert.equal((await watcher.promise).status,author==='123456789012345678'?'confirmed':'uncertain');
+ }
+});

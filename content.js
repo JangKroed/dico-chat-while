@@ -292,7 +292,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.42';
+  const CONTENT_VERSION = '0.2.43';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -332,6 +332,11 @@
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
     const localNodes = new WeakSet();
+    // React can replace the content node and optimistic ID while retaining the
+    // message row. Preserve row identity and the author observed during our
+    // local sending state; matching text alone is never a receipt.
+    const localRows = new WeakSet();
+    const localAuthors = new Set();
     let observer, timer, poll, resolve, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
@@ -354,7 +359,7 @@
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
         if (!matchesRenderedText(text, messageText(node))) {
-          detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
+          if(!evidence.matchingMessage)detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
           continue;
         }
         evidence.matchingMessage = true;
@@ -364,7 +369,9 @@
         // Slate still displays the submitted draft, then require a final ID.
         if (isSending) {
           evidence.sendingSeen = true;
-          locallySending.add(node.id); localNodes.add(node);
+          locallySending.add(node.id); localNodes.add(node); localRows.add(row);
+          const sendingAuthor=authorId(row);
+          if(sendingAuthor && (!userId || sendingAuthor===userId))localAuthors.add(sendingAuthor);
           detail = '메시지가 아직 전송 중으로 표시됩니다.';
           continue;
         }
@@ -379,11 +386,14 @@
           detail = '메시지 생성 시각을 이번 전송과 연결하지 못했습니다.'; continue;
         }
         const author = authorId(row);
-        if (userId && author && author !== userId) {
+        if (author && ((userId && author !== userId) || (localAuthors.size>0 && !localAuthors.has(author)))) {
           evidence.authorMismatch = true;
           detail = '일치하는 메시지의 작성자가 본인과 다릅니다.'; continue;
         }
-        if (!locallySending.has(node.id) && !localNodes.has(node) && (!userId || author !== userId)) {
+        const sameNode=localNodes.has(node),sameRow=localRows.has(row);
+        const observedAuthor=Boolean(author && localAuthors.has(author));
+        evidence.sameSendingNode=sameNode;evidence.sameSendingRow=sameRow;evidence.observedSendingAuthor=observedAuthor;
+        if (!locallySending.has(node.id) && !sameNode && !sameRow && !observedAuthor && (!userId || author !== userId)) {
           evidence.authorUnknown = true;
           detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
         }

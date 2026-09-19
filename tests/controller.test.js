@@ -454,3 +454,10 @@ test('확인 생략에서 제출 실패 후 같은 문구로 재시도하고 제
  retained=false;r.advance(65);await r.controller.tick();
  assert.deepEqual(attempts,['A','A']);assert.equal(r.state.nextIndex,1);
 });
+
+test('주기적 복구는 이미 중지한 미확인 전송의 구체적인 원인을 보존한다',async()=>{
+ const r=await configured();r.io.send=async()=>({status:'uncertain',error:'최종 게시물의 작성자 연결 실패'});
+ await r.controller.start();const original=r.state;
+ await r.controller.recover();await r.controller.recover();
+ assert.deepEqual(r.state,original);assert.equal(r.sent.length,0);
+});
