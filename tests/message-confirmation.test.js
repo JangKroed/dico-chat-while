@@ -13,7 +13,7 @@ function rig(){
  });
  const row={sending:false,failed:false,previousElementSibling:null,querySelector:sel=>sel.includes('isSending')?row.sending:sel.includes('isFailed')?row.failed:null,querySelectorAll:()=>[],matches:()=>false};
  const node={id:'message-content-local',innerText:'공지',closest:()=>row};
- return {api,editor,row,node,setNodes:v=>nodes=v,check:()=>check(),timeout:()=>timeout(),poll:()=>poll()};
+ return {api,editor,row,node,setNodes:v=>nodes=v,check:records=>check(records),timeout:()=>timeout(),poll:()=>poll()};
 }
 const snowflake=()=> 'message-content-'+((BigInt(Date.now())-1420070400000n)<<22n).toString();
 test('입력창이 비워지기 전 전송 중 상태와 최종 ID 변경을 연결한다',async()=>{
@@ -108,5 +108,23 @@ test('행 전체 교체도 전송 중 관찰한 작성자 ID가 같으면 확인
   const finalRow={querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>`/avatars/${author}/a.png`}]};
   r.setNodes([{id:snowflake(),innerText:'공지',closest:()=>finalRow}]);r.editor.innerText='';r.check();r.timeout();
   assert.equal((await watcher.promise).status,author==='123456789012345678'?'confirmed':'uncertain');
+ }
+});
+
+
+test('기본 아바타·행 전체 교체: 같은 DOM 위치의 제거/추가만 게시 증거로 연결한다',async()=>{
+ for(const fault of [null,'different-slot','multiple','unrelated','failed']) {
+  const r=rig();r.node.innerText='222';r.editor.innerText='222';
+  const watcher=r.api.watchMessage(r.editor,'222',null,Date.now());
+  r.setNodes([r.node]);r.row.sending=true;r.check();
+  const row={querySelector:selector=>fault==='failed'&&selector.includes('isFailed')?{}:null,matches:()=>false,querySelectorAll:()=>[]};
+  const final={id:snowflake(),innerText:'222',closest:()=>row};
+  r.setNodes([final]);r.editor.innerText='';
+  const target={},anchor={};
+  r.check([
+   {type:'childList',target,previousSibling:anchor,nextSibling:null,removedNodes:[fault==='unrelated'?{...r.node}:r.node],addedNodes:[]},
+   {type:'childList',target,previousSibling:fault==='different-slot'?{}:anchor,nextSibling:null,removedNodes:[],addedNodes:fault==='multiple'?[final,{...final}]:[final]}
+  ]);r.timeout();
+  assert.equal((await watcher.promise).status,fault?'uncertain':'confirmed',fault || 'replacement');
  }
 });

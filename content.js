@@ -292,7 +292,7 @@
     }
     return { ok: true, ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.43';
+  const CONTENT_VERSION = '0.2.44';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -337,6 +337,29 @@
     // local sending state; matching text alone is never a receipt.
     const localRows = new WeakSet();
     const localAuthors = new Set();
+    const replacementNodes = new WeakSet();
+    // React can replace the entire optimistic row. Only transfer provenance
+    // across a unique remove/add at the same DOM slot in one observer batch.
+    // A matching message elsewhere (or a whole-list rerender) is not evidence.
+    const linkReplacements = records => {
+      const slots=[];
+      const messages=root=>root?.id?.startsWith('message-content-')?[root]:[...(root?.querySelectorAll?.('[id^="message-content-"]') || [])];
+      for(const record of records || []) {
+        if(record.type!=='childList')continue;
+        let slot=slots.find(s=>s.target===record.target && s.previous===record.previousSibling && s.next===record.nextSibling);
+        if(!slot){slot={target:record.target,previous:record.previousSibling,next:record.nextSibling,removed:[],added:[]};slots.push(slot);}
+        slot.removed.push(...[...record.removedNodes].flatMap(messages));
+        slot.added.push(...[...record.addedNodes].flatMap(messages));
+      }
+      for(const slot of slots) {
+        const tracked=slot.removed.filter(node=>localNodes.has(node) || replacementNodes.has(node));
+        if(tracked.length)evidence.removedSendingCount=(evidence.removedSendingCount || 0)+tracked.length;
+        if(slot.removed.length!==1 || slot.added.length!==1){if(tracked.length)evidence.ambiguousReplacementCount=(evidence.ambiguousReplacementCount || 0)+1;continue;}
+        const old=slot.removed[0],fresh=slot.added[0];
+        if(!(localNodes.has(old) || replacementNodes.has(old)) || existing.has(fresh.id))continue;
+        if(matchesRenderedText(text,messageText(old)) && matchesRenderedText(text,messageText(fresh))){replacementNodes.add(fresh);evidence.linkedReplacementCount=(evidence.linkedReplacementCount || 0)+1;}
+      }
+    };
     let observer, timer, poll, resolve, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
@@ -390,10 +413,10 @@
           evidence.authorMismatch = true;
           detail = '일치하는 메시지의 작성자가 본인과 다릅니다.'; continue;
         }
-        const sameNode=localNodes.has(node),sameRow=localRows.has(row);
+        const sameNode=localNodes.has(node),sameRow=localRows.has(row),sameReplacement=replacementNodes.has(node);
         const observedAuthor=Boolean(author && localAuthors.has(author));
-        evidence.sameSendingNode=sameNode;evidence.sameSendingRow=sameRow;evidence.observedSendingAuthor=observedAuthor;
-        if (!locallySending.has(node.id) && !sameNode && !sameRow && !observedAuthor && (!userId || author !== userId)) {
+        evidence.sameSendingReplacement=sameReplacement;evidence.sameSendingNode=sameNode;evidence.sameSendingRow=sameRow;evidence.observedSendingAuthor=observedAuthor;
+        if (!locallySending.has(node.id) && !sameNode && !sameRow && !sameReplacement && !observedAuthor && (!userId || author !== userId)) {
           evidence.authorUnknown = true;
           detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
         }
@@ -402,7 +425,7 @@
         finish({status:'confirmed',messageId:id}); return;
       }
     };
-    observer = new MutationObserver(check);
+    observer = new MutationObserver(records=>{linkReplacements(records);check();});
     observer.observe(document.querySelector('main') || document.body, {subtree:true,childList:true,characterData:true,attributes:true});
     // Read-only checks: no additional Enter, reload or retransmission.
     poll = setInterval(check, 500);
