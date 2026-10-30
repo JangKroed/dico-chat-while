@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ApiError, command, establishSession, getAnalytics, getSnapshot, requestErrorMessage, subscribe, testNotification, type Attempt, type Channel, type EventRecord, type Group, type Incident, type Message, type Snapshot, type Timestamp } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError, command, establishSession, getAnalytics, getSetupStatus, getSnapshot, requestErrorMessage, subscribe, testNotification, type Attempt, type Channel, type EventRecord, type Group, type Incident, type Message, type SetupStatus, type Snapshot, type Timestamp } from './api'
 import { confirmedSeries, matchesLogLevel, type ConfirmedBucket } from './chart'
 import { draftVersion, savedDraftVersion } from './draft'
 
@@ -177,6 +177,39 @@ function Logs({s,analytics,go,run,busy}:Common&{analytics:Record<string,unknown>
   return <><Heading eyebrow="INSIGHTS / 기록과 분석" title="로그 · 분석" description="현재 문제를 먼저 확인하고, 같은 사건의 기록과 집계를 살펴보세요."/><div className="tabbar" role="tablist"><button role="tab" aria-selected={tab==='incidents'} className={tab==='incidents'?'active':''} onClick={()=>setTab('incidents')}>현재 문제 <span>{s.incidents.filter(isIncidentOpen).length}</span></button><button role="tab" aria-selected={tab==='analysis'} className={tab==='analysis'?'active':''} onClick={()=>setTab('analysis')}>분석</button><button role="tab" aria-selected={tab==='events'} className={tab==='events'?'active':''} onClick={()=>{setHeld(s.events);setNewCount(0);setTab('events')}}>전체 로그</button></div>{tab==='incidents'&&<Section title="문제 · 알림" subtitle="읽음 처리와 실제 해결은 서로 다른 상태입니다." action={<input aria-label="문제 검색" value={query} onChange={e=>setQuery(e.target.value)} placeholder="문제 검색"/>}>{incidents.length?<div className="incident-list">{incidents.map(i=><div className="incident-row" key={i.id}><span className={`alert-symbol ${isIncidentOpen(i)?'':'resolved'}`}>{isIncidentOpen(i)?'!':'✓'}</span><div><strong>{incidentText(i)}</strong><p>{i.description||i.message||i.code||'관련 상태를 확인해 주세요.'}</p><small>{date(i.createdAt||i.updatedAt)} · {isIncidentOpen(i)?'미해결':'해결됨'} · {i.readAt||i.read?'읽음':'읽지 않음'}</small></div><div className="incident-actions">{!i.readAt&&!i.read&&<button className="outline small" disabled={busy} onClick={()=>void run('incident.read',{id:i.id},'읽음으로 표시했습니다. 문제 상태는 유지됩니다.')}>읽음</button>}{i.attemptId&&<button className="text-action" onClick={()=>go('history')}>발송 기록 →</button>}</div></div>)}</div>:<Empty icon="✓" title="현재 확인할 문제가 없습니다" description="서비스에서 기록한 문제와 해결 이력이 여기에 나타납니다."/>}</Section>}{tab==='analysis'&&<div className="analysis-grid"><Section title="시도 결과 분포" subtitle="고유 발송 시도의 현재 결과 · 화면에 보이는 기록 기준" action={<button className="text-action" onClick={()=>go('history')}>원본 기록 →</button>}><div className="hbars">{distribution.map(d=><button key={d.name} onClick={()=>go('history')}><span>{d.name}</span><span className="hbar-track"><i style={{width:`${d.count/max*100}%`}}/></span><strong>{d.count}건</strong></button>)}</div><p className="chart-note">게시 확인 건수와 시도 수는 기준 시각이 달라 기간별 합계가 다를 수 있습니다.</p></Section><Section title="서비스 집계" subtitle="서버가 제공한 분석 값"><div className="aggregate-list">{Object.entries(analytics).filter(([,v])=>typeof v==='number'||typeof v==='string').slice(0,12).map(([key,value])=><div key={key}><span>{key}</span><strong>{String(value)}</strong></div>)}{!Object.keys(analytics).length&&<p className="secondary">아직 분석할 기록이 없습니다.</p>}</div></Section><Section title="대기 원인" subtitle="그룹·초 기준 · 의도된 대기와 장애를 구분합니다."><div className="hbars">{waits.length?waits.map(w=><div className="wait-row" key={w.reason}><span>{label(w.reason)}</span><span className="hbar-track"><i style={{width:`${w.durationMs/waitMax*100}%`}}/></span><strong>{Math.round(w.durationMs/1000)}초</strong></div>):<p className="secondary">측정된 대기 구간이 없습니다.</p>}</div><details className="chart-table"><summary>표로 보기</summary><table><thead><tr><th>대기 원인</th><th>누적 그룹·초</th></tr></thead><tbody>{waits.map(w=><tr key={w.reason}><td>{label(w.reason)}</td><td>{Math.round(w.durationMs/1000)}</td></tr>)}</tbody></table></details></Section><Section title="계정별 진행" subtitle="최근 발송 시도 순서와 결과" action={<button className="text-action" onClick={()=>go('history')}>원본 기록 →</button>}><div className="timeline-list">{timeline.length?[...timeline].slice(-12).reverse().map(a=><div key={a.id}><span className="activity-dot"/><strong>{short(a.accountId)}</strong><span>{s.groups.find(g=>g.id===a.groupId)?.name||short(a.groupId)}</span>{status(a.status)}<small>{date(a.permittedAt||a.createdAt)}</small></div>):<p className="secondary">아직 발송 시도가 없습니다.</p>}</div></Section></div>}{tab==='events'&&<Section title="전체 로그" subtitle="최신 기록 100건 · 민감한 본문은 표시하지 않습니다." action={<div className="filter-actions"><button className="outline small" onClick={()=>{setLive(!live);setHeld(s.events);setNewCount(0)}}>{live?'실시간 보기 켜짐':`실시간 보기 ${newCount?`· 새 로그 ${newCount}개`:'꺼짐'}`}</button><input aria-label="로그 검색" value={query} onChange={e=>setQuery(e.target.value)} placeholder="설명·종류 검색"/><select aria-label="레벨 필터" value={level} onChange={e=>setLevel(e.target.value)}><option value="all">모든 레벨</option>{['DEBUG','INFO','WARN','ERROR','CRITICAL'].map(x=><option key={x}>{x}</option>)}</select></div>}>{events.length?<div className="table-scroll"><table><thead><tr><th>수신 시각</th><th>레벨</th><th>종류</th><th>설명</th><th></th></tr></thead><tbody>{events.slice(0,100).map((e,i)=><tr key={e.eventId||e.id||i}><td>{date(e.receivedAt||e.at||e.createdAt)}</td><td><span className={`level ${e.level||''}`}>{e.level||'INFO'}</span></td><td>{e.type||'상태 변경'}</td><td>{eventText(e)}</td><td><button className="text-action" onClick={()=>setDetail(e)}>상세</button></td></tr>)}</tbody></table></div>:<Empty icon="▥" title="표시할 로그가 없습니다" description="이벤트가 기록되면 여기에서 확인할 수 있습니다."/>}</Section>}{detail&&<div className="modal-backdrop" onClick={()=>setDetail(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="로그 상세" onClick={e=>e.stopPropagation()}><div className="panel-head"><h2>로그 상세</h2><button className="icon-button" onClick={()=>setDetail(null)} aria-label="닫기">×</button></div><dl className="detail-list"><dt>시각</dt><dd>{fullDate(detail.receivedAt||detail.at||detail.createdAt)}</dd><dt>레벨 · 종류</dt><dd>{detail.level||'INFO'} · {detail.type||'—'}</dd><dt>설명</dt><dd>{eventText(detail)}</dd><dt>그룹</dt><dd>{s.groups.find(g=>g.id===detail.groupId)?.name||short(detail.groupId)}</dd><dt>시도</dt><dd>{short(detail.attemptId)}</dd></dl><button className="outline" onClick={()=>setDetail(null)}>닫기</button></div></div>}</>
 }
 
+function SetupDiagnostics() {
+  const [result,setResult]=useState<SetupStatus|null>(null)
+  const [loading,setLoading]=useState(true)
+  const [error,setError]=useState('')
+  const generation=useRef(0)
+  const refresh=useCallback(async()=>{
+    const current=++generation.current
+    setLoading(true);setError('')
+    try {
+      const response=await getSetupStatus()
+      if(current===generation.current)setResult(response)
+    } catch(e) {
+      if(current===generation.current)setError(requestErrorMessage(e))
+    } finally {
+      if(current===generation.current)setLoading(false)
+    }
+  },[])
+  useEffect(()=>{void refresh();return ()=>{generation.current++}},[refresh])
+  const statusLabel={ok:'정상',warning:'확인 필요',error:'문제 있음'}
+  return <Section title="설치 · 연결 진단" subtitle="현재 PC의 실행 환경과 브라우저 연결 상태를 확인합니다." action={<button className="outline small" disabled={loading} onClick={()=>void refresh()}>{loading?'확인 중…':'다시 확인'}</button>}>
+    <div className="setup-summary" aria-live="polite" aria-busy={loading}>
+      {loading&&<p>설치 상태를 확인하고 있습니다.</p>}
+      {error&&<p className="import-error" role="alert">진단을 불러오지 못했습니다. {error} 다시 확인을 눌러 재시도해 주세요.</p>}
+      {result&&<p>{error?'이전 진단 결과':result.ready?'실행 환경 준비 완료':'아래 항목을 확인해 주세요'} · {fullDate(result.checkedAt)}</p>}
+    </div>
+    {result&&<div className="setup-checks">{result.checks.map(check=><div className="setup-check" key={check.id}>
+      <div className="setup-check-title"><strong>{check.label}</strong><span className={`setup-status ${check.status}`}>{statusLabel[check.status]}</span></div>
+      <p>{check.detail}</p>{check.nextStep&&<p className="setup-next-step">다음 단계: {check.nextStep}</p>}
+    </div>)}</div>}
+    <div className="editor-note">Git · npm · C++ 빌드 도구는 소스에서 직접 빌드할 때만 필요합니다. 패키지로 설치한 프로그램 실행에는 필요하지 않습니다.<br/>확장 설치를 위한 브라우저 개발자 모드 켜기와 기존 확장 중지는 브라우저에서 직접 진행해 주세요.</div>
+  </Section>
+}
+
 function Settings({s,run,busy,go,notify}:Common&{notify:()=>Promise<void>}) {
   const [retention,setRetention]=useState('90')
   const [notificationsEnabled,setNotificationsEnabled]=useState(false)
@@ -214,10 +247,10 @@ function Settings({s,run,busy,go,notify}:Common&{notify:()=>Promise<void>}) {
     if(ok)setImportFile(null)
   }
   return <><Heading eyebrow="PREFERENCES / 도움말" title="설정 · 도움말" description="처음 시작하는 방법과 로컬 작업 공간의 설정을 확인하세요."/>
-    <div className="settings-grid"><Section title="시작 가이드" subtitle={`${steps.filter(x=>x.done).length} / ${steps.length}단계 완료 · 실제 저장과 연결 상태 기준`}>
+    <div className="settings-grid"><div className="settings-main"><SetupDiagnostics/><Section title="시작 가이드" subtitle={`${steps.filter(x=>x.done).length} / ${steps.length}단계 완료 · 실제 저장과 연결 상태 기준`}>
       <div className="guide-list">{steps.map((step,i)=><div className="guide-step" key={step.title}><span className={step.done?'done':''}>{step.done?'✓':i+1}</span><div><strong>{step.title}</strong><p>{step.description}</p></div><button className="text-action" onClick={()=>go(step.page)}>{step.done?'다시 보기':'설정하기'} →</button></div>)}</div>
       <div className="editor-note">ⓘ 설정을 마쳐도 자동으로 시험 메시지를 보내지 않습니다. 발송은 그룹에서 명시적으로 시작합니다.</div>
-    </Section><div className="settings-side"><Section title="알림" subtitle="OS 알림과 화면의 문제 목록은 별도로 동작합니다.">
+    </Section></div><div className="settings-side"><Section title="알림" subtitle="OS 알림과 화면의 문제 목록은 별도로 동작합니다.">
       <div className="setting-row"><div><strong>OS 문제 알림</strong><p>관리 프로그램에서 확인이 필요한 문제를 알립니다.</p></div><label className="switch-label"><input type="checkbox" checked={notificationsEnabled} onChange={e=>setNotificationsEnabled(e.target.checked)}/> 켬</label></div>
       <div className="setting-row"><div><strong>알림에서 이름 숨기기</strong><p>메시지 본문과 연결 키는 표시하지 않습니다.</p></div><label className="switch-label"><input type="checkbox" checked={hideNames} onChange={e=>setHideNames(e.target.checked)}/> 숨김</label></div>
       <div className="setting-row"><div><strong>테스트 알림</strong><p>Discord에는 메시지를 보내지 않습니다.</p></div><button className="outline small" onClick={()=>void notify()}>테스트 요청</button></div>

@@ -8,6 +8,8 @@ export type Incident = {id:string;code?:string;title?:string;message?:string;des
 export type EventRecord = {id?:string;eventId?:number;type?:string;level?:string;message?:string;description?:string;at?:Timestamp;receivedAt?:Timestamp;createdAt?:Timestamp;reasonCode?:string;groupId?:string;attemptId?:string;[key:string]:unknown}
 export type Snapshot = {schemaVersion:number;stateVersion:number;service?:Record<string,unknown>;settings?:Record<string,unknown>;messages:Message[];instances:Instance[];channels:Channel[];groups:Group[];attempts:Attempt[];commands?:Record<string,unknown>[];incidents:Incident[];events:EventRecord[];analytics?:Record<string,unknown>}
 
+export type SetupStatus = {checkedAt:number;checks:{id:string;label:string;status:'ok'|'warning'|'error';detail:string;nextStep?:string}[];ready:boolean}
+
 let csrfToken = ''
 export class ApiError extends Error {
   status:number
@@ -43,6 +45,7 @@ export async function establishSession():Promise<void> {
     csrfToken = session.csrfToken
   }
 }
+export const getSetupStatus = () => request<SetupStatus>('/api/setup-status')
 export const getSnapshot = () => request<Snapshot>('/api/snapshot')
 export const command = (action:string,payload:Record<string,unknown>) => request<unknown>('/api/command',{method:'POST',body:JSON.stringify({action,payload})})
 export const getAnalytics = (from:number,to:number) => request<Record<string,unknown>>(`/api/analytics?from=${from}&to=${to}`)

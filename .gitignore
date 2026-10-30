@@ -41,3 +41,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Project-local portable setup runtime
+/.dico-tools/

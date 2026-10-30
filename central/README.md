@@ -2,9 +2,55 @@
 
 PC 한 대의 여러 Chrome·Brave 프로필을 중앙 페이지에서 관리합니다. 메시지 보관함, 채널별 문구 목록, 계정 순환, 실시간 로그·그래프와 PC 알림을 제공합니다. 데이터는 현재 OS 사용자에게 따로 저장됩니다.
 
+## 현재 설치 범위와 여러 기기 계획
+
+현재 0.4와 아래 설정 스크립트는 **PC 한 대 안의 로컬 중앙관리**를 설치합니다. 각 PC의 데이터·실행 순서는 독립적이며 PC 사이의 전역 발송 순서를 조정하지 않습니다.
+
+계획 중인 LAN 구성은 중앙 허브 PC가 여러 실행 PC를 관리하고 Android에서는 브라우저로 제어·상태 확인을 하는 역할입니다. Android에 Git·Node·브라우저 확장을 설치하는 절차는 아닙니다. 이 LAN 기능은 아직 현재 설치본에 구현된 기능으로 안내하지 않습니다. [여러 기기 역할과 확장 계획](../docs/central-management/MULTI-DEVICE.md)을 참고하세요.
+
 ## 기존 확장 사용자: 클론으로 설치·전환
 
 [Git 클론 설치·백업·전환·업데이트 상세 안내](../docs/central-management/CLONE-SETUP.md)를 먼저 확인하세요. macOS·Windows 명령, 기존 자동 업데이트 중지, 전용 확장 등록, 기기 이동과 되돌리기를 설명합니다.
+
+## 클론 후 자동 설정
+
+Git 설치부터 필요한 경우 위 상세 안내의 macOS 3-1 / Windows 4-1을 따르세요. macOS는 `xcode-select --install`의 설치 창을 끝낸 뒤 `git --version`을 확인합니다. Windows는 `winget install --id Git.Git -e --source winget`으로 설치할 수 있으며, winget이 없으면 Microsoft Store의 **앱 설치 관리자**가 필요합니다. [공식 winget 안내](https://learn.microsoft.com/windows/package-manager/winget/)와 [Git 설치 안내](https://git-scm.com/install/windows)를 참고하세요.
+
+저장소를 고정 경로에 클론한 뒤 루트 폴더에서 **자신의 OS에 맞는 명령 하나**를 실행합니다. 기존 서비스와 발송은 먼저 정상 종료합니다.
+
+macOS:
+
+```sh
+bash ./setup.command
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+Node 사전 설치는 필요하지 않습니다. 호환되는 시스템 Node 24.13 이상인 24.x를 사용하고, 없으면 공식 Node.js 24.13.0을 macOS에서는 CPU에 맞게, Windows에서는 win-x64 ZIP으로 내려받아 SHA-256 확인 후 `.dico-tools/`에 풉니다. Windows 설정 스크립트는 x64 PC만 지원하며 Windows ARM은 지원·검증 대상이 아닙니다. 전역 Node나 PATH는 변경하지 않습니다. Windows의 `-ExecutionPolicy Bypass`는 해당 프로세스에만 적용되며 영구 실행 정책 변경은 필요하지 않습니다.
+
+Windows 소스 패키징에는 MSVC와 Windows SDK가 필요합니다. 스크립트는 `vswhere`로 설치된 Build Tools를 찾아 `VsDevCmd`의 x64 컴파일러 환경을 사용합니다. 미설치 상태에서는 안내 후 중단하며 Build Tools를 자동 설치하지 않습니다. 필요하면 사용자가 직접 다음 명령을 실행하고 설치 완료·재부팅 요청을 처리합니다.
+
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget --override '--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+```
+
+[공식 C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)의 GUI 설치와 [Node.js 24.13.0 수동 다운로드](https://nodejs.org/dist/v24.13.0/)도 사용할 수 있습니다. 전체 수동 빌드·설치 명령은 상세 안내에 있습니다.
+
+자동 설정은 의존성 설치·빌드·검사·테스트·패키징·현재 사용자 설치를 진행한 뒤 설치된 포함 Node로 서비스를 실행하고 페이지를 엽니다. 해당 터미널을 유지하고 Ctrl+C로 종료합니다. 성공하면 상세 안내의 **5장: 새 확장 등록과 설정 이전**을 진행하세요. 아래 배포 파일 설치나 수동 빌드를 중복 실행하지 않습니다. 설정 스크립트는 `git pull`을 자동으로 실행하지 않습니다.
+
+읽기 전용 상태·계획 확인에는 macOS 명령 뒤에 `--doctor` 또는 `--dry-run`, Windows PowerShell 명령 뒤에는 `-Doctor` 또는 `-DryRun`을 붙입니다. 이 모드는 Node 다운로드나 파일·설정 변경을 하지 않습니다. Node가 있으면 `--dry-run` / `-DryRun`으로 설치·페이지 열기를 포함한 전체 계획을 확인할 수 있습니다. Node가 없으면 준비가 필요하다고 알리고 종료 코드 1로 끝납니다. Node가 이미 있다면 직접 CLI도 사용할 수 있습니다.
+
+```sh
+node scripts/setup-central.mjs --doctor
+node scripts/setup-central.mjs --dry-run
+node scripts/setup-central.mjs --install --open
+```
+
+직접 CLI를 옵션 없이 실행하면 빌드·검사·테스트·패키징까지만 진행하고 현재 사용자 설치는 하지 않습니다. 실제 설정은 실행 중 서비스가 있으면 생성 파일 변경 전에 중지를 요구합니다. 중앙 페이지의 **설정 · 도움말 → 설치 · 연결 진단 → 다시 확인**은 상태만 다시 읽으며 설치나 업데이트를 실행하지 않습니다.
 
 ## 배포 파일 사용
 
@@ -37,7 +83,7 @@ IP·포트·토큰은 입력하지 않습니다. 설치 프로그램은 현재 O
 
 ## 저장소에서 개발·검증
 
-기존 0.3.0 확장과 새 중앙 실행기는 별개입니다. 새 서비스는 내장 SQLite를 위해 Node.js 24.13 이상을 사용합니다. 사용자를 위한 패키징에는 런타임을 포함합니다.
+기존 0.3.0 확장과 새 중앙 실행기는 별개입니다. 새 서비스는 내장 SQLite를 위해 Node.js 24.13 이상을 사용하며 현재 패키징은 Node 24 계열을 요구합니다. 사용자를 위한 패키징에는 런타임을 포함합니다.
 
 ```sh
 npm --prefix central/ui ci

@@ -9,6 +9,8 @@
 
 **중앙관리 0.4 개발판:** 새 관리 프로그램·전용 확장 구현과 실행 방법은 [central/README.md](central/README.md)에 있습니다. 아래 0.3.0 기록은 기존 교대 공지 확장에 해당하며, 새 실행기는 별도 ID로 구분합니다.
 
+**자동 설정:** 클론 후 macOS는 `bash ./setup.command`, Windows는 설치 안내의 `setup.ps1` 명령으로 도구 준비·빌드·검사·설치를 진행합니다. 설정 화면에서 설치·연결 상태를 다시 검사할 수 있습니다. [여러 PC·Android 컨트롤러 확장 설계](docs/central-management/MULTI-DEVICE.md)는 현재 로컬 전용 구현과 구분됩니다.
+
 **기존 확장 사용자 전환:** [클론 → 백업 → 중앙관리 설치 → 업데이트 상세 안내](docs/central-management/CLONE-SETUP.md). 기존 확장을 먼저 중지·비활성화하고 새 `central/extension`을 등록합니다.
 
 ## 0.3.0: 여러 브라우저의 계정 순환 발송

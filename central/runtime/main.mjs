@@ -6,6 +6,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {createCentralManager} from '../core/index.js';
+import {inspectInstallation} from './setup-status.mjs';
 import {createCentralApplication} from './http.mjs';
 import {createNotificationDispatcher} from './notifications.mjs';
 import {dataDirectory,readDescriptor} from '../host/paths.mjs';
@@ -31,7 +32,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port=0,uiDi
     manager=createCentralManager({databasePath:resolve(directory,'central.sqlite')});
     const dispatcher=createNotificationDispatcher({load:()=>readJSON(resolve(directory,'notification-state.json')),save:v=>atomicJSON(resolve(directory,'notification-state.json'),v)});
     const bridgeToken=randomBytes(32).toString('hex');
-    app=createCentralApplication({manager,bridgeToken,uiDirectory,notificationDispatcher:dispatcher});
+    app=createCentralApplication({manager,bridgeToken,uiDirectory,notificationDispatcher:dispatcher,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
     server=http.createServer((req,res)=>void app.handler(req,res));server.requestTimeout=15000;server.headersTimeout=10000;
     await new Promise((accept,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',accept);});
     const url=`http://127.0.0.1:${server.address().port}`;app.setOrigin(url);

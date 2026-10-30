@@ -77,6 +77,10 @@ async function serviceStopped(plan) {
   }
 }
 
+export async function assertServiceStopped(directory = dataDirectory()) {
+  await serviceStopped({ app: join(directory, 'app') });
+}
+
 async function secureDataDirectory(path) {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const stat = await lstat(path);

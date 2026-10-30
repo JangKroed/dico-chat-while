@@ -51,3 +51,13 @@ test('중앙 정적 파일은 origin 검증과 CSP를 적용하고 디렉터리 
   const page=await request(app,'/messages');assert.equal(page.status,200);assert.match(page.body,/DICO/);assert.match(page.headers['content-security-policy'],/default-src 'self'/);
   assert.equal((await request(app,'/%2e%2e/%2e%2e/package.json')).status,404);
 });
+
+test('설치 진단은 UI 세션이 필요하며 읽기 전용 provider만 호출한다',async()=>{
+  let count=0;
+  const app=createCentralApplication({manager:manager(),origin,bridgeToken,setupStatus:async()=>{count++;return{ready:false,checkedAt:1,checks:[]};}});
+  assert.equal((await request(app,'/api/setup-status')).status,401);assert.equal(count,0);
+  const response=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}});
+  const cookie=response.headers['set-cookie'].split(';')[0];
+  const status=await request(app,'/api/setup-status',{cookie});assert.equal(status.status,200);assert.equal(JSON.parse(status.body).ready,false);assert.equal(count,1);
+  assert.equal((await request(app,'/api/setup-status',{method:'POST',body:{command:'install'},cookie,headers:{origin}})).status,403);
+});

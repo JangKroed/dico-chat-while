@@ -14,7 +14,7 @@ async function body(req) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,now=Date.now}) {
+export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,now=Date.now}) {
   if (typeof bridgeToken!=='string' || bridgeToken.length<32)throw Error('Private bridge credential required');
   const sessions=new Map(),bootstraps=new Map(),streams=new Set();
   const currentOrigin=()=>new URL(origin);
@@ -70,6 +70,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       if (path.startsWith('/api/')) {
         const session=uiSession(req);
         if (path==='/api/session' && req.method==='GET')return json(res,200,{csrfToken:session.csrfToken});
+        if (path==='/api/setup-status' && req.method==='GET') {
+          if (!setupStatus)throw fail(503,'설치 진단 기능이 준비되지 않았습니다.');
+          return json(res,200,await setupStatus());
+        }
         if (path==='/api/snapshot' && req.method==='GET')return json(res,200,manager.snapshot());
         if (path==='/api/analytics' && req.method==='GET')return json(res,200,manager.analytics({from:Number(url.searchParams.get('from')) || undefined,to:Number(url.searchParams.get('to')) || undefined}));
         if (path==='/api/logs' && req.method==='GET')return json(res,200,{events:manager.events({after:Number(url.searchParams.get('after')) || 0,limit:Math.min(500,Number(url.searchParams.get('limit')) || 200)})});
