@@ -39,3 +39,10 @@ test("selected channel stays local while it exists", () => {
   assert.equal(selectExistingChannel(channels, "channel-2"), "channel-2");
   assert.equal(selectExistingChannel(channels, "missing"), "channel-1");
 });
+
+test('조정기 설정 수정은 저장 전 변경으로 인식한다',()=>{
+  const base=settingsBase({...channel,coordination:{url:'http://127.0.0.1:43127',group:'notice',token:'a'.repeat(32),clientId:'private-id'}});
+  const draft={...base,messages:[...base.messages],coordination:{...base.coordination}};
+  assert.equal(draftMatchesBase(draft,base),true);
+  draft.coordination.group='another';assert.equal(draftMatchesBase(draft,base),false);
+});

@@ -1,8 +1,10 @@
 import { receiptMeasurement, cooldownMeasurement } from './timing-calibration.js';
+import { normalizeCoordination } from './coordination.js';
 export const initialState = () => ({
   version: 1,
   messages: ['', ''],
   skipConfirmation: false,
+  coordination: null,
   lastOutcome: null,
   ownUserId: '',
   intervalSeconds: 300,
@@ -36,6 +38,7 @@ export function parseChannel(value) {
 export const minimumInterval = channel => Number.isInteger(channel?.slowmodeSeconds) && channel.slowmodeSeconds>0 && channel.slowmodeSeconds<=21600 ? Math.max(30,channel.slowmodeSeconds+3+Math.max(0,Math.min(30,channel.timingCalibration?.extraSeconds || 0))) : 30;
 
 export function validateSettings(settings) {
+  if (normalizeCoordination(settings?.coordination) && (settings.skipConfirmation || !/^\d{17,20}$/.test(settings.ownUserId || ''))) throw Error('순환 발송에는 내 Discord 사용자 ID와 게시 결과 확인이 필요합니다. 확인 생략을 꺼 주세요.');
   if (settings?.skipConfirmation!==undefined && typeof settings.skipConfirmation!=='boolean') throw new Error('전송 확인 옵션이 올바르지 않습니다.');
   if (settings?.ownUserId && !/^\d{17,20}$/.test(settings.ownUserId)) throw new Error('내 Discord 사용자 ID는 17~20자리 숫자로 입력해 주세요.');
   if (!Array.isArray(settings?.messages) || settings.messages.length !== 2 ||
@@ -70,7 +73,7 @@ export function createController(io) {
   };
   const persist = async state => { await io.save(state); return state; };
   const scheduleNext = state => io.schedule(io.prepare && !state.prepared && state.timingCalibration?.status!=='measuring' ? Math.max(io.now(),state.nextRunAt-3000) : state.nextRunAt);
-  const destination = state => ({...state.target,ownUserId:state.ownUserId,skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,lastConfirmedMessageId:state.lastConfirmedMessageId,lastOutcome:state.lastOutcome,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
+  const destination = state => ({...state.target,ownUserId:state.ownUserId,coordinated:Boolean(state.coordination),skipConfirmation:state.skipConfirmation,lastSentAt:state.lastSentAt,lastConfirmedMessageId:state.lastConfirmedMessageId,lastOutcome:state.lastOutcome,messages:state.messages,expectedText:state.messages[state.nextIndex],draftRetrySince:state.draftRetrySince});
   const pause = async (state, error) => {
     state.prepared = null;
     state.enabled = false;
@@ -124,6 +127,14 @@ export function createController(io) {
     }
   };
   const confirmed = async (state, verified=true, receipt=null) => {
+    if (state.pending?.coordination) {
+      if (!verified) return pause(state,'순환 발송은 게시 결과 확인이 필요합니다.');
+      state.pending.coordinationOutcome='confirmed';
+      if (receipt?.messageId) state.lastConfirmedMessageId=receipt.messageId;
+      await persist(state);
+      try { await io.finish(state,state.pending,'confirmed'); }
+      catch { return pause(state,'게시를 확인했지만 조정기에 완료 보고를 확인하지 못했습니다. 발송 완료를 선택해 다시 보고하세요.'); }
+    }
     if (receipt && /^\d{17,20}$/.test(receipt.messageId || '')) state.lastConfirmedMessageId=receipt.messageId;
     state.lastOutcome=verified?'confirmed':'unverified';
     state.lastDeliveryId=state.pending.id;
@@ -172,6 +183,9 @@ export function createController(io) {
       state.skipConfirmation = settings.skipConfirmation === true;
       state.ownUserId = settings.ownUserId || '';
       state.intervalSeconds = settings.intervalSeconds;
+      const coordination=normalizeCoordination(settings.coordination);
+      state.coordination=coordination?{...coordination,clientId:state.coordination?.clientId || io.id()}:null;
+      state.coordinationRequired=false;
       state.error = null;
       return persist(state);
     },
@@ -215,11 +229,12 @@ export function createController(io) {
     },
     async start() {
       const state = await read();
+      if (state.coordinationRequired) throw Error('복원된 순환 발송 설정입니다. 조정기를 다시 연결하거나 순환 발송 해제를 명시적으로 저장해 주세요.');
       if (state.pending) throw new Error('이전 메시지가 발송되었는지 확인하고 전송 결과를 선택해 주세요.');
       if (state.enabled) return state;
       validateSettings(state);
       if (!state.target) throw new Error('현재 Discord 채널을 먼저 선택해 주세요.');
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, coordinated:Boolean(state.coordination), skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
@@ -259,7 +274,7 @@ export function createController(io) {
         if (state.prepared && io.waitUntil && state.nextRunAt-io.now()<=3000) { await io.waitUntil(state.nextRunAt); return api.tick(); }
         return state;
       }
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, coordinated:Boolean(state.coordination), skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {
@@ -311,10 +326,29 @@ export function createController(io) {
       }
       await persist(state);
       let response;
+      if (state.coordination) {
+        state.pending.coordination={...state.coordination};
+        await persist(state);
+        let permission;
+        try { permission=await io.acquire(state,state.pending); }
+        catch { return pause(state,'조정기 허가 응답을 확인하지 못했습니다. 발송 여부를 확인한 뒤 결과를 선택하세요.'); }
+        if (permission?.allowed!==true) {
+          if (permission?.allowed!==false) return pause(state,'조정기의 허가 응답이 올바르지 않습니다.');
+          state.pending=null;
+          state.nextRunAt=io.now()+Math.max(30000,Math.min(86400000,Number.isFinite(permission.waitMs)?permission.waitMs:30000));
+          log(state,'info','중앙 순환 발송: 다른 계정의 차례 또는 그룹 간격을 기다립니다.');
+          await persist(state);
+          try { await scheduleNext(state); } catch {return pause(state,'순환 발송 대기 예약에 실패했습니다.');}
+          return state;
+        }
+        state.pending.coordinationGranted=true;
+        await persist(state);
+      }
       try { response = await io.send(destination(state), state.pending); }
       catch { response = { status: 'uncertain', error: '전송 응답을 받지 못했습니다. 실제 채널에서 발송 여부를 확인해 주세요.' }; }
       if (state.skipConfirmation && response?.status==='unverified') return confirmed(state,false);
       if (response?.status === 'uncertain' && await recheck(state)) response = {status:'confirmed'};
+      if (state.pending?.coordination && response?.status!=='confirmed') return pause(state,'중앙 발송 허가 이후 결과가 확정되지 않았습니다. 실제 게시 여부와 초안을 확인한 뒤 전송 결과를 선택하세요.');
       if (response?.status === 'deferred' && Number.isFinite(response.retryAfterMs) && response.retryAfterMs > 0) {
         if (response.draftPrepared) {
           state.draftRetrySince ||= state.pending.startedAt;
@@ -344,6 +378,13 @@ export function createController(io) {
       const state = await read();
       if (state.enabled || !state.pending) throw new Error('확인이 필요한 중지된 전송이 없습니다.');
       if (!['sent', 'not-sent'].includes(resolution)) throw new Error('올바른 전송 결과를 선택해 주세요.');
+      if (state.pending.coordination) {
+        const outcome=resolution==='sent'?'confirmed':'not-sent';
+        if (state.pending.coordinationOutcome && state.pending.coordinationOutcome!==outcome) throw Error('이미 확인한 전송 결과와 다른 결과를 선택할 수 없습니다.');
+        state.pending.coordinationOutcome=outcome;
+        await persist(state);
+        await io.finish(state,state.pending,outcome);
+      }
       state.lastOutcome=resolution==='sent'?'confirmed':null;
       if (resolution === 'sent') {
         state.nextIndex = 1 - state.pending.index;
@@ -360,6 +401,7 @@ export function createController(io) {
     },
     async recover({ preserveDue = false } = {}) {
       const state = await read();
+      if (state.pending?.coordinationOutcome==='confirmed') return pause(state,'게시 확인된 발송의 중앙 완료 보고가 남았습니다. 발송 완료를 선택해 다시 보고하세요.');
       if (state.pending && state.enabled && await recheck(state)) return confirmed(state);
       if (state.pending) {
         if(!state.enabled && state.error) { await io.cancel(); return state; }
@@ -367,7 +409,7 @@ export function createController(io) {
       }
       if (!state.enabled) { await io.cancel(); return state; }
       if (state.prepared?.phase==='preparing') { state.prepared=null; await persist(state); }
-      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
+      const result = await inspect({ ...state.target, ownUserId: state.ownUserId, coordinated:Boolean(state.coordination), skipConfirmation: state.skipConfirmation, messages: state.messages, expectedText: state.messages[state.nextIndex], draftRetrySince: state.draftRetrySince });
       applySlowmode(state,result.slowmodeSeconds);
       if (!result.ok) {
         if (result.code === 'POSSIBLY_SENT' && state.draftRetryPending) {

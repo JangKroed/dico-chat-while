@@ -10,6 +10,7 @@ import { waitForReady, tabReadiness } from './readiness.js';
 import { createChannelQueue } from './channel-queue.js';
 import { createChannelManager } from './channel-manager.js';
 import { parseChannel, validateSettings } from './controller.js';
+import { coordinationRequest } from './coordination.js';
 
 let autoUpdater;
 const ALARM_PREFIX = 'dico-channel:';
@@ -55,6 +56,7 @@ async function inspect(target) {
     if (!readiness.ok) return readiness;
     try {
       const result=await withTimeout(chrome.tabs.sendMessage(target.tabId,{type:'DICO_INSPECT',target}),5000);
+      if (target.coordinated && result?.ok && result.coordinationVersion!==1) return {ok:false,error:'순환 발송을 지원하는 Discord 탭이 아닙니다. 확장 프로그램과 전송용 탭을 새로고침하세요.'};
       if(!result?.ok && channel) {
         try { await withTimeout(appendDiagnostics(chrome,[inspectionDiagnostic(result || {},channel,state.channels.indexOf(channel),state.revision)]),1500); } catch {}
       }
@@ -78,6 +80,8 @@ async function inspect(target) {
   }).finally(()=>chrome.storage.local.set({[`loadingRecoveryStatus:${channel?.id || target.tabId}`]:null}));
 }
 const manager = createChannelManager({
+  acquire: (state,delivery)=>coordinationRequest('acquire',state,delivery),
+  finish: (state,delivery,outcome)=>coordinationRequest('finish',state,{...delivery,coordinationOutcome:outcome}),
   load: async () => (await chrome.storage.local.get('state')).state,
   save: async state => {
     if(autoUpdater?.locked && updateBusy(state))throw Error('업데이트 적용 중에는 채널을 시작할 수 없습니다.');
@@ -210,7 +214,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'DICO_CAN_SEND' && sender.tab) {
     manager.getState().then(state => respond({
       allowed: state.channels.some(channel =>
-        !isStopped(channel.id) && channel.enabled && channel.target?.tabId === sender.tab.id && (message.phase==='prepare' ? !channel.pending && channel.prepared?.phase==='preparing' && channel.prepared.id===message.id : channel.pending?.id===message.id && Date.now()>=channel.pending.scheduledAt)),
+        !isStopped(channel.id) && channel.enabled && channel.target?.tabId === sender.tab.id && (message.phase==='prepare' ? !channel.pending && channel.prepared?.phase==='preparing' && channel.prepared.id===message.id : channel.pending?.id===message.id && (!channel.coordination || channel.pending.coordinationGranted===true) && Date.now()>=channel.pending.scheduledAt)),
     })).catch(() => respond({ allowed: false }));
     return true;
   }

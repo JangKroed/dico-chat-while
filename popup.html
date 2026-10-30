@@ -131,6 +131,18 @@
           <p id="own-user-id-help" class="field-help">개발자 모드에서 내 프로필의 사용자 ID를 복사하세요. 비워두면 화면의 프로필 이미지와 전송 상태로 확인합니다.</p>
           <p id="own-user-id-error" class="field-error" hidden></p>
 
+          <details class="coordination-settings">
+            <summary>여러 브라우저 순환 발송</summary>
+            <label class="skip-confirmation"><input id="coordination-enabled" type="checkbox"> 중앙 조정기로 발송 순서 유지</label>
+            <p class="field-help">모든 브라우저에 같은 주소·토큰·그룹을 설정하고, 위의 내 Discord 사용자 ID는 각 계정으로 입력하세요. 조정기의 계정 순서와 대상 채널이 일치해야 합니다. 게시 확인 생략은 사용할 수 없습니다.</p>
+            <label class="field-label" for="coordination-url">조정기 주소</label>
+            <input id="coordination-url" type="url" autocomplete="off" placeholder="http://127.0.0.1:43127">
+            <label class="field-label" for="coordination-token">연결 토큰</label>
+            <input id="coordination-token" type="password" autocomplete="off" maxlength="200">
+            <label class="field-label" for="coordination-group">그룹 이름</label>
+            <input id="coordination-group" type="text" autocomplete="off" maxlength="100" placeholder="notice">
+            <p class="field-help">서버에 정의된 순서대로 게시 확인 후 차례를 넘깁니다. 계정별 전송 간격과 슬로우 모드도 유지하므로 실제 간격은 길어질 수 있습니다. 연결 오류나 미확인 발송이 있으면 그룹이 기다립니다. 기본 아바타처럼 로그인 계정을 화면에서 확인할 수 없는 경우 발송을 차단합니다.</p>
+          </details>
           <button id="save-button" class="button button-secondary button-full" type="submit">이 채널 설정 저장</button>
         </form>
       </section>

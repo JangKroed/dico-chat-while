@@ -38,6 +38,24 @@ async function pair() {
   return { r, first, second };
 }
 
+test('조정기 인증정보는 허가·완료에만 전달하고 Discord 탭에는 전달하지 않는다',async()=>{
+  const r=rig(),id=(await r.manager.getState()).channels[0].id;
+  const coordination={url:'http://127.0.0.1:43127',token:'a'.repeat(32),group:'notice'};
+  await r.manager.updateSettings(id,{...settings(),ownUserId:'11111111111111111',coordination},0);
+  await r.manager.bind(id,target(7,'44444444444444444'));
+  let acquired=false,finished=false;
+  r.io.acquire=async(s,d)=>{assert.equal(s.coordination.token,coordination.token);assert.equal(d.coordination.token,coordination.token);acquired=true;return {allowed:true};};
+  r.io.finish=async(s,d)=>{assert.equal(d.coordination.token,coordination.token);finished=true;};
+  r.io.send=async(destination,delivery)=>{
+    assert.equal(acquired,true);assert.equal(destination.coordinated,true);
+    assert.equal(delivery.coordination,undefined);assert.equal(delivery.coordinationGranted,undefined);
+    assert.equal(JSON.stringify({destination,delivery}).includes(coordination.token),false);
+    return {status:'confirmed'};
+  };
+  await r.manager.start(id);
+  assert.equal(finished,true);assert.equal(r.state.channels[0].pending,null);
+});
+
 test('초기 채널을 한 번 저장하고 동시 조회에도 같은 ID를 유지한다', async () => {
   const r = rig();
   const roots = await Promise.all(Array.from({ length: 8 }, () => r.manager.getState()));

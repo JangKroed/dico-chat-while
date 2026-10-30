@@ -1,4 +1,5 @@
 import { minimumInterval } from "./controller.js";
+import { normalizeCoordination } from './coordination.js';
 import { draftMatchesBase, normalizeRootState, selectExistingChannel, settingsBase } from "./ui-state.js";
 
 const isPopup = document.body.dataset.page === "popup";
@@ -31,6 +32,10 @@ const elements = {
   interval: document.querySelector("#interval-seconds"),
   intervalError: document.querySelector("#interval-error"),
   skipConfirmation: document.querySelector("#skip-confirmation"),
+  coordinationEnabled: document.querySelector('#coordination-enabled'),
+  coordinationUrl: document.querySelector('#coordination-url'),
+  coordinationToken: document.querySelector('#coordination-token'),
+  coordinationGroup: document.querySelector('#coordination-group'),
   ownUserId: document.querySelector("#own-user-id"),
   ownUserIdError: document.querySelector("#own-user-id-error"),
   saveButton: document.querySelector("#save-button"),
@@ -77,6 +82,7 @@ function getDraft() {
     intervalText: elements.interval.value,
     ownUserId: elements.ownUserId.value,
     skipConfirmation: elements.skipConfirmation.checked,
+    coordination: elements.coordinationEnabled.checked ? {url:elements.coordinationUrl.value,token:elements.coordinationToken.value,group:elements.coordinationGroup.value} : null,
   };
 }
 
@@ -92,6 +98,10 @@ function setFormValues(channel) {
     elements.interval.value = "300";
     elements.ownUserId.value = "";
     elements.skipConfirmation.checked = false;
+    elements.coordinationEnabled.checked=false;
+    elements.coordinationUrl.value='http://127.0.0.1:43127';
+    elements.coordinationToken.value='';
+    elements.coordinationGroup.value='notice';
     loadedBase = null;
     return;
   }
@@ -101,6 +111,10 @@ function setFormValues(channel) {
   elements.interval.value = String(channel.intervalSeconds);
   elements.ownUserId.value = channel.ownUserId;
   elements.skipConfirmation.checked = channel.skipConfirmation === true;
+  elements.coordinationEnabled.checked=Boolean(channel.coordination);
+  elements.coordinationUrl.value=channel.coordination?.url || 'http://127.0.0.1:43127';
+  elements.coordinationToken.value=channel.coordination?.token || '';
+  elements.coordinationGroup.value=channel.coordination?.group || 'notice';
   loadedBase = settingsBase(channel);
   conflict = false;
   pendingSelectionId = null;
@@ -199,6 +213,7 @@ function getSettingsPayload() {
     intervalSeconds: Number(elements.interval.value),
     ownUserId: elements.ownUserId.value.trim(),
     skipConfirmation: elements.skipConfirmation.checked,
+    coordination: getDraft().coordination,
   };
 }
 
@@ -379,7 +394,7 @@ function renderControls() {
   const dirty = isDirty();
   const validation = validateDraft({ showErrors: dirty });
   const editable = Boolean(channel) && !channel.enabled && !channel.pending;
-  for (const field of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId, elements.skipConfirmation]) {
+  for (const field of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId, elements.skipConfirmation, elements.coordinationEnabled, elements.coordinationUrl, elements.coordinationToken, elements.coordinationGroup]) {
     field.disabled = !editable || busy;
   }
   elements.saveButton.disabled = !editable || busy || conflict || !dirty || !validation.valid;
@@ -496,7 +511,7 @@ function chooseChannel(channelId) {
   render();
 }
 
-for (const input of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId, elements.skipConfirmation]) {
+for (const input of [elements.channelName, elements.messageA, elements.messageB, elements.interval, elements.ownUserId, elements.skipConfirmation, elements.coordinationEnabled, elements.coordinationUrl, elements.coordinationToken, elements.coordinationGroup]) {
   input.addEventListener("input", () => {
     localNotice = null;
     render();
@@ -507,6 +522,14 @@ elements.form.addEventListener("submit", async event => {
   event.preventDefault();
   if (conflict) return setNotice("최신 설정을 불러온 뒤 다시 저장하세요.", "error");
   if (!validateDraft().valid) return setNotice("입력한 설정을 확인해 주세요.", "error");
+  if (elements.coordinationEnabled.checked) {
+    try {
+      const config=normalizeCoordination(getDraft().coordination);
+      if (elements.skipConfirmation.checked || !elements.ownUserId.value.trim()) throw Error('순환 발송에는 사용자 ID가 필요하며 게시 확인 생략을 꺼야 합니다.');
+      // Called in the submit gesture, before asynchronous work loses activation.
+      if (!await chrome.permissions.request({origins:[config.url+'/*']})) return setNotice('조정기 주소 접근 권한이 필요합니다.','error');
+    } catch(error) {return setNotice(error.message,'error');}
+  }
   await performAction("DICO_SAVE", {
     channelId: selectedId,
     settings: getSettingsPayload(),

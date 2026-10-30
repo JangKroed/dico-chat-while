@@ -6,6 +6,8 @@ const newChannel = (id, name, saved = {}) => {
   const { version: _version, ...state } = { ...initialState(), ...saved };
   return { ...state, id, name, settingsRevision: saved.settingsRevision ?? 0 };
 };
+// Server credentials stay in extension storage, never in a Discord tab.
+const tabDelivery = ({coordination,coordinationOutcome,coordinationGranted,...delivery}) => delivery;
 
 export function createChannelManager(io) {
   let initialization;
@@ -60,10 +62,12 @@ export function createChannelManager(io) {
     schedule: when => io.schedule(id, when),
     cancel: () => io.cancel(id),
     inspect: target => io.inspect(target),
-    send: (target, delivery) => io.send(target, { ...delivery, channelId: id }),
-    prepare: io.prepare ? (target, delivery) => io.prepare(target,{...delivery,channelId:id}) : undefined,
+    send: (target, delivery) => io.send(target, { ...tabDelivery(delivery), channelId: id }),
+    prepare: io.prepare ? (target, delivery) => io.prepare(target,{...tabDelivery(delivery),channelId:id}) : undefined,
     waitUntil: io.waitUntil ? when=>io.waitUntil(id,when) : undefined,
-    reconcile: io.reconcile ? (target, delivery) => io.reconcile(target, {...delivery,channelId:id}) : undefined,
+    reconcile: io.reconcile ? (target, delivery) => io.reconcile(target, {...tabDelivery(delivery),channelId:id}) : undefined,
+    acquire: io.acquire ? (state,delivery)=>io.acquire(state,delivery) : undefined,
+    finish: io.finish ? (state,delivery,outcome)=>io.finish(state,delivery,outcome) : undefined,
     now: () => io.now(),
     id: () => io.id(),
   });

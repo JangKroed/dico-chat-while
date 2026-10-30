@@ -1,0 +1,6 @@
+{
+  "name": "dico-coordinator",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" }
+}

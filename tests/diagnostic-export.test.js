@@ -7,7 +7,7 @@ import {channelDiagnostic,diagnosticTextContext} from '../diagnostics.js';
 test('다운로드 파일에 채널·실제 탭·알람·보존 타임라인을 넣고 문구는 포함하고 인증정보는 제외한다',async()=>{
  let click,report;
  const status={};
- const channels=[{id:'a',intervalSeconds:63,messages:['공지 A 💰','공지 B :moneybag:'],ownUserId:'SECRET',target:{tabId:7,channelId:'456',guildId:'123',title:'SECRET'}},{id:'b',intervalSeconds:123,target:{tabId:8,channelId:'789',guildId:'123'}}];
+ const channels=[{id:'a',intervalSeconds:63,messages:['공지 A 💰','공지 B :moneybag:'],ownUserId:'SECRET',coordination:{token:'SECRET',clientId:'SECRET'},pending:{coordination:{token:'SECRET',clientId:'SECRET'}},target:{tabId:7,channelId:'456',guildId:'123',title:'SECRET'}},{id:'b',intervalSeconds:123,target:{tabId:8,channelId:'789',guildId:'123'}}];
  const code=readFileSync(new URL('../diagnostic-settings.js',import.meta.url),'utf8').replace(/^import .*;\n/,'');
  runInNewContext(code,{
   readDiagnosticArchive:async()=>[{kind:"archived"}],channelDiagnostic,diagnosticTextContext,JSON,Date,Promise,setTimeout:()=>{},navigator:{userAgent:'test'},

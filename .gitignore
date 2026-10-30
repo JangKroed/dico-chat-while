@@ -1,5 +1,8 @@
 # Dependencies
 node_modules/
+/central/extension/content.js
+/central/extension/emoji-data.js
+/central/ui/dist/
 
 # Build and release artifacts
 /dist/
@@ -10,6 +13,8 @@ node_modules/
 # Local environment and logs
 .env
 .env.*
+.coordinator-state/
+coordinator/config.local.json
 !.env.example
 *.log
 

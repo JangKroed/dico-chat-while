@@ -35,3 +35,10 @@ test('확인 생략 옵션은 백업에 보존되고 오래된 백업은 기본 
  assert.equal(importSettings(backup)[0].skipConfirmation,true);delete backup.channels[0].skipConfirmation;
  assert.equal(importSettings(backup)[0].skipConfirmation,false);
 });
+
+test('순환 발송 백업은 토큰과 브라우저 ID를 제외하고 재연결 전 시작을 차단한다',()=>{
+ const backup=exportSettings({channels:[{...channel,ownUserId:'11111111111111111',coordination:{url:'http://127.0.0.1:43127',token:'VERY_PRIVATE_TOKEN',clientId:'PRIVATE_BROWSER',group:'notice'}}]});
+ assert.equal(JSON.stringify(backup).includes('VERY_PRIVATE_TOKEN'),false);
+ assert.equal(JSON.stringify(backup).includes('PRIVATE_BROWSER'),false);
+ assert.equal(importSettings(backup)[0].coordinationRequired,true);
+});

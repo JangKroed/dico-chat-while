@@ -12,6 +12,8 @@ export function channelDiagnostic(channel = {}, index = -1, revision = null) {
     timingCalibration:channel.timingCalibration ?? null,
     intervalSeconds:channel.intervalSeconds ?? null,slowmodeSeconds:channel.slowmodeSeconds ?? null,
     slowmodeUntil:channel.slowmodeUntil ?? null,skipConfirmation:channel.skipConfirmation===true,
+    coordinationEnabled:Boolean(channel.coordination),coordinationRequired:channel.coordinationRequired===true,
+    coordinationGranted:channel.pending?.coordinationGranted===true,coordinationOutcome:channel.pending?.coordinationOutcome || null,
     nextRunAt:channel.nextRunAt ?? null,lastAttemptOrConfirmedAt:channel.lastSentAt ?? null,
     lastOutcome:channel.lastOutcome ?? null,lastDeliveryId:channel.lastDeliveryId ?? null,lastConfirmedMessageId:channel.lastConfirmedMessageId ?? null,enabled:channel.enabled===true,
     ...(delivery?{deliveryId:delivery.id,deliveryScheduledAt:delivery.scheduledAt,deliveryStartedAt:delivery.startedAt,deliveryMessage:delivery.index===1?'B':'A',deliveryPhase:channel.pending?'commit':delivery.phase}:{}),

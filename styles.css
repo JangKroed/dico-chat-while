@@ -292,6 +292,9 @@ h2 {
   flex: 1;
 }
 
+.coordination-settings { margin: 16px 0; }
+.coordination-settings summary { cursor: pointer; font-weight: 600; }
+.coordination-settings input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; }
 .field-label {
   display: flex;
   align-items: center;

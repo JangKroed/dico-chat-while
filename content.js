@@ -168,6 +168,11 @@
     const panel = document.querySelector('section[class*="panels"], div[class*="panels"]');
     return panel ? avatarUserId(panel) : null;
   }
+  function coordinatedAccountMatches(target) {
+    if (!target.coordinated) return true;
+    const panel=document.querySelector('section[class*="panels"], div[class*="panels"]');
+    return Boolean(panel && avatarUserId(panel)===target.ownUserId);
+  }
   function authorId(row) {
     // Consecutive messages can omit the avatar; their group inherits the
     // nearest preceding message header. Never scan outside the chat list.
@@ -271,6 +276,7 @@
   }
   function inspect(target) {
     if (!target || !matchesTarget(target)) return { ok: false, error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
+    if (!coordinatedAccountMatches(target)) return {ok:false,error:'순환 발송: 로그인 계정이 등록된 사용자 ID와 다르거나 화면에서 확인되지 않습니다. 프로필 이미지와 사용자 ID를 확인하세요.'};
     const found = editors();
     if (found.length === 0) return { ok: false, code: 'EDITOR_LOADING', retryable: true, error: '아직 사용할 수 있는 채팅 입력창이 없습니다(0개).' };
     if (found.length > 1) return { ok: false, code: 'EDITOR_AMBIGUOUS', error: `채팅 입력창이 ${found.length}개입니다. 전송용 창에서 열린 스레드나 메시지 편집을 닫아 주세요.` };
@@ -290,9 +296,9 @@
         }
       }
     }
-    return { ok: true, ...slowmode(found[0]) };
+    return { ok: true, ...(target.coordinated?{coordinationVersion:1}:{}), ...slowmode(found[0]) };
   }
-  const CONTENT_VERSION = '0.2.44';
+  const CONTENT_VERSION = '0.3.0';
   let composing = false;
   document.addEventListener?.('compositionstart', () => { composing = true; }, true);
   document.addEventListener?.('compositionend', () => { composing = false; }, true);
@@ -587,7 +593,12 @@
         const selection=window.getSelection(), range=document.createRange();
         range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
         if(!await stableEditor(target,delivery.text,editor,500,trace,true)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
-        if (!(await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'}))?.allowed) return {status:'blocked',error:'전송 준비 후 중지 요청을 확인했습니다.'};
+        const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
+        const finalAuthorization=await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'});
+        const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
+        const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-authorizationMonoStarted;
+        const staleAuthorization=delivery.strictAuthorization && (!Number.isFinite(finalAuthorization?.authorizedAt) || authorizationElapsed<0 || authorizationElapsed>2000 || authorizationMonoElapsed<0 || authorizationMonoElapsed>2000 || Math.abs(authorizationElapsed-authorizationMonoElapsed)>1000 || authorizationNow-finalAuthorization.authorizedAt<0 || authorizationNow-finalAuthorization.authorizedAt>2000);
+        if (!finalAuthorization?.allowed || staleAuthorization) return {status:'blocked',error:'전송 준비 후 중지 또는 지연된 승인 응답을 확인했습니다.'};
         trace('prepared-verified');
       } else {
         editor.focus();
@@ -649,7 +660,7 @@
         }
       }
       const finalSelection=window.getSelection();
-      if (!matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || !composerMatches(editor,delivery.text)) return {status:'blocked',error:'Enter 직전 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'};
+      if (!coordinatedAccountMatches(target) || !matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || !composerMatches(editor,delivery.text)) return {status:'blocked',error:'Enter 직전 계정 또는 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'};
       const cooldown = slowmode(editor);
       if (cooldown.cooldownMs > 0) {
         trace('slowmode-wait', cooldown);

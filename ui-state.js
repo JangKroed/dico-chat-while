@@ -54,6 +54,7 @@ export function settingsBase(channel) {
     intervalText: String(normalized.intervalSeconds),
     ownUserId: normalized.ownUserId,
     skipConfirmation: normalized.skipConfirmation,
+    coordination: normalized.coordination ? {url:normalized.coordination.url,token:normalized.coordination.token,group:normalized.coordination.group} : null,
   };
 }
 
@@ -64,7 +65,8 @@ export function draftMatchesBase(draft, base) {
     draft.messages[1] === base.messages[1] &&
     draft.intervalText === base.intervalText &&
     draft.ownUserId === base.ownUserId &&
-    Boolean(draft.skipConfirmation) === Boolean(base.skipConfirmation);
+    Boolean(draft.skipConfirmation) === Boolean(base.skipConfirmation) &&
+    ['url','token','group'].every(key=>(draft.coordination?.[key] || '')===(base.coordination?.[key] || ''));
 }
 
 export function selectExistingChannel(channels, selectedId) {
