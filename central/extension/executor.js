@@ -42,15 +42,16 @@ export function createCentralExecutor({chrome,transport,now=Date.now,monotonicNo
     } else if(c.type==='PREPARE') {
       if(!p.runId || state.stoppedRuns[p.runId] || volatileStoppedRuns.has(p.runId) || state.emergencyStopped)throw Error('이미 중지된 실행의 입력 준비를 다시 시작할 수 없습니다.');
       const config=state.bindings[p.bindingId];
-      if(!config || config.configVersion!==p.configVersion || config.accountId!==p.accountId || config.channelId!==p.channelId || !await tabMatches(p))throw Error('채널 또는 적용된 구성 버전이 다릅니다.');
+      if(!config || config.configVersion!==p.configVersion || config.accountId!==p.accountId || config.channelId!==p.channelId || !await tabMatches(p))throw Object.assign(Error('채널 또는 적용된 구성 버전이 다릅니다.'),{code:'CONFIG_MISMATCH'});
       let a=state.attempts[p.attemptId];
       if(!a) {
         delete state.stoppedGroups[p.groupId];volatileStops.delete(p.groupId);
         a={...structuredClone(p),sessionId:state.sessionId,phase:'preparing',startedAt:now(),enterRequested:false};state.attempts[p.attemptId]=a;await save();
       } else if(!matches(a,p) || a.sessionId!==state.sessionId || !['preparing','prepared'].includes(a.phase))throw Error('기존 발송 시도를 다시 준비할 수 없습니다.');
       if(a.phase!=='prepared') {
-        const result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_PREPARE',target:target(a),delivery:delivery(a)});
-        if(result?.status!=='prepared')throw Error(result?.error || '입력 준비 결과를 확인하지 못했습니다.');
+        let result;
+        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_PREPARE',target:target(a),delivery:delivery(a)});}catch{throw Object.assign(Error('전송용 Discord 탭의 확장 스크립트에 연결하지 못했습니다. 탭을 새로고침하고 연결을 확인하세요.'),{code:'CONTENT_UNAVAILABLE'});}
+        if(result?.status!=='prepared')throw Object.assign(Error(result?.error || '입력 준비 결과를 확인하지 못했습니다.'),{code:/^[A-Z][A-Z0-9_]{0,63}$/.test(result?.code||'')?result.code:'PREPARE_REJECTED'});
         a.phase='prepared';await save();
       }
       if(volatileStops.has(a.groupId) || state.stoppedGroups[a.groupId])throw Error('중지 요청으로 준비를 취소했습니다.');
@@ -97,7 +98,7 @@ export function createCentralExecutor({chrome,transport,now=Date.now,monotonicNo
     await load();const key=c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
     const job=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
       state.lastError=String(error.message || error).slice(0,250);await save();
-      if(c.sessionId===state.sessionId)try{await ack(c,'rejected');}catch{}
+      if(c.sessionId===state.sessionId)try{await ack(c,'rejected',{rejectionCode:/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`});}catch{}
     });lanes.set(key,job);return job;
   }
   return {load,save,request,handleCommand,canSend,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};

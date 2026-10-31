@@ -275,15 +275,15 @@
     timer=setInterval(check,500);check();
   }
   function inspect(target) {
-    if (!target || !matchesTarget(target)) return { ok: false, error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
-    if (!coordinatedAccountMatches(target)) return {ok:false,error:'순환 발송: 로그인 계정이 등록된 사용자 ID와 다르거나 화면에서 확인되지 않습니다. 프로필 이미지와 사용자 ID를 확인하세요.'};
+    if (!target || !matchesTarget(target)) return { ok: false, code:'TARGET_MISMATCH', error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
+    if (!coordinatedAccountMatches(target)) return {ok:false,code:'ACCOUNT_UNVERIFIED',error:'순환 발송: 로그인 계정이 등록된 사용자 ID와 다르거나 화면에서 확인되지 않습니다. 프로필 이미지와 사용자 ID를 확인하세요.'};
     const found = editors();
     if (found.length === 0) return { ok: false, code: 'EDITOR_LOADING', retryable: true, error: '아직 사용할 수 있는 채팅 입력창이 없습니다(0개).' };
     if (found.length > 1) return { ok: false, code: 'EDITOR_AMBIGUOUS', error: `채팅 입력창이 ${found.length}개입니다. 전송용 창에서 열린 스레드나 메시지 편집을 닫아 주세요.` };
     if (hasDraft(found[0]) && (!target.messages?.some(text => composerMatches(found[0],text)) || editorContent(found[0]).unsupported)) return { ok: false, code:'DRAFT_MISMATCH', error: '작성 중인 메시지가 있어 중지했습니다. 직접 전송하거나 비운 뒤 다시 시작해 주세요.' };
     const form = found[0].closest('form') || found[0].parentElement;
     if (form.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) {
-      return { ok: false, error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
+      return { ok: false, code:'ATTACHMENT_OR_REPLY', error: '첨부파일 또는 답장 상태를 해제한 뒤 다시 시작해 주세요.' };
     }
     if ((!target.skipConfirmation || target.draftRetrySince) && !document.querySelector('[data-list-id="chat-messages"]')) return { ok: false, code: 'HISTORY_LOADING', retryable: true, error: '채팅 기록이 아직 준비되지 않았습니다.' };
     if (target.draftRetrySince) {
@@ -573,7 +573,7 @@
         if (['multiple-matches','next-already-posted','foreign-draft'].includes(previous.reason)) return {status:'uncertain',error:'이전 전송 이후 게시 기록과 초안의 순서를 확정할 수 없습니다. 중복 방지를 위해 확인이 필요합니다.'};
       }
       let result = inspect(target);
-      if (!result.ok) return { status: 'blocked', error: result.error };
+      if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       if (delivery.phase!=='prepare' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
       // Distinguish a blocked worker/permission reply from slow editor preparation.
       trace('authorization-request');
@@ -581,7 +581,7 @@
       trace('authorization-response',{authorized:authorization?.allowed===true});
       if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
       result = inspect(target);
-      if (!result.ok) return { status: 'blocked', error: result.error };
+      if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       let editor = editors()[0];
       originalEditor = editor;
       if(delivery.phase!=='prepare') seenDeliveries.add(delivery.id);
@@ -611,7 +611,7 @@
         // Native DOM insertion can leave visible text outside Slate's model.
         await new Promise(resolve => setTimeout(resolve, 100));
         result = inspect(target);
-        if (!result.ok) return { status: 'blocked', error: result.error };
+        if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
         if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
           return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
         }

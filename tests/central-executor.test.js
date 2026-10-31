@@ -65,3 +65,12 @@ test('절전 동안 버퍼에 머문 중앙 승인 응답은 Enter 권한으로 
   await r.client.handleCommand(cmd('COMMIT_PERMIT'));
   assert.equal(actualPermission,false);
 });
+
+test('입력 준비 거절 사유 코드를 보고하고 본문이나 오류 원문은 중앙에 보내지 않는다',async()=>{
+ const r=rig();await configured(r);
+ r.chrome.tabs.sendMessage=async()=>({status:'blocked',code:'DRAFT_MISMATCH',error:'private message text'});
+ await r.client.handleCommand(cmd('PREPARE'));
+ const rejected=r.reports.find(x=>x.type==='ACK'&&x.status==='rejected');
+ assert.equal(rejected.rejectionCode,'DRAFT_MISMATCH');
+ assert.equal(JSON.stringify(r.reports).includes('private message text'),false);
+});

@@ -70,9 +70,13 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const controls=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded');
     if(controls.every(c=>c.status==='applied')){g.status=g.controlIntent==='stop'?'stopped':'paused';g.controlIntent=null;g.waitReason=null;release(g);event('group.control_applied',{groupId:g.id,status:g.status});}
   }
+  function controlPayload(g,instanceId){
+    const attempt=state.attempts.find(a=>a.id===g.activeAttemptId);
+    return{action:g.controlIntent,groupId:g.id,runId:g.runId||null,controlGeneration:g.controlGeneration,attemptId:attempt?.instanceId===instanceId?attempt.id:null};
+  }
   function control(g,intent){
     g.controlIntent=intent;g.controlGeneration=(g.controlGeneration||0)+1;g.status=intent==='stop'?'stop_pending':'pause_pending';g.nextEligibleAt=null;
-    for(const instanceId of new Set(g.members.map(m=>get('channels',m).instanceId)))command('CONTROL',instanceId,{action:intent,groupId:g.id,runId:g.runId||null,controlGeneration:g.controlGeneration,attemptId:g.activeAttemptId||null});
+    for(const instanceId of new Set(g.members.map(m=>get('channels',m).instanceId)))command('CONTROL',instanceId,controlPayload(g,instanceId));
     event(`group.${intent}_requested`,{groupId:g.id});controlComplete(g);
   }
   function blockInstanceGroups(instanceId,reasonCode){
@@ -170,6 +174,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'service.stopAll':state.service.status='stopped';for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
       case 'service.resume':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups)if(g.lastConfirmedAt)g.nextMono=monotonicNow()+g.intervalMs;for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+effectiveInterval(c);lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
+      case 'attempt.resolveMany':{
+        ensure(p.outcome==='not_sent'&&p.confirmation==='CONFIRM_NOT_SENT','VALIDATION','Explicitly confirm that every selected attempt was not sent.');
+        ensure(Array.isArray(p.ids)&&p.ids.length>=1&&p.ids.length<=200&&p.ids.every(value=>typeof value==='string'&&value.length>0&&value.length<=100)&&new Set(p.ids).size===p.ids.length,'VALIDATION','Select 1–200 distinct attempt IDs.');
+        const attempts=p.ids.map(value=>get('attempts',value));
+        for(const a of attempts){ensure(a.status==='unknown','ATTEMPT_STATE','Every selected attempt must still be unknown.',409);ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','Every selected executor must first confirm execution is blocked.',409);}
+        for(const a of attempts)finish(a,'not_sent',{manual:true});
+        return{resolved:attempts.length,ids:attempts.map(a=>a.id)};
+      }
       case 'incident.read':{const i=get('incidents',p.id);i.read=p.read!==false;event('incident.read',{incidentId:i.id});return i;}
       case 'settings.update':updateSettings(p);event('settings.updated');return state.settings;
       case 'backup.import':return restore(p.backup||p);
@@ -267,7 +279,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         i.sessionId=id();i.connected=true;i.stableSinceMono=monotonicNow();i.lastSeenAt=now();i.lastSeenMono=monotonicNow();i.legacyFrozen=false;i.legacyPending=true;
         for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.appliedVersion=0;delete c.tabId;}
         for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
-        for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,{action:g.controlIntent,groupId:g.id,runId:g.runId||null,controlGeneration:g.controlGeneration,attemptId:g.activeAttemptId});
+        for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
         event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,commands:commands(i.id)};
       }
       const i=ensureSession(message,instanceId);
@@ -327,11 +339,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.status==='applied'&&c.type==='CONTROL'){
           if(message.executionBlocked===true&&message.attemptId&&message.attemptId===c.payload.attemptId){const a=get('attempts',message.attemptId);ensure(a.instanceId===i.id,'INSTANCE_MISMATCH','Attempt belongs to another instance.');a.executionBlocked=true;
             if(a.status==='preparing')finish(a,'cancelled');
+            else if(a.status==='unknown'&&!a.permitId&&!a.permitIssued)finish(a,'not_sent');
           }
           controlComplete(get('groups',c.payload.groupId));
         }
-        if(message.status==='rejected'){incident('command_rejected',{instanceId:i.id,commandId:c.id,groupId:c.payload.groupId});if(c.payload.attemptId){const a=get('attempts',c.payload.attemptId);if(ACTIVE.has(a.status))markUnknown(a,'command_rejected');}}
-        event('command.ack',{commandId:c.id,instanceId:i.id,status:c.status});return{ok:true};
+        if(message.status==='rejected'){
+          const rejectionCode=typeof message.rejectionCode==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(message.rejectionCode)?message.rejectionCode:undefined;
+          if(rejectionCode)c.rejectionCode=rejectionCode;
+          incident('command_rejected',{instanceId:i.id,commandId:c.id,groupId:c.payload.groupId});
+          if(c.payload.attemptId){const a=get('attempts',c.payload.attemptId);if(ACTIVE.has(a.status))markUnknown(a,rejectionCode||'command_rejected');}
+        }
+        event('command.ack',{commandId:c.id,instanceId:i.id,status:c.status,...(c.rejectionCode?{rejectionCode:c.rejectionCode}:{})});return{ok:true};
       }
       if(message.type==='PREPARED'){
         const elapsed=monotonicNow()-lastMono;ensure(elapsed>=0&&elapsed<=15000&&Math.abs((now()-lastWall)-elapsed)<=2000,'CLOCK_UNSAFE','Clock continuity is uncertain; manual resume is required.',409);

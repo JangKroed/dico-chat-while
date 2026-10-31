@@ -392,3 +392,86 @@ test('재연결 시 실제 브라우저·확장 버전을 갱신하고 사용자
  i=f.manager.snapshot().instances.find(x=>x.id===i.id);assert.equal(i.browser,'Chrome');assert.equal(i.name,'업무 계정');
  }finally{f.manager.close();}
 });
+
+test('multi-browser stop sends an attempt only to its owner and every member can acknowledge',()=>{
+ const f=fixture();try{
+ const cs=['A','B','C'].map(account=>f.connect(account));cs.forEach(c=>f.apply(c,[f.message(c.channel.accountId)]));
+ const g=f.group(cs);f.start(g);const a=f.manager.snapshot().attempts[0];
+ f.manager.execute('group.stop',{id:g.id});
+ for(const c of [cs[1],cs[2],cs[0]]){
+  const cmd=f.manager.commands(c.instanceId).findLast(x=>x.type==='CONTROL');
+  assert.equal(cmd.payload.attemptId,c.instanceId===a.instanceId?a.id:null);
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied',executionBlocked:true,...(cmd.payload.attemptId?{attemptId:cmd.payload.attemptId}:{})},c.instanceId);
+ }
+ assert.equal(f.manager.snapshot().groups[0].status,'stopped');assert.equal(f.manager.snapshot().attempts[0].status,'cancelled');
+ f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+ }finally{f.manager.close();}
+});
+
+test('reconnected non-owner receives a stop without another browser attempt',()=>{
+ const f=fixture();try{
+ const cs=['A','B'].map(account=>f.connect(account));cs.forEach(c=>f.apply(c,[f.message(c.channel.accountId)]));
+ const g=f.group(cs);f.start(g);f.manager.execute('group.stop',{id:g.id});
+ const hello=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:cs[1].instanceId});
+ const cmd=f.manager.commands(cs[1].instanceId).findLast(x=>x.type==='CONTROL');assert.equal(cmd.payload.attemptId,null);
+ f.manager.bridge({type:'ACK',sessionId:hello.sessionId,commandId:cmd.id,status:'applied',executionBlocked:true},cs[1].instanceId);
+ const owner=f.manager.commands(cs[0].instanceId).findLast(x=>x.type==='CONTROL');
+ f.manager.bridge({type:'ACK',sessionId:cs[0].sessionId,commandId:owner.id,status:'applied',executionBlocked:true,attemptId:owner.payload.attemptId},cs[0].instanceId);
+ assert.equal(f.manager.snapshot().groups[0].status,'stopped');
+ }finally{f.manager.close();}
+});
+
+test('unknown without any permit becomes not_sent only after owner confirms execution blocked',()=>{
+ const f=fixture();try{
+ const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];
+ f.result(c,a,'unknown');f.manager.execute('group.stop',{id:g.id});const cmd=f.manager.commands(c.instanceId).findLast(x=>x.type==='CONTROL');
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied'},c.instanceId);
+ assert.equal(f.manager.snapshot().attempts[0].status,'unknown');
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied',executionBlocked:true,attemptId:a.id},c.instanceId);
+ assert.equal(f.manager.snapshot().attempts[0].status,'not_sent');assert.equal(f.manager.snapshot().attempts[0].manual,false);
+ assert.equal(f.manager.snapshot().groups[0].status,'stopped');f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+ }finally{f.manager.close();}
+});
+
+test('unknown with an issued permit remains unknown despite a blocking control acknowledgment',()=>{
+ const f=fixture();try{
+ const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];
+ f.prepared(c,a);f.result(c,a,'unknown');f.manager.execute('group.stop',{id:g.id});const cmd=f.manager.commands(c.instanceId).findLast(x=>x.type==='CONTROL');
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied',executionBlocked:true,attemptId:a.id},c.instanceId);
+ assert.equal(f.manager.snapshot().attempts[0].status,'unknown');assert.equal(f.manager.snapshot().attempts[0].executionBlocked,true);
+ assert.equal(f.manager.snapshot().groups[0].status,'stop_pending');f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+ }finally{f.manager.close();}
+});
+
+test('bulk manual not_sent validates every selected unknown before committing and never restarts groups',()=>{
+ const f=fixture();try{
+ const pending=['A','B'].map(account=>{
+  const c=f.connect(account,account);f.apply(c,[f.message(account)]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts.find(x=>x.groupId===g.id);f.prepared(c,a);f.result(c,a,'unknown');f.manager.execute('group.stop',{id:g.id});
+  return{c,g,a,cmd:f.manager.commands(c.instanceId).findLast(x=>x.type==='CONTROL')};
+ });
+ const block=({c,a,cmd})=>f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied',executionBlocked:true,attemptId:a.id},c.instanceId);
+ block(pending[0]);const ids=pending.map(x=>x.a.id),payload={ids,outcome:'not_sent',confirmation:'CONFIRM_NOT_SENT'};
+ const before=f.manager.snapshot();assert.throws(()=>f.manager.execute('attempt.resolveMany',payload),{code:'EXECUTION_UNCERTAIN'});assert.deepEqual(f.manager.snapshot(),before);
+ assert.throws(()=>f.manager.execute('attempt.resolveMany',{...payload,ids:[ids[0],ids[0]]}),{code:'VALIDATION'});
+ assert.throws(()=>f.manager.execute('attempt.resolveMany',{...payload,confirmation:undefined}),{code:'VALIDATION'});
+ block(pending[1]);assert.deepEqual(f.manager.execute('attempt.resolveMany',payload),{resolved:2,ids});
+ assert.ok(f.manager.snapshot().attempts.every(x=>x.status==='not_sent'&&x.manual));assert.ok(f.manager.snapshot().groups.every(x=>x.status==='stopped'));
+ f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,2);
+ assert.throws(()=>f.manager.execute('attempt.resolveMany',payload),{code:'ATTEMPT_STATE'});
+ }finally{f.manager.close();}
+});
+
+test('rejected PREPARE keeps a bounded diagnostic code without recording raw errors',()=>{
+ for(const rejectionCode of ['DRAFT_MISMATCH','private body: hello', 'A'.repeat(65)]){
+  const f=fixture();try{
+   const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const cmd=f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE');
+   f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'rejected',rejectionCode,error:'private raw failure'},c.instanceId);
+   const valid=rejectionCode==='DRAFT_MISMATCH',s=f.manager.snapshot();
+   assert.equal(s.attempts[0].reasonCode,valid?'DRAFT_MISMATCH':'command_rejected');
+   assert.equal(s.commands.find(x=>x.id===cmd.id).rejectionCode,valid?'DRAFT_MISMATCH':undefined);
+   assert.equal(f.manager.events().findLast(x=>x.type==='command.ack').rejectionCode,valid?'DRAFT_MISMATCH':undefined);
+   assert.equal(JSON.stringify(s).includes('private raw failure'),false);assert.equal(JSON.stringify(s).includes('private body'),false);
+  }finally{f.manager.close();}
+ }
+});
