@@ -303,3 +303,67 @@ test('SQLite database and live WAL/SHM files are private even under a permissive
     assert.equal(statSync(dir).mode&0o777,0o700);for(const path of [databasePath,databasePath+'-wal',databasePath+'-shm'])assert.equal(statSync(path).mode&0o777,0o600,path);
   }finally{process.umask(previous);manager?.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+test('모두 실행은 준비된 그룹을 함께 시작하고 실행 중 그룹의 runId를 유지한다',()=>{
+ const f=fixture();try{
+ const a=f.connect('a','one'),b=f.connect('b','two'),m=f.message();f.apply(a,[m]);f.apply(b,[m]);
+ const ga=f.group([a]),gb=f.group([b]);f.manager.execute('group.start',{id:ga.id});
+ const runId=f.manager.snapshot().groups.find(g=>g.id===ga.id).runId;
+ const result=f.manager.execute('service.startAll');assert.equal(result.started,1);assert.equal(result.alreadyRunning,1);
+ assert.ok(f.manager.snapshot().groups.every(g=>g.status==='running'));
+ assert.equal(f.manager.snapshot().groups.find(g=>g.id===ga.id).runId,runId);
+ }finally{f.manager.close();}
+});
+test('모두 실행은 준비 안 된 그룹이 있으면 전체 변경을 되돌린다',()=>{
+ const f=fixture();try{
+ const a=f.connect('a','one'),b=f.connect('b','two'),m=f.message();f.apply(a,[m]);f.group([a]);f.group([b]);
+ f.manager.execute('service.stopAll'); // groups already stopped; no control ACK needed
+ const before=f.manager.snapshot();assert.throws(()=>f.manager.execute('service.startAll'),{code:'PLAYLIST_EMPTY'});
+ assert.deepEqual(f.manager.snapshot(),before);
+ }finally{f.manager.close();}
+});
+test('설정 초기화는 명시 확인과 최신 버전이 필요하고 실행 중에는 거부한다',()=>{
+ const f=fixture();try{
+ const c=f.connect(),m=f.message();f.apply(c,[m]);const g=f.group([c]);
+ assert.throws(()=>f.manager.execute('settings.reset',{}),{code:'RESET_CONFIRMATION_REQUIRED'});
+ const version=f.manager.snapshot().configurationToken;
+ assert.throws(()=>f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:'stale'}),{code:'VERSION_CONFLICT'});
+ f.manager.execute('group.start',{id:g.id});
+ assert.throws(()=>f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:f.manager.snapshot().configurationToken}),{code:'GROUP_RUNNING'});
+ }finally{f.manager.close();}
+});
+test('초기화는 구성을 비우고 기본값으로 복원하며 이전 확장 세션을 차단한다',()=>{
+ const f=fixture();try{
+ const c=f.connect(),m=f.message();f.apply(c,[m]);f.group([c]);f.manager.execute('settings.update',{notificationsEnabled:true,retentionDays:30});
+ f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:f.manager.snapshot().configurationToken});
+ const s=f.manager.snapshot();for(const list of ['messages','channels','groups','instances'])assert.equal(s[list].length,0);
+ assert.equal(s.settings.notificationsEnabled,false);assert.equal(s.settings.retentionDays,90);assert.equal(s.service.status,'stopped');
+ assert.throws(()=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,channels:[]},c.instanceId),{code:'NOT_FOUND'});
+ assert.ok(f.manager.events().some(e=>e.type==='settings.reset'));assert.doesNotThrow(()=>f.manager.analytics());
+ }finally{f.manager.close();}
+});
+
+test('초기화 확인은 유휴 tick에 만료되지 않지만 구성 변경 시 거부한다',()=>{
+ const f=fixture();try{
+ f.message();const token=f.manager.snapshot().configurationToken;f.advance(1000);f.manager.tick();
+ assert.equal(f.manager.snapshot().configurationToken,token);
+ f.message('New message');assert.throws(()=>f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:token}),{code:'VERSION_CONFLICT'});
+ const current=f.manager.snapshot().configurationToken;f.advance(1000);f.manager.tick();
+ assert.equal(f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:current}).reset,true);
+ }finally{f.manager.close();}
+});
+
+test('초기화는 미확인 시도를 지우지 않고 완료 기록은 유지한다',()=>{
+ const f=fixture();try{
+ const c=f.connect(),m=f.message();f.apply(c,[m]);const g=f.group([c]);f.start(g);
+ const a=f.manager.snapshot().attempts[0];
+ assert.throws(()=>f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:f.manager.snapshot().configurationToken}),{code:'ATTEMPT_UNRESOLVED'});
+ assert.equal(f.manager.snapshot().attempts[0].id,a.id);
+ f.prepared(c,a);f.result(c,a);f.manager.execute('group.stop',{id:g.id});
+ for(const command of f.manager.commands(c.instanceId).filter(x=>x.type==='CONTROL'))f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'applied'},c.instanceId);
+ f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:f.manager.snapshot().configurationToken});
+ assert.equal(f.manager.snapshot().attempts[0].status,'confirmed');assert.equal(f.manager.snapshot().attempts[0].id,a.id);
+ f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+ assert.ok(f.manager.events().some(x=>x.type==='delivery.confirmed'));
+ }finally{f.manager.close();}
+});

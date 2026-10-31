@@ -147,6 +147,25 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
       case 'group.start':case 'group.resume':return start(get('groups',p.id));
       case 'group.pause':case 'group.stop':{const g=get('groups',p.id);control(g,action.endsWith('stop')?'stop':'pause');return g;}
+      case 'service.startAll':{
+        ensure(state.groups.length>0,'NO_GROUPS','먼저 발송 그룹을 만들어 주세요.',409);
+        const candidates=state.groups.filter(g=>g.status!=='running');
+        if(state.service.status==='stopped'){state.service.status='resume_required';}
+        for(const g of candidates)start(g);
+        event('service.started_all',{started:candidates.length,alreadyRunning:state.groups.length-candidates.length});
+        return{started:candidates.length,alreadyRunning:state.groups.length-candidates.length};
+      }
+      case 'settings.reset':{
+        ensure(p.confirmation==='RESET_ALL_SETTINGS','RESET_CONFIRMATION_REQUIRED','초기화 확인 문구가 필요합니다.');
+        ensure(typeof p.expectedConfiguration==='string'&&p.expectedConfiguration===configurationToken(),'VERSION_CONFLICT','화면 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.',409);
+        ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','진행 중 또는 미확인 발송을 먼저 확인하세요.',409);
+        ensure(state.groups.every(g=>g.status==='stopped'&&!g.controlIntent&&!g.activeAttemptId),'GROUP_RUNNING','모든 그룹을 중지하고 중지 적용 완료를 확인하세요.',409);
+        const removed={messages:state.messages.length,channels:state.channels.length,groups:state.groups.length,instances:state.instances.length};
+        for(const c of state.commands)if(['queued','received'].includes(c.status))c.status='superseded';
+        state.messages=[];state.channels=[];state.groups=[];state.instances=[];state.locks=[];state.legacyImports=[];
+        state.settings=initial(now()).settings;state.service.status='stopped';state.service.reasonCode='settings_reset';
+        event('settings.reset',removed,'warning');return{reset:true,removed,historyPreserved:true};
+      }
       case 'service.stopAll':state.service.status='stopped';for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
       case 'service.resume':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups)if(g.lastConfirmedAt)g.nextMono=monotonicNow()+g.intervalMs;for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+Math.max(c.intervalMs,c.slowmodeMs||0);lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
@@ -400,7 +419,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const connectionTimeline=spans.filter(span=>span.scope==='instance'&&(!instanceId||span.targetId===instanceId)).map(span=>({instanceId:span.targetId,from:span.from,to:span.to,status:span.reason}));
     return{from,to,partialRecords:!!state.prunedBefore&&from<state.prunedBefore,retainedFrom:state.prunedBefore||null,waitReasons,connectionTimeline,generatedAt:now(),lastEventId:state.lastEventId,total:attempts.length,confirmed:confirmed.length,outcomes,confirmedBuckets:[...buckets.values()].sort((a,b)=>a.at-b.at),confirmation:{samples:timings.length,p50:percentile(.5),p95:percentile(.95),insufficientSamples:timings.length<20},confirmationRate:outcomes.confirmed+outcomes.not_sent?outcomes.confirmed/(outcomes.confirmed+outcomes.not_sent):null,excludedFromRate:outcomes.cancelled+outcomes.unknown+outcomes.in_progress,timeline:attempts.slice(-200).map(publicAttempt)};
   }
-  function snapshot(){return{schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),channels:state.channels.map(publicChannel),groups:state.groups.map(publicGroup),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
+  function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
+  function snapshot(){return{configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),channels:state.channels.map(publicChannel),groups:state.groups.map(publicGroup),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
     state.service={status:'resume_required',reasonCode:'service_restart',startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
