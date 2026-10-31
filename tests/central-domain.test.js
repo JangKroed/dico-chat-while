@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCentralManager } from '../central/core/index.js';
+import { CentralStore } from '../central/core/store.js';
 
 function fixture(options = {}) {
   let time = 1_800_000_000_000, mono = 1_000;
@@ -232,8 +233,9 @@ test('analytics waiting intervals clip to the requested period with one primary 
 test('legacy imports are idempotent, preserve B position, and bind only a matching observed account and channel', () => {
   const f=fixture(),backup={format:'dico-settings',version:1,createdAt:'2026-10-30T00:00:00Z',channels:[{name:'Previous',messages:['First','Second'],intervalSeconds:300,ownUserId:'111',nextIndex:1,url:'https://discord.com/channels/222/333',coordinationRequired:true,coordination:{token:'never-copy'}}]};
   const first=f.manager.execute('legacy.import',{backup});f.manager.execute('legacy.import',{backup});assert.equal(first.importedChannels,1);assert.equal(f.manager.snapshot().messages.length,2);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);assert.equal(f.manager.snapshot().groups[0].status,'stopped');assert.equal(JSON.stringify(f.manager.snapshot()).includes('never-copy'),false);
+  const oldAccount=f.manager.snapshot().accounts[0];f.manager.execute('account.update',{id:oldAccount.id,expectedVersion:1,name:'Imported identity'});
   const connection=f.manager.bridge({type:'HELLO',protocolVersion:1});f.manager.bridge({type:'OBSERVATION',sessionId:connection.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',name:'Current',tabId:10,verified:true}]},connection.instanceId);
-  const snap=f.manager.snapshot();assert.equal(snap.channels.length,1);assert.equal(snap.channels[0].instanceId,connection.instanceId);assert.equal(snap.channels[0].playlistIndex,1);assert.equal(snap.channels[0].appliedVersion,0);f.manager.close();
+  const snap=f.manager.snapshot();assert.equal(snap.accounts.length,1);assert.equal(snap.accounts[0].instanceId,connection.instanceId);assert.equal(snap.accounts[0].name,'Imported identity');assert.equal(snap.channels.length,1);assert.equal(snap.channels[0].instanceId,connection.instanceId);assert.equal(snap.channels[0].playlistIndex,1);assert.equal(snap.channels[0].appliedVersion,0);f.manager.close();
 });
 
 test('legacy import is atomic and forbidden during execution; empty legacy drafts are not invented', () => {
@@ -474,4 +476,233 @@ test('rejected PREPARE keeps a bounded diagnostic code without recording raw err
    assert.equal(JSON.stringify(s).includes('private raw failure'),false);assert.equal(JSON.stringify(s).includes('private body'),false);
   }finally{f.manager.close();}
  }
+});
+
+function independentAccount(f, accountId = '111', capabilities = ['open-channel-v1']) {
+  const hello=f.manager.bridge({type:'HELLO',protocolVersion:1,capabilities});
+  f.manager.bridge({type:'OBSERVATION',sessionId:hello.sessionId,legacyFrozen:true,legacyPending:false,channels:[]},hello.instanceId);
+  const result=f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:hello.sessionId,accountId,verified:true},hello.instanceId);
+  return {...hello,account:result.account};
+}
+
+test('accounts can register without channels and retain a custom name across verification', () => {
+  const f=fixture(),c=independentAccount(f);const initial=f.manager.snapshot();
+  assert.equal(initial.accounts.length,1);assert.equal(initial.channels.length,0);assert.equal(initial.targets.length,0);
+  assert.equal(c.account.verified,true);assert.equal(c.account.connected,true);assert.equal(c.account.sessionId,undefined);
+  const updated=f.manager.execute('account.update',{id:c.account.id,expectedVersion:1,name:'Work account'});
+  const again=f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'111',verified:true},c.instanceId).account;
+  assert.equal(again.id,c.account.id);assert.equal(again.name,'Work account');assert.equal(again.version,updated.version);
+  assert.throws(()=>f.manager.execute('account.update',{id:c.account.id,expectedVersion:1,name:'Stale'}),{code:'VERSION_CONFLICT'});
+  assert.equal(f.manager.snapshot().commands.length,0);assert.equal(f.manager.snapshot().attempts.length,0);f.manager.close();
+});
+
+test('target catalog validates Discord server channel URLs and deduplicates them', () => {
+  const f=fixture(),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333',name:'Announcements'});
+  assert.equal(target.channelId,'333');assert.equal(target.guildId,'222');
+  assert.equal(f.manager.execute('target.create',{url:target.url}).id,target.id);
+  for(const url of ['http://discord.com/channels/222/333','https://evil.com/channels/222/333','https://discord.com/channels/@me/333','https://discord.com/channels/222/333/444','https://discord.com/channels/222/333?x=1','https://discord.com/channels/222/333#x','https://user@discord.com/channels/222/333','https://discord.com:444/channels/222/333'])assert.throws(()=>f.manager.execute('target.create',{url}),{code:'VALIDATION'});
+  assert.equal(f.manager.snapshot().targets.length,1);assert.equal(f.manager.snapshot().channels.length,0);f.manager.close();
+});
+
+test('connecting an account to a target only queues one OPEN_CHANNEL until verified binding arrives', () => {
+  const f=fixture(),c=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'}),input={accountId:c.account.id,targetId:target.id};
+  const pending=f.manager.execute('channel.connect',input);assert.equal(pending.status,'pending');
+  assert.deepEqual(pending.command.payload,{accountId:'111',guildId:'222',channelId:'333',accountEntityId:c.account.id,targetId:target.id});
+  assert.equal(pending.command.type,'OPEN_CHANNEL');assert.equal(f.manager.execute('channel.connect',input).command.id,pending.command.id);
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:pending.command.id,status:'received'},c.instanceId);
+  assert.equal(f.manager.execute('channel.connect',input).command.id,pending.command.id);
+  assert.equal(f.manager.snapshot().channels.length,0);assert.equal(f.manager.snapshot().attempts.length,0);
+  f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:42,verified:true}]},c.instanceId);
+  const ready=f.manager.execute('channel.connect',input);assert.equal(ready.status,'connected');assert.equal(ready.channel.channelId,'333');
+  assert.equal(f.manager.snapshot().commands.length,1);assert.equal(f.manager.commands(c.instanceId).length,0);assert.equal(f.manager.snapshot().attempts.length,0);f.manager.close();
+});
+
+test('account connection rejects stale sessions, unverified accounts, stale transport and unresolved legacy execution', () => {
+  const f=fixture(),c=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'}),input={accountId:c.account.id,targetId:target.id};
+  assert.throws(()=>f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:'old',accountId:'111',verified:true},c.instanceId),{code:'STALE_SESSION'});
+  assert.throws(()=>f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'111'},c.instanceId),{code:'VALIDATION'});
+  f.advance(16000);assert.equal(f.manager.snapshot().accounts[0].connected,false);assert.throws(()=>f.manager.execute('channel.connect',input),{code:'CONNECTION_LOST'});
+  const fresh=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});
+  assert.equal(f.manager.snapshot().accounts[0].verified,false);
+  assert.throws(()=>f.manager.execute('channel.connect',input),{code:'LEGACY_UNRESOLVED'});
+  f.manager.bridge({type:'OBSERVATION',sessionId:fresh.sessionId,legacyFrozen:true,legacyPending:false,channels:[]},fresh.instanceId);
+  assert.throws(()=>f.manager.execute('channel.connect',input),{code:'ACCOUNT_UNVERIFIED'});f.manager.close();
+});
+
+test('an account switch fences old bindings and prevents a running group from continuing', () => {
+  const f=fixture(),c=f.connect('111');f.apply(c,[f.message()]);f.start(f.group([c]));
+  const registered=f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'222',verified:true},c.instanceId);
+  const s=f.manager.snapshot();assert.equal(registered.account.accountId,'222');assert.equal(s.accounts.find(a=>a.accountId==='111').verified,false);
+  assert.equal(s.channels[0].verified,false);assert.equal(s.groups[0].status,'needs_review');assert.equal(s.attempts[0].status,'unknown');
+  assert.throws(()=>f.prepared(c,s.attempts[0]));f.manager.close();
+});
+
+test('existing verified observations expose independent account and target catalog entries', () => {
+  const f=fixture(),c=f.connect('111','333'),s=f.manager.snapshot();
+  assert.equal(s.accounts[0].accountId,'111');assert.equal(s.accounts[0].instanceId,c.instanceId);assert.equal(s.accounts[0].verified,true);
+  assert.equal(s.targets[0].channelId,'333');assert.equal(s.channels[0].id,c.channel.id);f.manager.close();
+});
+
+test('reset token includes independent accounts and targets and reset clears their configuration', () => {
+  const f=fixture(),before=f.manager.snapshot().configurationToken;independentAccount(f);
+  const afterAccount=f.manager.snapshot().configurationToken;assert.notEqual(before,afterAccount);
+  f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'});const token=f.manager.snapshot().configurationToken;assert.notEqual(afterAccount,token);
+  f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:token});const s=f.manager.snapshot();
+  assert.deepEqual(s.accounts,[]);assert.deepEqual(s.targets,[]);assert.deepEqual(s.instances,[]);f.manager.close();
+});
+
+
+test('missing account verification revokes identity and fences affected execution immediately', () => {
+  const f=fixture(),c=f.connect('111');f.apply(c,[f.message()]);f.start(f.group([c]));
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'111',verified:false},c.instanceId);
+  const s=f.manager.snapshot();assert.equal(s.accounts[0].verified,false);assert.equal(s.channels[0].verified,false);assert.equal(s.groups[0].status,'needs_review');assert.equal(s.attempts[0].status,'unknown');f.manager.close();
+});
+
+test('account verification can declare the legacy freeze without a channel observation', () => {
+  const f=fixture(),hello=f.manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['open-channel-v1']});
+  const result=f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:hello.sessionId,accountId:'111',verified:true,legacyFrozen:true,legacyPending:false},hello.instanceId);
+  const target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'});
+  assert.equal(f.manager.execute('channel.connect',{accountId:result.account.id,targetId:target.id}).status,'pending');f.manager.close();
+});
+
+test('older stored bindings migrate to the catalog without changing playlists or groups', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-catalog-')),databasePath=join(dir,'state.sqlite');
+  try {
+    const f=fixture({databasePath}),c=f.connect('111','333');f.apply(c,[f.message()]);f.group([c]);const before=f.manager.snapshot();f.manager.close();
+    const store=new CentralStore(databasePath),old=store.read();delete old.accounts;delete old.targets;old.stateVersion++;store.commit(old,[]);store.close();
+    const restored=createCentralManager({databasePath}),s=restored.snapshot();
+    assert.equal(s.accounts.length,1);assert.equal(s.accounts[0].accountId,'111');assert.equal(s.accounts[0].verified,false);assert.equal(s.targets.length,1);
+    assert.equal(s.channels[0].id,before.channels[0].id);assert.deepEqual(s.channels[0].playlist,before.channels[0].playlist);assert.deepEqual(s.groups[0].members,before.groups[0].members);restored.close();
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('connecting a target cannot reopen a binding with an unresolved local attempt', () => {
+  const f=fixture(),c=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'});
+  f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:42,verified:true}]},c.instanceId);
+  c.channel=f.manager.snapshot().channels[0];f.apply(c,[f.message()]);f.start(f.group([c]));
+  assert.throws(()=>f.manager.execute('channel.connect',{accountId:c.account.id,targetId:target.id}),{code:'ATTEMPT_UNRESOLVED'});assert.equal(f.manager.snapshot().commands.some(cmd=>cmd.type==='OPEN_CHANNEL'),false);f.manager.close();
+});
+
+test('configuration backup roundtrips independent account aliases and unattached targets without verification', () => {
+  const f=fixture(),c=independentAccount(f),named=f.manager.execute('account.update',{id:c.account.id,expectedVersion:1,name:'My work identity'}),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333',name:'Future channel'});
+  const backup=f.manager.exportBackup();assert.equal(backup.accounts[0].name,named.name);assert.equal(backup.targets[0].name,target.name);assert.equal(backup.accounts[0].verified,undefined);assert.equal(JSON.stringify(backup).includes(c.sessionId),false);
+  f.manager.execute('target.create',{url:'https://discord.com/channels/222/444'});f.manager.importBackup(backup);
+  let s=f.manager.snapshot();assert.equal(s.channels.length,0);assert.equal(s.targets.length,1);assert.equal(s.targets[0].id,target.id);assert.equal(s.accounts[0].name,named.name);assert.equal(s.accounts[0].verified,false);
+  assert.throws(()=>f.manager.execute('channel.connect',{accountId:named.id,targetId:target.id}),{code:'CONNECTION_LOST'});
+  const fresh=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId,capabilities:['open-channel-v1']});
+  f.manager.bridge({type:'OBSERVATION',sessionId:fresh.sessionId,legacyFrozen:true,legacyPending:false,channels:[]},c.instanceId);
+  assert.throws(()=>f.manager.execute('channel.connect',{accountId:named.id,targetId:target.id}),{code:'ACCOUNT_UNVERIFIED'});
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:fresh.sessionId,accountId:'111',verified:true},c.instanceId);
+  assert.equal(f.manager.execute('channel.connect',{accountId:named.id,targetId:target.id}).status,'pending');f.manager.close();
+});
+
+test('older v1 backups derive account and target catalog while optional catalogs reject invalid references atomically', () => {
+  const f=fixture(),c=f.connect('111','333');const backup=f.manager.exportBackup();delete backup.accounts;delete backup.targets;
+  f.manager.importBackup(backup);assert.equal(f.manager.snapshot().accounts.length,1);assert.equal(f.manager.snapshot().targets.length,1);
+  const bad=f.manager.exportBackup();bad.accounts[0].instanceId='missing';const token=f.manager.snapshot().configurationToken;
+  assert.throws(()=>f.manager.importBackup(bad),{code:'VALIDATION'});assert.equal(f.manager.snapshot().configurationToken,token);
+  for(const target of [{id:'t',guildId:'222',channelId:'333',url:'https://discord.com/channels/222/333?x=1',name:'Bad'},{id:'t',guildId:'222',channelId:'444',url:'https://discord.com/channels/222/333',name:'Bad'}]){
+    const invalid={...backup,targets:[target]};assert.throws(()=>f.manager.importBackup(invalid),{code:'VALIDATION'});
+  }
+  f.manager.close();
+});
+
+test('transport heartbeats cannot keep an unobserved account identity fresh', () => {
+  const f=fixture(),c=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'});f.advance(16000);
+  f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);
+  assert.equal(f.manager.snapshot().accounts[0].verified,false);
+  assert.throws(()=>f.manager.execute('channel.connect',{accountId:c.account.id,targetId:target.id}),{code:'ACCOUNT_UNVERIFIED'});
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'111',verified:true},c.instanceId);
+  assert.equal(f.manager.execute('channel.connect',{accountId:c.account.id,targetId:target.id}).status,'pending');f.manager.close();
+});
+
+
+test('applied channel opens remain idempotent until verification and are fenced by a new session', () => {
+  const f=fixture(),c=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'}),input={accountId:c.account.id,targetId:target.id};
+  const first=f.manager.execute('channel.connect',input).command;
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:first.id,status:'applied'},c.instanceId);
+  assert.equal(f.manager.execute('channel.connect',input).command.id,first.id);assert.equal(f.manager.snapshot().commands.length,1);
+  const next=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId,capabilities:['open-channel-v1']});
+  assert.equal(f.manager.snapshot().commands.find(cmd=>cmd.id===first.id).status,'superseded');
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:next.sessionId,accountId:'111',verified:true,legacyFrozen:true,legacyPending:false},c.instanceId);
+  const retry=f.manager.execute('channel.connect',input).command;assert.notEqual(retry.id,first.id);
+  f.manager.bridge({type:'ACK',sessionId:next.sessionId,commandId:retry.id,status:'rejected'},c.instanceId);
+  assert.notEqual(f.manager.execute('channel.connect',input).command.id,retry.id);f.manager.close();
+});
+
+test('account revocation clears applied channel opens that have not been verified', () => {
+  const f=fixture(),c=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'});
+  const cmd=f.manager.execute('channel.connect',{accountId:c.account.id,targetId:target.id}).command;
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied'},c.instanceId);
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'111',verified:false},c.instanceId);
+  assert.equal(f.manager.snapshot().commands.find(x=>x.id===cmd.id).status,'superseded');f.manager.close();
+});
+
+test('older extensions receive an explicit update error while an existing verified connection remains usable', () => {
+  const f=fixture(),c=independentAccount(f,'111',['central-v1']),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'}),input={accountId:c.account.id,targetId:target.id};
+  assert.throws(()=>f.manager.execute('channel.connect',input),{code:'EXTENSION_UPDATE_REQUIRED'});assert.equal(f.manager.snapshot().commands.length,0);
+  f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:4,verified:true}]},c.instanceId);
+  assert.equal(f.manager.execute('channel.connect',input).status,'connected');f.manager.close();
+});
+
+test('HELLO validates bounded capability names and replaces previous session capabilities', () => {
+  const f=fixture();for(const capabilities of ['open-channel-v1',Array(33).fill('open-channel-v1'),['x'.repeat(65)],[42],['open channel']])assert.throws(()=>f.manager.bridge({type:'HELLO',protocolVersion:1,capabilities}),{code:'VALIDATION'});
+  const c=f.manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['central-v1','open-channel-v1','open-channel-v1']});
+  assert.deepEqual(f.manager.snapshot().instances[0].capabilities,['central-v1','open-channel-v1']);
+  f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});assert.deepEqual(f.manager.snapshot().instances[0].capabilities,[]);f.manager.close();
+});
+
+test('command rejection incidents expose bounded remediation fields and refresh their latest rejection', () => {
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));
+  const attempt=f.manager.snapshot().attempts[0],command=f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE');
+  const reject=rejectionCode=>f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode,error:'private body must not leak'},c.instanceId);
+  reject('DRAFT_MISMATCH');let problem=f.manager.snapshot().incidents.find(i=>i.code==='command_rejected');
+  assert.equal(problem.commandType,'PREPARE');assert.equal(problem.commandId,command.id);assert.equal(problem.attemptId,attempt.id);assert.equal(problem.rejectionCode,'DRAFT_MISMATCH');
+  reject('TAB_MISSING');problem=f.manager.snapshot().incidents.find(i=>i.id===problem.id);assert.equal(problem.count,2);assert.equal(problem.rejectionCode,'TAB_MISSING');
+  reject('private raw diagnostic');problem=f.manager.snapshot().incidents.find(i=>i.id===problem.id);assert.equal(problem.rejectionCode,undefined);assert.equal(JSON.stringify(f.manager.snapshot().incidents).includes('private'),false);f.manager.close();
+});
+
+test('legacy command rejection alerts resolve when their referenced attempt reaches a terminal result', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-incident-')),databasePath=join(dir,'state.sqlite');
+  try {
+    const f=fixture({databasePath}),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const attempt=f.manager.snapshot().attempts[0];f.prepared(c,attempt);
+    const command=f.manager.commands(c.instanceId).find(cmd=>cmd.type==='COMMIT_PERMIT');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode:'DRAFT_MISMATCH'},c.instanceId);f.manager.close();
+    const store=new CentralStore(databasePath),state=store.read(),problem=state.incidents.find(i=>i.code==='command_rejected');delete problem.attemptId;delete problem.commandType;state.stateVersion++;store.commit(state,[]);store.close();
+    const reopened=fixture({databasePath});const hello=reopened.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});
+    reopened.manager.bridge({type:'DELIVERY_RESULT',sessionId:hello.sessionId,attemptId:attempt.id,outcome:'confirmed',messageId:'known-post'},c.instanceId);
+    assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id===problem.id).status,'resolved');assert.equal(reopened.manager.snapshot().attempts[0].status,'confirmed');reopened.manager.close();
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('legacy CONTROL rejection remains until every browser applies a new control generation without resolving unrelated PREPARE alerts', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-control-alert-')),databasePath=join(dir,'state.sqlite');
+  try {
+    const f=fixture({databasePath}),cs=[f.connect('A'),f.connect('B')],g=f.group(cs);f.manager.execute('group.stop',{id:g.id});
+    const command=f.manager.commands(cs[0].instanceId).find(cmd=>cmd.type==='CONTROL');f.manager.bridge({type:'ACK',sessionId:cs[0].sessionId,commandId:command.id,status:'rejected',rejectionCode:'CONTROL_FAILED'},cs[0].instanceId);f.manager.close();
+    const store=new CentralStore(databasePath),state=store.read(),problem=state.incidents.find(i=>i.code==='command_rejected');delete problem.commandType;
+    state.commands.push({id:'unrelated-prepare',type:'PREPARE',instanceId:cs[0].instanceId,sessionId:cs[0].sessionId,status:'rejected',createdAt:0,payload:{groupId:g.id,attemptId:'older-unrelated-attempt'}});
+    state.incidents.push({id:'unrelated-problem',key:'command_rejected:unrelated',code:'command_rejected',commandId:'unrelated-prepare',groupId:g.id,status:'open',count:1,createdAt:0,lastSeenAt:0});
+    state.stateVersion++;store.commit(state,[]);store.close();
+    const reopened=fixture({databasePath}),sessions=cs.map(c=>reopened.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId}));
+    reopened.manager.execute('group.stop',{id:g.id});assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id===problem.id).status,'open');
+    const controls=sessions.map(c=>reopened.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL'));
+    reopened.manager.bridge({type:'ACK',sessionId:sessions[0].sessionId,commandId:controls[0].id,status:'applied'},sessions[0].instanceId);
+    assert.equal(reopened.manager.snapshot().groups[0].status,'stop_pending');assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id===problem.id).status,'open');
+    reopened.manager.bridge({type:'ACK',sessionId:sessions[1].sessionId,commandId:controls[1].id,status:'applied'},sessions[1].instanceId);
+    const s=reopened.manager.snapshot();assert.equal(s.groups[0].status,'stopped');assert.equal(s.incidents.find(i=>i.id===problem.id).status,'resolved');assert.equal(s.incidents.find(i=>i.id==='unrelated-problem').status,'open');reopened.manager.close();
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('command rejection alerts remain separate across groups sharing one browser', () => {
+  const f=fixture(),c=f.connect('A','one');
+  f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'A',guildId:'guild',channelId:'one',tabId:1,verified:true},{accountId:'A',guildId:'guild',channelId:'two',tabId:2,verified:true}]},c.instanceId);
+  const other=f.manager.snapshot().channels.find(channel=>channel.channelId==='two'),a=f.group([c]),b=f.group([{...c,channel:other}]);
+  for(const g of [a,b]){
+    f.manager.execute('group.stop',{id:g.id});const command=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL'&&cmd.payload.groupId===g.id);
+    f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode:'CONTROL_FAILED'},c.instanceId);
+  }
+  const alerts=f.manager.snapshot().incidents.filter(i=>i.code==='command_rejected');assert.equal(alerts.length,2);assert.notEqual(alerts[0].commandId,alerts[1].commandId);
+  f.manager.execute('group.stop',{id:b.id});const retry=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL'&&cmd.payload.groupId===b.id);
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:retry.id,status:'applied'},c.instanceId);
+  const current=f.manager.snapshot().incidents.filter(i=>i.code==='command_rejected');assert.equal(current.find(i=>i.groupId===a.id).status,'open');assert.equal(current.find(i=>i.groupId===b.id).status,'resolved');f.manager.close();
 });

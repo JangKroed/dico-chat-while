@@ -5,7 +5,7 @@ import {resolve,extname,sep} from 'node:path';
 const secret=()=>randomBytes(32).toString('hex');
 const equal=(a,b)=>typeof a==='string' && typeof b==='string' && Buffer.byteLength(a)===Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.json':'application/json'};
-const spaRoutes=new Set(['/','/messages','/connections','/groups','/history','/logs','/settings','/tutorial']);
+const spaRoutes=new Set(['/','/messages','/connections','/channels','/groups','/history','/logs','/settings','/tutorial']);
 const fail=(code,message)=>Object.assign(Error(message),{status:code});
 async function body(req) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw fail(415,'JSON 요청이 필요합니다.');

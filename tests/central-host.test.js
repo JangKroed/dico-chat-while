@@ -34,6 +34,7 @@ test('only configured extension origin and shaped messages are accepted', () => 
   assert.throws(() => validateOrigin('https://evil.example/', [id]), /origin/);
   assert.throws(() => validateOrigin('chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/', [id]), /origin/);
   assert.deepEqual(validatePacket({ requestId: 'x', message: { type: 'HEARTBEAT' } }), { requestId: 'x', message: { type: 'HEARTBEAT' } });
+  assert.equal(validatePacket({requestId:'identity',message:{type:'ACCOUNT_OBSERVATION',accountId:'123456789012345678',verified:true}}).message.type,'ACCOUNT_OBSERVATION');
   assert.equal(validatePacket({ requestId: 'a', message: { type: 'AUTHORIZE_ENTER', attemptId: 'attempt-1' } }).message.type, 'AUTHORIZE_ENTER');
   assert.throws(() => validatePacket({ requestId: 'x', message: { type: 'SHELL' } }), /message/);
   assert.throws(() => validatePacket({ requestId: 'x', message: { type: 'HELLO', bridgeToken: 'secret' } }), /secret/);

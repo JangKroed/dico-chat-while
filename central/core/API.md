@@ -90,3 +90,14 @@ Commands have `{id,type,instanceId,sessionId,status,createdAt,payload}`. Deliver
 - `attempt.resolveMany {ids,outcome:'not_sent',confirmation:'CONFIRM_NOT_SENT'}` requires 1–200 unique explicit IDs, all still unknown with executor blocking evidence, and resolves them atomically as manually checked not-sent. A changed/ineligible entry rejects the whole request.
 - CONTROL attempt references belong only to the target executor; other group members receive null. Unknown attempts without any issued permit can be finalized not-sent after the owning executor acknowledges execution blocked. An issued permit always preserves uncertainty until actual reconciliation/manual confirmation.
 - Rejected ACKs may carry a bounded uppercase `rejectionCode`. Valid codes are included in command events and attempt reason codes; raw errors and message bodies are not copied into diagnostic events.
+
+## Independent identity and destination catalog (0.4.1)
+
+Snapshots expose `accounts` (internal id, instanceId, Discord accountId, name, version, verified/connected, lastVerifiedAt) and `targets` (id, guildId, channelId, canonical URL, name, version) separately from per-account execution channel bindings. Existing bindings derive catalog records on load without losing saved messages or groups.
+
+- Bridge `ACCOUNT_OBSERVATION {accountId,verified,legacyFrozen?,legacyPending?}` registers or revokes current identity without requiring a server channel. Session fencing and independent 15-second identity freshness apply; switching identities cannot take over old bindings.
+- `account.update {id,expectedVersion,name}` changes a local alias.
+- `target.create {url,name?}` stores one logical server channel independently of account registration. URLs are canonical Discord numeric server/channel paths.
+- `channel.connect {accountId:<internal account entity id>,targetId}` requires a current verified identity and `open-channel-v1` executor capability when opening a new binding. Queues an idempotent `OPEN_CHANNEL` command; it never creates a send attempt or starts a group. Verified observations complete the request. Queued/received/applied-unverified opens are superseded on session change/revocation.
+- Backup version1 adds optional safe account/target arrays. Unbound targets and account aliases roundtrip; restored identity remains unverified. Old backups derive the catalogs from bindings. Reset clears both catalogs.
+- Rejection incidents include validated command type, attempt routing and reason code. Terminal attempt resolution clears related non-control incidents; CONTROL incidents require actual full control acknowledgment to clear. Reading an incident never resolves it.

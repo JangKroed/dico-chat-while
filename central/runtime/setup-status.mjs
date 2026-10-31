@@ -12,6 +12,8 @@ function registry(key) {
 export async function inspectInstallation({platform=process.platform,home=homedir(),env=process.env,directory=dataDirectory(platform,home,env),uiDirectory,snapshot={}}={}) {
   const path=platform==='win32'?win32:{join},checks=[];
   const add=(id,label,status,detail,nextStep)=>checks.push({id,label,status,detail,...(nextStep?{nextStep}:{})});
+  const packageInfo=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
+  add('app-version','관리 프로그램 버전','ok',`DICO ${packageInfo.version}`);
   add('runtime','관리 프로그램 런타임',/^24\.(?:1[3-9]|[2-9]\d)\.\d+$/.test(process.versions.node)?'ok':'error',`실행 중인 Node ${process.versions.node} · ${process.arch}`,'오류가 있으면 지원되는 Node 24.13 이상 24.x로 다시 패키징하세요.');
   const uiReady=Boolean(uiDirectory)&&await exists(path.join(uiDirectory,'index.html'));
   add('ui','중앙 화면 빌드',uiReady?'ok':'error',uiReady?'화면 빌드 파일이 있습니다.':'화면 빌드 파일이 없습니다.','클론 폴더에서 자동 설정을 다시 실행하세요.');

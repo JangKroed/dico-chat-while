@@ -1,5 +1,5 @@
 const fresh=()=>({version:1,instanceId:null,sessionId:null,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},lastError:null});
-export function createCentralExecutor({chrome,transport,now=Date.now,monotonicNow=()=>performance.now()}) {
+export function createCentralExecutor({chrome,transport,openChannel,now=Date.now,monotonicNow=()=>performance.now()}) {
   let state,loading,writes=Promise.resolve();const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
@@ -36,7 +36,11 @@ export function createCentralExecutor({chrome,transport,now=Date.now,monotonicNo
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
     if(state.processed[c.id])return;
     await ack(c,'received');
-    if(c.type==='CONFIG_SYNC') {
+    if(c.type==='OPEN_CHANNEL') {
+      if(state.emergencyStopped)throw Object.assign(Error('긴급 중지를 해제하고 다시 연결하세요.'),{code:'EXECUTION_STOPPED'});
+      if(typeof openChannel!=='function')throw Object.assign(Error('채널 연결 기능을 지원하는 확장으로 업데이트하세요.'),{code:'OPEN_CHANNEL_UNSUPPORTED'});
+      await openChannel({...p,commandId:c.id});await ack(c,'applied');
+    } else if(c.type==='CONFIG_SYNC') {
       if(Object.values(state.attempts).some(a=>a.bindingId===p.bindingId && ['preparing','prepared','executing','unknown'].includes(a.phase)))throw Error('진행 중 발송 결과를 먼저 확인하세요.');
       state.bindings[p.bindingId]=structuredClone(p);await save();await ack(c,'applied');
     } else if(c.type==='PREPARE') {

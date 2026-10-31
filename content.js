@@ -165,12 +165,12 @@
   }
   function ownUserId(target) {
     if (/^\d{17,20}$/.test(target.ownUserId || '')) return target.ownUserId;
-    const panel = document.querySelector('section[class*="panels"], div[class*="panels"]');
+    const panel = document.querySelector('section[class*="panels"], div[class*="panels"], section[aria-label="User area"], section[aria-label="사용자 영역"]');
     return panel ? avatarUserId(panel) : null;
   }
   function coordinatedAccountMatches(target) {
     if (!target.coordinated) return true;
-    const panel=document.querySelector('section[class*="panels"], div[class*="panels"]');
+    const panel=document.querySelector('section[class*="panels"], div[class*="panels"], section[aria-label="User area"], section[aria-label="사용자 영역"]');
     return Boolean(panel && avatarUserId(panel)===target.ownUserId);
   }
   function authorId(row) {

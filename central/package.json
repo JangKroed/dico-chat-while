@@ -1,7 +1,9 @@
 {
   "name": "dico-manager",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.13.0" }
+  "engines": {
+    "node": ">=24.13.0"
+  }
 }

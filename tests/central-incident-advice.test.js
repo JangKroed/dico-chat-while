@@ -1,0 +1,60 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {incidentAdvice,isIncidentOpen,incidentState,visibleIncidents} from '../central/ui/src/incident-advice.ts';
+
+const snapshot=()=>({instances:[{id:'browser',name:'업무 Brave'}],groups:[{id:'group',name:'주말 공지',guildId:'guild',channelId:'channel'}],targets:[{id:'target',name:'모집방',guildId:'guild',channelId:'channel'}],channels:[],attempts:[],incidents:[],commands:[]});
+test('known draft rejection has a specific Korean cause and preserves the user draft',()=>{
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',rejectionCode:'DRAFT_MISMATCH'},snapshot());
+  assert.equal(advice.knownReason,true);assert.equal(advice.page,'channels');
+  assert.match(advice.title,/초안/);assert.match(advice.cause,/다른 초안/);
+  assert.ok(advice.steps.some(step=>step.includes('보관')));
+  assert.ok(advice.steps.every(step=>!step.includes('자동으로 지')));
+});
+test('old command rejection infers affected browser, group and target from retained command',()=>{
+  const s=snapshot();s.commands=[{id:'command',instanceId:'browser',type:'CONFIG_SYNC',rejectionCode:'CONFIG_MISMATCH',payload:{groupId:'group',targetId:'target'}}];
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',commandId:'command'},s);
+  assert.equal(advice.knownReason,true);assert.equal(advice.page,'channels');
+  assert.deepEqual(advice.affected,['브라우저: 업무 Brave','그룹: 주말 공지','채널: #모집방']);
+});
+test('unknown legacy rejection explicitly says reason was not recorded without inventing a cause',()=>{
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',commandId:'missing'},snapshot());
+  assert.equal(advice.knownReason,false);assert.match(advice.cause,/상세 거절 사유가 기록되지 않았습니다/);
+  assert.doesNotMatch(advice.cause,/초안이|버전이|계정이 변경/);
+});
+test('CONTROL rejection provides stop and acknowledgment recovery without recommending resume',()=>{
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',commandType:'CONTROL'},snapshot());
+  assert.equal(advice.page,'groups');assert.equal(advice.knownReason,false);
+  assert.match(advice.cause,/상세 거절 사유가 기록되지 않았습니다/);
+  assert.ok(advice.steps.some(step=>step.includes('전체 중지')));
+  assert.ok(advice.steps.some(step=>step.includes('확인 응답')));
+  assert.ok(advice.steps.some(step=>step.includes('업데이트')));
+  assert.ok(advice.steps.every(step=>!step.includes('재개')));
+  assert.ok(advice.steps.some(step=>step.includes('실제 Discord 게시 내역')));
+});
+test('known CONTROL_FAILED still does not infer an unsupported internal root cause',()=>{
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',rejectionCode:'CONTROL_FAILED'},snapshot());
+  assert.equal(advice.page,'groups');assert.equal(advice.knownReason,true);
+  assert.match(advice.cause,/내부 원인은 확인되지/);
+});
+test('unknown delivery routes to history and never treats stop as evidence of non-delivery',()=>{
+  const s=snapshot();s.attempts=[{id:'attempt',status:'unknown',groupId:'group',instanceId:'browser'}];
+  const advice=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
+  assert.equal(advice.page,'history');assert.ok(advice.steps.some(step=>step.includes('미발송의 증거')));
+});
+test('read state never resolves a current issue and default list excludes resolved issues',()=>{
+  const s=snapshot();const read={id:'read',code:'command_rejected',readAt:1};const resolved={id:'resolved',code:'command_rejected',resolvedAt:2};
+  s.incidents=[read,resolved];
+  assert.equal(isIncidentOpen(read),true);assert.equal(incidentState(read),'미해결 · 읽음');
+  assert.equal(isIncidentOpen(resolved),false);assert.equal(incidentState(resolved),'해결됨 · 읽지 않음');
+  assert.deepEqual(visibleIncidents(s,false).map(i=>i.id),['read']);
+  assert.deepEqual(visibleIncidents(s,true).map(i=>i.id),['resolved','read']);
+});
+test('friendly titles and affected browser names are searchable',()=>{
+  const s=snapshot();s.incidents=[{id:'incident',code:'command_rejected',instanceId:'browser',rejectionCode:'CONTENT_UNAVAILABLE'}];
+  assert.equal(visibleIncidents(s,false,'업무 Brave').length,1);
+  assert.equal(visibleIncidents(s,false,'응답').length,1);
+});
+test('direct incident metadata still resolves target and browser after old commands are pruned',()=>{
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',instanceId:'browser',targetId:'target',commandType:'OPEN_CHANNEL',rejectionCode:'OPEN_CHANNEL_FAILED'},snapshot());
+  assert.equal(advice.page,'channels');assert.deepEqual(advice.affected,['브라우저: 업무 Brave','채널: #모집방']);
+});

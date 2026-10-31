@@ -74,3 +74,13 @@ test('입력 준비 거절 사유 코드를 보고하고 본문이나 오류 원
  assert.equal(rejected.rejectionCode,'DRAFT_MISMATCH');
  assert.equal(JSON.stringify(r.reports).includes('private message text'),false);
 });
+
+test('채널 열기 명령은 창 연결만 수행하고 발송 준비·Enter를 실행하지 않는다',async()=>{
+ const r=rig();const opened=[];
+ const client=createCentralExecutor({chrome:r.chrome,transport:r.transport,openChannel:async p=>{opened.push(p);}});
+ await client.load();await client.setSession({instanceId:'instance',sessionId:'session'});
+ const command={id:'open-channel',type:'OPEN_CHANNEL',instanceId:'instance',sessionId:'session',payload:{accountId:'44444444444444444',guildId:'11111111111111111',channelId:'22222222222222222'}};
+ await client.handleCommand(command);await client.handleCommand(command);
+ assert.equal(opened.length,1);assert.equal(r.messages.length,0);assert.equal(Object.keys(client.state.attempts).length,0);
+ assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='open-channel'&&x.status==='applied'));
+});
