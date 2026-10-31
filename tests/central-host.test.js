@@ -117,11 +117,13 @@ test('native stdio reaches the real loopback service and closes its session', as
   } finally { await runtime.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
-test('explicit user shutdown marker prevents native reconnection from starting service', async () => {
+test('user and update shutdown markers prevent native reconnection from starting service', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dico-host-quit-'));
   try {
-    await writeFile(join(dir, 'shutdown.json'), JSON.stringify({ intent: 'user', at: Date.now() }), { mode: 0o600 });
-    await assert.rejects(connectService({ dir, node: join(dir, 'missing-node'), timeoutMs: 100 }), /Open DICO manager manually/);
+    for(const intent of ['user','update']) {
+      await writeFile(join(dir, 'shutdown.json'), JSON.stringify({ intent, at: Date.now() }), { mode: 0o600 });
+      await assert.rejects(connectService({ dir, node: join(dir, 'missing-node'), timeoutMs: 100 }), /Open DICO manager manually/);
+    }
     assert.deepEqual((await readdir(dir)).sort(), ['shutdown.json']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

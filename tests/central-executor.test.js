@@ -84,3 +84,11 @@ test('채널 열기 명령은 창 연결만 수행하고 발송 준비·Enter를
  assert.equal(opened.length,1);assert.equal(r.messages.length,0);assert.equal(Object.keys(client.state.attempts).length,0);
  assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='open-channel'&&x.status==='applied'));
 });
+
+test('업데이트 유지보수는 유휴 상태에서만 시작하고 새 입력 준비를 차단한다',async()=>{
+ const r=rig();await configured(r);assert.equal(r.client.isIdle,true);assert.equal(r.client.beginMaintenance(),true);assert.equal(r.client.beginMaintenance(),false);
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.messages.length,0);assert.equal(r.reports.at(-1).rejectionCode,'UPDATE_IN_PROGRESS');
+ const active=rig();await configured(active);await active.client.handleCommand(cmd('PREPARE'));
+ assert.equal(active.client.beginMaintenance(),false);
+});

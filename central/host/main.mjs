@@ -3,8 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { encodePacket, readPackets, validateOrigin, validatePacket } from './protocol.mjs';
 import { connectService } from './service.mjs';
+import {installedExtensionStatus} from './extension-update.mjs';
 
-export async function runNativeHost({ input, output, origin, ids, service, pollMs = 1000 }) {
+export async function runNativeHost({ input, output, origin, ids, service, installedRoot, pollMs = 1000 }) {
   validateOrigin(origin, ids);
   let instanceId, sessionId;
   let busy = false;
@@ -23,7 +24,9 @@ export async function runNativeHost({ input, output, origin, ids, service, pollM
       let requestId = typeof raw?.requestId === 'string' ? raw.requestId : '';
       try {
         const packet = validatePacket(raw);
-        const result = packet.message.type === 'OPEN_DASHBOARD'
+        const result = packet.message.type === 'EXTENSION_STATUS'
+          ? await installedExtensionStatus(installedRoot || '',await service.request('/api/bridge/status'))
+          : packet.message.type === 'OPEN_DASHBOARD'
           ? await service.request('/api/bridge/open', 'POST', {})
           : await service.request('/api/bridge', 'POST', { instanceId: packet.instanceId || instanceId, message: packet.message });
         if (packet.message.type === 'HELLO') {
@@ -50,7 +53,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const installedRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
     const ids = JSON.parse(await readFile(join(installedRoot, 'allowed_extensions.json'), 'utf8')).extensionIds;
     const service = await connectService({ node: join(installedRoot, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node') });
-    await runNativeHost({ input: process.stdin, output: process.stdout, origin: process.argv[2], ids, service });
+    await runNativeHost({ input: process.stdin, output: process.stdout, origin: process.argv[2], ids, service, installedRoot });
   } catch {
     process.exitCode = 1;
   }

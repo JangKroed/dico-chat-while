@@ -35,7 +35,7 @@ export async function connectService({ dir = dataDirectory(), node = process.exe
       throw new Error('Open DICO manager manually');
     }
     const shutdown = JSON.parse(await readFile(marker, 'utf8'));
-    if (shutdown.intent === 'user') throw new Error('Open DICO manager manually');
+    if (['user','update'].includes(shutdown.intent)) throw new Error('Open DICO manager manually');
   } catch (error) {
     if (error.code !== 'ENOENT') throw new Error('Open DICO manager manually');
   }

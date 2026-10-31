@@ -1,18 +1,19 @@
 const fresh=()=>({version:1,instanceId:null,sessionId:null,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},lastError:null});
 export function createCentralExecutor({chrome,transport,openChannel,now=Date.now,monotonicNow=()=>performance.now()}) {
-  let state,loading,writes=Promise.resolve();const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
+  let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
   const request=async message=>transport.request({...message,sessionId:state.sessionId},state.instanceId);
   const ack=(c,status,extra={})=>request({type:'ACK',commandId:c.id,status,...extra});
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
   const delivery=a=>({id:a.attemptId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
+  const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
   const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k]);
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
   async function canSend(message,tabId) {
     await load();const a=state.attempts[message.id];
     const localAllowed=()=>{
-      if(!transport.connected || state.emergencyStopped || !a || a.tabId!==tabId || a.sessionId!==state.sessionId || volatileStops.has(a.groupId) || state.stoppedGroups[a.groupId] || state.stoppedRuns[a.runId] || volatileStoppedRuns.has(a.runId))return false;
+      if(maintenance || !transport.connected || state.emergencyStopped || !a || a.tabId!==tabId || a.sessionId!==state.sessionId || volatileStops.has(a.groupId) || state.stoppedGroups[a.groupId] || state.stoppedRuns[a.runId] || volatileStoppedRuns.has(a.runId))return false;
       const config=state.bindings[a.bindingId];if(!config || config.configVersion!==a.configVersion)return false;
       return message.phase==='prepare'?a.phase==='preparing':a.phase==='executing' && Boolean(a.permitId) && a.enterRequested===true;
     };
@@ -35,6 +36,7 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
     const p=c.payload || {};
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
     if(state.processed[c.id])return;
+    if(maintenance&&c.type!=='CONTROL')throw Object.assign(Error('확장 업데이트 적용 중입니다.'),{code:'UPDATE_IN_PROGRESS'});
     await ack(c,'received');
     if(c.type==='OPEN_CHANNEL') {
       if(state.emergencyStopped)throw Object.assign(Error('긴급 중지를 해제하고 다시 연결하세요.'),{code:'EXECUTION_STOPPED'});
@@ -99,11 +101,12 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
   }
   async function handleCommand(c) {
     if(c?.type==='CONTROL'){volatileStops.add(c.payload?.groupId);if(c.payload?.runId)volatileStoppedRuns.add(c.payload.runId);}
-    await load();const key=c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
+    inFlight++;try {await load();const key=c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
     const job=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
       state.lastError=String(error.message || error).slice(0,250);await save();
       if(c.sessionId===state.sessionId)try{await ack(c,'rejected',{rejectionCode:/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`});}catch{}
-    });lanes.set(key,job);return job;
+    });lanes.set(key,job);await job;
+    }finally{inFlight--;} 
   }
-  return {load,save,request,handleCommand,canSend,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
+  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
 }

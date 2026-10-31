@@ -44,3 +44,6 @@ Thumbs.db
 
 # Project-local portable setup runtime
 /.dico-tools/
+
+# Generated identity of the built central extension
+/central/extension/build-info.js

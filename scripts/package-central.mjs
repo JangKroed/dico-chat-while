@@ -2,6 +2,7 @@ import { cp, mkdir, readFile, stat, writeFile, chmod, rm } from 'node:fs/promise
 import { resolve, join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {findNpmCli} from './setup-central.mjs';
 import { extensionIdFromKey } from '../central/host/install.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,6 +48,8 @@ for (const file of ['content.js', 'emoji-data.js']) {
     await cp(join(source, file), join(destination, 'extension', file));
   }
 }
+const npmCli=await findNpmCli(node).catch(()=>undefined);
+await writeFile(join(destination,'update-installation.json'),JSON.stringify({formatVersion:1,repository:'https://github.com/JangKroed/dico-chat-while.git',ref:'main',...(npmCli?{npmCli}:{})},null,2)+'\n');
 await writeFile(join(destination, 'allowed_extensions.json'), JSON.stringify({ extensionIds: [extensionId] }, null, 2) + '\n');
 if (platform === 'darwin') {
   const launcher = `#!/bin/sh\nBASE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nexec "$BASE/runtime/node" "$BASE/central/host/main.mjs" "$@"\n`;

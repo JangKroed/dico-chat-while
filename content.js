@@ -1,5 +1,12 @@
 (() => {
-  if (globalThis.__dicoWhileLoaded) return;
+  const CONTENT_BUILD_ID = 'unmanaged';
+  const loadedRuntime=typeof chrome!=='undefined'?chrome.runtime:null;
+  if (globalThis.__dicoWhileLoaded) {
+    const previous=globalThis.__dicoWhileLifecycle;
+    // Pre-lifecycle versions need one explicit page refresh. Never stack them.
+    if(!previous || previous.isCurrent())return;
+    if(!previous.dispose())return;
+  }
   globalThis.__dicoWhileLoaded = true;
   let busy = false;
   const seenDeliveries = new Set();
@@ -300,8 +307,9 @@
   }
   const CONTENT_VERSION = '0.3.0';
   let composing = false;
-  document.addEventListener?.('compositionstart', () => { composing = true; }, true);
-  document.addEventListener?.('compositionend', () => { composing = false; }, true);
+  const compositionStart=()=>{composing=true},compositionEnd=()=>{composing=false};
+  document.addEventListener?.('compositionstart', compositionStart, true);
+  document.addEventListener?.('compositionend', compositionEnd, true);
   function draftEvidence(target,editor) {
     const draft=normalize(editorContent(editor).text);
     const expected=normalize(target.expectedText || ''),messages=target.messages || [];
@@ -689,8 +697,10 @@
       return { status: entered ? 'uncertain' : 'blocked', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
     } finally { busy = false; }
   }
-  chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  const messageListener=(message, sender, respond) => {
     if (sender.id !== chrome.runtime.id) return false;
+    if(message?.type==='DICO_CONTENT_STATUS'){respond({buildId:CONTENT_BUILD_ID,busy});return false;}
+    if(message?.type==='DICO_CONTENT_DISPOSE'){respond({disposed:globalThis.__dicoWhileLifecycle.dispose()});return false;}
     if (message?.type === 'DICO_RECONCILE') {
       const result = reconcile(message.target, message.delivery);
       reportTrace(message.delivery, 'reconcile', {result:result.status,draftAction:result.draftAction});
@@ -701,5 +711,18 @@
     if (message?.type === 'DICO_PREPARE') { deliver(message.target,{...message.delivery,phase:'prepare'}).then(respond); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;
-  });
+  };
+  const lifecycle={
+    isCurrent(){try{return Boolean(loadedRuntime?.id)&&loadedRuntime.id===chrome.runtime.id;}catch{return false;}},
+    dispose(){
+      if(busy)return false;
+      try{loadedRuntime?.onMessage.removeListener?.(messageListener);}catch{}
+      document.removeEventListener?.('compositionstart',compositionStart,true);
+      document.removeEventListener?.('compositionend',compositionEnd,true);
+      if(globalThis.__dicoWhileLifecycle===lifecycle){delete globalThis.__dicoWhileLoaded;delete globalThis.__dicoWhileLifecycle;}
+      return true;
+    }
+  };
+  globalThis.__dicoWhileLifecycle=lifecycle;
+  chrome.runtime.onMessage.addListener(messageListener);
 })();

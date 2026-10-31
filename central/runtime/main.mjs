@@ -5,10 +5,6 @@ import {resolve,dirname} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
-import {createCentralManager} from '../core/index.js';
-import {inspectInstallation} from './setup-status.mjs';
-import {createCentralApplication} from './http.mjs';
-import {createNotificationDispatcher} from './notifications.mjs';
 import {dataDirectory,readDescriptor} from '../host/paths.mjs';
 
 export async function atomicJSON(path,value) {
@@ -27,25 +23,19 @@ export async function acquireLock(dir) {
 }
 export async function startCentralRuntime({directory=dataDirectory(),port=0,uiDirectory=resolve(dirname(fileURLToPath(import.meta.url)),'../ui/dist')}={}) {
   await mkdir(directory,{recursive:true,mode:0o700});if(process.platform!=='win32')await chmod(directory,0o700);const unlock=await acquireLock(directory);
-  let manager,server,app,timer,unsubscribe;
+  let manager,server,app,timer,unsubscribe,updates,closing=false;
   try {
+    // The updater holds this same OS lock while replacing application trees.
+    // Load replaceable modules only after startup owns the lock.
+    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController}]=await Promise.all([
+      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs')
+    ]);
     manager=createCentralManager({databasePath:resolve(directory,'central.sqlite')});
     const dispatcher=createNotificationDispatcher({load:()=>readJSON(resolve(directory,'notification-state.json')),save:v=>atomicJSON(resolve(directory,'notification-state.json'),v)});
-    const bridgeToken=randomBytes(32).toString('hex');
-    app=createCentralApplication({manager,bridgeToken,uiDirectory,notificationDispatcher:dispatcher,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
-    server=http.createServer((req,res)=>void app.handler(req,res));server.requestTimeout=15000;server.headersTimeout=10000;
-    await new Promise((accept,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',accept);});
-    const url=`http://127.0.0.1:${server.address().port}`;app.setOrigin(url);
-    await atomicJSON(resolve(directory,'runtime.json'),{protocolVersion:1,url,pid:process.pid,bridgeToken});
-    await unlink(resolve(directory,'shutdown.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
-    const report=()=>void dispatcher.process(manager.snapshot()).catch(()=>{});
-    unsubscribe=manager.subscribe(report);
-    timer=setInterval(()=>{try{manager.tick();report();}catch{report();}},1000);timer.unref();
-    let closing=false;
-    return {url,manager,app,async close(){
-      if(closing)return;closing=true;clearInterval(timer);unsubscribe();let shutdownError;
-      try{manager.execute('service.stopAll',{});}catch(error){shutdownError=error;}
-      try{await atomicJSON(resolve(directory,'shutdown.json'),{intent:'user',at:Date.now()});}catch(error){shutdownError??=error;}
+    const closeRuntime=async({forUpdate=false}={})=>{
+      if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();let shutdownError;
+      if(!forUpdate)try{manager.execute('service.stopAll',{});}catch(error){shutdownError=error;}
+      try{await atomicJSON(resolve(directory,'shutdown.json'),{intent:forUpdate?'update':'user',at:Date.now()});}catch(error){shutdownError??=error;}
       app.close();
       try{await new Promise(r=>server.close(r));}
       finally{
@@ -54,7 +44,20 @@ export async function startCentralRuntime({directory=dataDirectory(),port=0,uiDi
         finally{await unlock();}
       }
       if(shutdownError)throw shutdownError;
-    }};
+    };
+    updates=createUpdateController({directory,manager,shutdown:()=>closeRuntime({forUpdate:true})});
+    const bridgeToken=randomBytes(32).toString('hex');
+    app=createCentralApplication({manager,bridgeToken,uiDirectory,notificationDispatcher:dispatcher,updates,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
+    server=http.createServer((req,res)=>void app.handler(req,res));server.requestTimeout=15000;server.headersTimeout=10000;
+    await new Promise((accept,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',accept);});
+    const url=`http://127.0.0.1:${server.address().port}`;app.setOrigin(url);
+    const descriptor={protocolVersion:1,url,pid:process.pid,bridgeToken};
+    await atomicJSON(resolve(directory,'runtime.json'),descriptor);updates.setRuntimeDescriptor(descriptor);
+    await unlink(resolve(directory,'shutdown.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+    const report=()=>void dispatcher.process(manager.snapshot()).catch(()=>{});
+    unsubscribe=manager.subscribe(report);
+    timer=setInterval(()=>{try{manager.tick();report();}catch{report();}},1000);timer.unref();
+    return {url,manager,app,updates,close:closeRuntime};
   } catch(error) {clearInterval(timer);unsubscribe?.();app?.close();server?.close();manager?.close();await unlock();throw error;}
 }
 function openBrowser(url) {

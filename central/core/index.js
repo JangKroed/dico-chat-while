@@ -86,7 +86,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     i={id:id(),key,code,status:'open',level:'error',createdAt:now(),lastSeenAt:now(),count:1,read:false,...details};state.incidents.push(i);event('incident.opened',{incidentId:i.id,reasonCode:code,...details},'error');return i;
   }
-  function resolveIncident(i,details={}){i.status='resolved';i.resolvedAt=now();event('incident.resolved',{incidentId:i.id,...details});}
+  function resolveIncident(i,details={}){i.status='resolved';i.resolvedAt=now();if(details.reasonCode)i.resolutionReason=details.reasonCode;event('incident.resolved',{incidentId:i.id,...details});}
   function resolveIncidents(attemptId){
     for(const i of state.incidents.filter(i=>i.status==='open')){
       const command=i.code==='command_rejected'?state.commands.find(c=>c.id===i.commandId):null;
@@ -100,6 +100,42 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       const command=state.commands.find(c=>c.id===i.commandId);
       if((command?.type||i.commandType)==='CONTROL'&&(command?.payload.groupId||i.groupId)===groupId)resolveIncident(i,{groupId});
     }
+  }
+  function recheckIncidents(incidentId){
+    const selected=incidentId===undefined?state.incidents:[get('incidents',incidentId)];
+    let resolved=0;const blocked=[];
+    for(const i of selected.filter(i=>i.status==='open')){
+      const c=state.commands.find(c=>c.id===i.commandId),type=c?.type||i.commandType;
+      const attemptId=c?.payload.attemptId||i.attemptId,a=state.attempts.find(a=>a.id===attemptId);
+      const groupId=c?.payload.groupId||i.groupId||a?.groupId,g=state.groups.find(g=>g.id===groupId);
+      let reasonCode=null,block='EVIDENCE_REQUIRED',message='해결을 확인할 기록이 부족합니다. 해당 알림의 안내를 확인하세요.',page='logs';
+      if(a&&ACTIVE.has(a.status)){
+        block='ATTEMPT_UNRESOLVED';message='전송 결과가 아직 확정되지 않았습니다. 기록에서 결과를 확인하세요.';page='history';
+      }else if((i.code==='delivery_unknown'||i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(type))&&a&&TERMINAL.has(a.status)){
+        reasonCode='terminal_attempt';
+      }else if(i.code==='command_rejected'&&type==='CONTROL'){
+        const active=state.attempts.some(a=>a.groupId===groupId&&ACTIVE.has(a.status));
+        if(active||g?.activeAttemptId){block='ATTEMPT_UNRESOLVED';message='그룹의 전송 결과 확인이 아직 필요합니다.';page='history';}
+        else if(g?.controlIntent||g&&['stop_pending','pause_pending'].includes(g.status)){
+          block='CONTROL_PENDING';message='브라우저의 중지·일시정지 적용 확인을 기다리고 있습니다.';page='groups';
+        }else if(attemptId&&(!a||!TERMINAL.has(a.status))){/* Missing evidence must not imply not-sent. */}
+        else if(groupId&&!g){
+          // Group deletion/reset requires no active attempt or pending control. Still
+          // reject inconsistent old records that contain an executable command.
+          const pending=state.commands.some(cmd=>cmd.payload.groupId===groupId&&['queued','received'].includes(cmd.status));
+          if(!pending)reasonCode='obsolete_group';
+          else{block='CONTROL_PENDING';message='삭제된 그룹의 미완료 명령이 남아 있어 자동으로 정리할 수 없습니다.';page='groups';}
+        }else if(g&&['stopped','paused'].includes(g.status)){
+          const controls=state.commands.filter(cmd=>cmd.type==='CONTROL'&&cmd.payload.groupId===g.id&&cmd.payload.controlGeneration===g.controlGeneration&&cmd.status!=='superseded');
+          const owners=new Set(g.members.map(member=>state.channels.find(channel=>channel.id===member)?.instanceId));
+          if(controls.length&&controls.every(cmd=>cmd.status==='applied')&&[...owners].every(owner=>owner&&controls.some(cmd=>cmd.instanceId===owner)))reasonCode='control_applied';
+          else{block='CONTROL_PENDING';message='모든 브라우저가 중지를 적용했다는 기록을 확인할 수 없습니다.';page='groups';}
+        }
+      }
+      if(reasonCode){resolveIncident(i,{reasonCode,...(attemptId?{attemptId}:{}),...(groupId?{groupId}:{})});resolved++;}
+      else blocked.push({id:i.id,reasonCode:block,message,page});
+    }
+    return{resolved,remaining:selected.filter(i=>i.status==='open').length,blocked};
   }
   function markUnknown(a,reasonCode){if(!ACTIVE.has(a.status))return;a.status='unknown';a.reasonCode=reasonCode;const g=get('groups',a.groupId);if(!g.controlIntent)g.status='needs_review';g.waitReason='delivery_unknown';incident('delivery_unknown',{attemptId:a.id,groupId:g.id,instanceId:a.instanceId});event('delivery.unknown',{attemptId:a.id,groupId:g.id,reasonCode},'error');}
   function release(g){state.locks=state.locks.filter(l=>l.groupId!==g.id);}
@@ -241,6 +277,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         return{resolved:attempts.length,ids:attempts.map(a=>a.id)};
       }
       case 'incident.read':{const i=get('incidents',p.id);i.read=p.read!==false;event('incident.read',{incidentId:i.id});return i;}
+      case 'incident.recheck':return recheckIncidents(p.id);
       case 'settings.update':updateSettings(p);event('settings.updated');return state.settings;
       case 'backup.import':return restore(p.backup||p);
       case 'maintenance.prune':return pruneRecords();

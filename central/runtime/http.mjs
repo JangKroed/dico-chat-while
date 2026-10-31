@@ -1,6 +1,7 @@
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {readFile,realpath} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
+import {safeToUpdate} from './updater.mjs';
 
 const secret=()=>randomBytes(32).toString('hex');
 const equal=(a,b)=>typeof a==='string' && typeof b==='string' && Buffer.byteLength(a)===Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -14,7 +15,7 @@ async function body(req) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,now=Date.now}) {
+export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,now=Date.now}) {
   if (typeof bridgeToken!=='string' || bridgeToken.length<32)throw Error('Private bridge credential required');
   const sessions=new Map(),bootstraps=new Map(),streams=new Set();
   const currentOrigin=()=>new URL(origin);
@@ -42,8 +43,12 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         // Only the native host reads this credential from the private descriptor.
         if (req.headers.origin || !equal(req.headers.authorization,`Bearer ${bridgeToken}`))throw fail(req.headers.origin?403:401,'브리지 인증이 필요합니다.');
         if (path==='/api/bridge/status' && req.method==='GET') {
-          const snapshot=manager.snapshot();
-          return json(res,200,{ok:true,protocolVersion:1,pid:process.pid,serviceStatus:snapshot.service?.status,busy:(snapshot.attempts || []).some(a=>['preparing','permitted','unknown'].includes(a.status)) || (snapshot.groups || []).some(g=>['running','stop_pending','pause_pending','needs_review'].includes(g.status))});
+          const snapshot=manager.snapshot(),updatePhase=(await updates?.status?.())?.phase;
+          return json(res,200,{ok:true,protocolVersion:1,pid:process.pid,serviceStatus:snapshot.service?.status,reloadSafe:safeToUpdate(snapshot)&&!['preparing','ready','applying'].includes(updatePhase),busy:(snapshot.attempts || []).some(a=>['preparing','permitted','unknown'].includes(a.status)) || (snapshot.groups || []).some(g=>['running','stop_pending','pause_pending','needs_review'].includes(g.status))});
+        }
+        if (path==='/api/bridge/update/apply' && req.method==='POST') {
+          if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
+          return json(res,202,await updates.apply(await body(req)));
         }
         if (path==='/api/bridge/open' && req.method==='POST')return json(res,200,{url:`${origin}/#bootstrap=${issueBootstrap()}`});
         if (path==='/api/bridge/commands' && req.method==='GET') {
@@ -54,6 +59,7 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         if (path==='/api/bridge' && req.method==='POST') {
           const payload=await body(req);
           if (!payload.message || typeof payload.message.type!=='string')throw fail(400,'브리지 메시지가 필요합니다.');
+          if(updates?.isApplying())throw fail(503,'업데이트를 적용하고 있습니다. 관리 화면이 다시 열릴 때까지 기다려 주세요.');
           manager.tick?.();
           return json(res,200,manager.bridge(payload.message,payload.instanceId));
         }
@@ -74,6 +80,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           if (!setupStatus)throw fail(503,'설치 진단 기능이 준비되지 않았습니다.');
           return json(res,200,await setupStatus());
         }
+        if (path==='/api/updates' && req.method==='GET') {
+          if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
+          return json(res,200,await updates.status());
+        }
         if (path==='/api/snapshot' && req.method==='GET')return json(res,200,manager.snapshot());
         if (path==='/api/analytics' && req.method==='GET')return json(res,200,manager.analytics({from:Number(url.searchParams.get('from')) || undefined,to:Number(url.searchParams.get('to')) || undefined}));
         if (path==='/api/logs' && req.method==='GET')return json(res,200,{events:manager.events({after:Number(url.searchParams.get('after')) || 0,limit:Math.min(500,Number(url.searchParams.get('limit')) || 200)})});
@@ -88,6 +98,11 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         }
         if (req.method==='POST') {
           checkMutation(req,session);const payload=await body(req);
+          if(updates?.isApplying())throw fail(503,'업데이트를 적용하고 있습니다. 관리 화면이 다시 열릴 때까지 기다려 주세요.');
+          if(path==='/api/updates'){
+            if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
+            return json(res,202,await updates.start());
+          }
           if (path==='/api/command') {
             if (typeof payload.action!=='string')throw fail(400,'명령을 확인하세요.');
             const result=manager.execute(payload.action,payload.payload || {});

@@ -101,3 +101,13 @@ Snapshots expose `accounts` (internal id, instanceId, Discord accountId, name, v
 - `channel.connect {accountId:<internal account entity id>,targetId}` requires a current verified identity and `open-channel-v1` executor capability when opening a new binding. Queues an idempotent `OPEN_CHANNEL` command; it never creates a send attempt or starts a group. Verified observations complete the request. Queued/received/applied-unverified opens are superseded on session change/revocation.
 - Backup version1 adds optional safe account/target arrays. Unbound targets and account aliases roundtrip; restored identity remains unverified. Old backups derive the catalogs from bindings. Reset clears both catalogs.
 - Rejection incidents include validated command type, attempt routing and reason code. Terminal attempt resolution clears related non-control incidents; CONTROL incidents require actual full control acknowledgment to clear. Reading an incident never resolves it.
+
+### incident.recheck({id?})
+
+열린 알림 전체 또는 특정 id 하나의 현재 해결 근거를 다시 검사한다. 반환은 `{resolved, remaining, blocked:[{id,reasonCode,message,page}]}`이고 remaining은 검사 대상 안의 미해결 개수다. 터미널 발송 결과, 안전하게 삭제된 그룹의 지난 요청, 현재 세대의 전체 CONTROL 적용 응답만 해결 근거로 사용한다. 결과·그룹·명령을 강제로 변경하지 않는다. 해결 기록의 resolutionReason은 terminal_attempt/obsolete_group/control_applied이며 읽음과 구분한다.
+
+### 로컬 업데이트 API
+
+GET `/api/updates`는 인증된 UI 세션에 `{phase,message,startedAt?,updatedAt?,version?}`를 반환한다. POST `/api/updates` `{}`는 Origin·CSRF를 검사하고 격리 준비를 시작하여 202와 같은 상태 객체를 반환한다. 사설 POST `/api/bridge/update/apply`는 네이티브 Bearer와 현재 작업의 jobToken, 준비 상태와 최신 실행 유휴 상태를 검증한다. 브라우저가 다운로드 URL·명령·설치 경로를 지정할 수 없다.
+
+네이티브 전용 EXTENSION_STATUS는 설치된 확장의 실제 해시와 중앙의 reloadSafe를 반환한다. 브라우저 메시지에 자격증명·로컬 경로를 노출하지 않는다. 동일 빌드에는 reload가 필요하지 않으며 다른 폴더로 로드된 확장의 재시작 루프를 제한한다.

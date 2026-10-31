@@ -706,3 +706,83 @@ test('command rejection alerts remain separate across groups sharing one browser
   f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:retry.id,status:'applied'},c.instanceId);
   const current=f.manager.snapshot().incidents.filter(i=>i.code==='command_rejected');assert.equal(current.find(i=>i.groupId===a.id).status,'open');assert.equal(current.find(i=>i.groupId===b.id).status,'resolved');f.manager.close();
 });
+
+test('incident recheck repairs historical terminal PREPARE and deleted-group CONTROL alerts without changing execution', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-recheck-')),databasePath=join(dir,'state.sqlite');
+  try {
+    const f=fixture({databasePath}),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+    const prepare=f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE');
+    f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:prepare.id,status:'rejected'},c.instanceId);
+    f.manager.execute('group.stop',{id:g.id});const oldControl=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL');
+    f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:oldControl.id,status:'rejected'},c.instanceId);
+    f.manager.execute('group.stop',{id:g.id});const retry=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL');
+    f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:retry.id,status:'applied',executionBlocked:true,attemptId:retry.payload.attemptId},c.instanceId);
+    assert.equal(f.manager.snapshot().attempts[0].status,'not_sent');
+    f.manager.execute('group.delete',{id:g.id,expectedVersion:1});f.manager.close();
+    const store=new CentralStore(databasePath),state=store.read(),problems=state.incidents.filter(i=>i.code==='command_rejected');
+    assert.equal(problems.length,2);
+    for(const problem of problems){problem.status='open';delete problem.resolvedAt;delete problem.attemptId;delete problem.commandType;}
+    state.stateVersion++;store.commit(state,[]);store.close();
+    const reopened=fixture({databasePath}),before=reopened.manager.snapshot();
+    const prepareProblem=problems.find(i=>i.commandId===prepare.id),controlProblem=problems.find(i=>i.commandId===oldControl.id);
+    assert.deepEqual(reopened.manager.execute('incident.recheck',{id:prepareProblem.id}),{resolved:1,remaining:0,blocked:[]});
+    assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id===controlProblem.id).status,'open');
+    assert.deepEqual(reopened.manager.execute('incident.recheck',{}),{resolved:1,remaining:0,blocked:[]});
+    assert.deepEqual(reopened.manager.execute('incident.recheck',{}),{resolved:0,remaining:0,blocked:[]});
+    const after=reopened.manager.snapshot();assert.deepEqual(after.groups,before.groups);assert.deepEqual(after.attempts,before.attempts);assert.deepEqual(after.commands,before.commands);
+    assert.equal(after.incidents.find(i=>i.id===prepareProblem.id).resolutionReason,'terminal_attempt');
+    assert.equal(after.incidents.find(i=>i.id===controlProblem.id).resolutionReason,'obsolete_group');
+    assert.ok(after.events.some(e=>e.type==='incident.resolved'&&e.incidentId===controlProblem.id&&e.reasonCode==='obsolete_group'));
+    reopened.manager.close();const persisted=fixture({databasePath});assert.equal(persisted.manager.snapshot().incidents.some(i=>i.status==='open'),false);persisted.manager.close();
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('incident recheck leaves unknown permits and rejected pending controls blocked', () => {
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  const permit=f.manager.commands(c.instanceId).find(cmd=>cmd.type==='COMMIT_PERMIT');
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:permit.id,status:'rejected'},c.instanceId);
+  f.manager.execute('group.stop',{id:g.id});const stop=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL');
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:stop.id,status:'rejected'},c.instanceId);
+  const before=f.manager.snapshot(),result=f.manager.execute('incident.recheck',{});
+  assert.equal(result.resolved,0);assert.equal(result.remaining,3);assert.ok(result.blocked.every(i=>i.reasonCode==='ATTEMPT_UNRESOLVED'&&i.page==='history'));
+  assert.deepEqual(f.manager.snapshot().attempts,before.attempts);assert.deepEqual(f.manager.snapshot().commands,before.commands);assert.deepEqual(f.manager.snapshot().groups,before.groups);
+  f.result(c,a,'confirmed');const pending=f.manager.execute('incident.recheck',{});
+  assert.equal(pending.resolved,0);assert.equal(pending.remaining,1);assert.equal(pending.blocked[0].reasonCode,'CONTROL_PENDING');assert.equal(f.manager.snapshot().groups[0].status,'stop_pending');
+  assert.throws(()=>f.manager.execute('incident.recheck',{id:'missing'}),{code:'NOT_FOUND'});f.manager.close();
+});
+
+test('incident recheck requires every current-generation CONTROL owner ACK before closing an old rejection', () => {
+  for(const applied of [false,true]){
+    const dir=mkdtempSync(join(tmpdir(),'dico-recheck-control-')),databasePath=join(dir,'state.sqlite');
+    try {
+      const f=fixture({databasePath}),cs=[f.connect('A'),f.connect('B')],g=f.group(cs);f.manager.execute('group.stop',{id:g.id});
+      const old=f.manager.commands(cs[0].instanceId).findLast(cmd=>cmd.type==='CONTROL');
+      f.manager.bridge({type:'ACK',sessionId:cs[0].sessionId,commandId:old.id,status:'rejected'},cs[0].instanceId);
+      f.manager.execute('group.stop',{id:g.id});
+      for(const c of cs){const cmd=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied'},c.instanceId);}
+      f.manager.close();const store=new CentralStore(databasePath),state=store.read(),problem=state.incidents.find(i=>i.commandId===old.id);
+      problem.status='open';delete problem.resolvedAt;
+      if(!applied)state.commands.findLast(cmd=>cmd.type==='CONTROL'&&cmd.instanceId===cs[1].instanceId).status='rejected';
+      state.stateVersion++;store.commit(state,[]);store.close();
+      const reopened=fixture({databasePath}),result=reopened.manager.execute('incident.recheck',{});
+      assert.equal(result.resolved,applied?1:0);assert.equal(result.remaining,applied?0:1);
+      if(applied)assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id===problem.id).resolutionReason,'control_applied');
+      else assert.equal(result.blocked[0].reasonCode,'CONTROL_PENDING');
+      reopened.manager.close();
+    } finally {rmSync(dir,{recursive:true,force:true});}
+  }
+});
+
+test('incident recheck uses retained terminal tombstones but never invents results for missing evidence', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-recheck-evidence-')),databasePath=join(dir,'state.sqlite');
+  try {
+    const f=fixture({databasePath});f.manager.close();const store=new CentralStore(databasePath),state=store.read();
+    state.attempts.push({id:'terminal',status:'not_sent',pruned:true,createdAt:1,finalizedAt:2});
+    for(const [id,commandType,attemptId] of [['retained','PREPARE','terminal'],['missing','CONTROL','missing-attempt'],['untyped',undefined,'terminal']])state.incidents.push({id,code:'command_rejected',status:'open',commandType,attemptId,groupId:'deleted',createdAt:1,lastSeenAt:1});
+    state.incidents.push({id:'unrelated',code:'connection_lost',status:'open',createdAt:1,lastSeenAt:1});
+    state.stateVersion++;store.commit(state,[]);store.close();
+    const reopened=fixture({databasePath}),result=reopened.manager.execute('incident.recheck',{});
+    assert.equal(result.resolved,1);assert.equal(result.remaining,3);assert.deepEqual(result.blocked.map(i=>i.id),['missing','untyped','unrelated']);assert.ok(result.blocked.every(i=>i.reasonCode==='EVIDENCE_REQUIRED'));
+    assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id==='retained').resolutionReason,'terminal_attempt');reopened.manager.close();
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
