@@ -1,3 +1,4 @@
+import {detectConnectedBrowser} from './browser-identity.js';
 import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
 import {createCentralExecutor} from './executor.js';
@@ -57,7 +58,8 @@ async function connect() {
       const old=(await chrome.storage.local.get('state')).state;
       // Same-ID developer upgrades must never reactivate an older scheduler.
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
-      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:'연결된 Chromium',browser:navigator.userAgent.includes('Edg/')?'Edge':'Chromium',extensionVersion:chrome.runtime.getManifest().version,capabilities:['central-executor-v1','strict-account-v1']});
+      const browser=await detectConnectedBrowser(chrome,navigator);
+      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,capabilities:['central-executor-v1','strict-account-v1']});
       await executor.setSession(response);
       for(const command of response.commands || [])void executor.handleCommand(command);
       await observation();clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;

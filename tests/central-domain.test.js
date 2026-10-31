@@ -381,3 +381,14 @@ test('읽은 슬로우 모드에 여유 3초를 자동 적용하고 읽기 누�
  f.advance(3000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,2);
  }finally{f.manager.close();}
 });
+
+test('재연결 시 실제 브라우저·확장 버전을 갱신하고 사용자 별칭은 유지한다',()=>{
+ const f=fixture();try{
+ const first=f.manager.bridge({type:'HELLO',protocolVersion:1,name:'연결된 Chromium',browser:'Chromium',extensionVersion:'0.4.0'});
+ f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:first.instanceId,name:'연결된 Brave',browser:'Brave',extensionVersion:'0.4.1'});
+ let i=f.manager.snapshot().instances.find(i=>i.id===first.instanceId);assert.equal(i.browser,'Brave');assert.equal(i.name,'연결된 Brave');assert.equal(i.extensionVersion,'0.4.1');
+ f.manager.execute('instance.update',{id:i.id,expectedVersion:i.version,name:'업무 계정'});
+ f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:i.id,name:'연결된 Chrome',browser:'Chrome',extensionVersion:'0.4.2'});
+ i=f.manager.snapshot().instances.find(x=>x.id===i.id);assert.equal(i.browser,'Chrome');assert.equal(i.name,'업무 계정');
+ }finally{f.manager.close();}
+});
