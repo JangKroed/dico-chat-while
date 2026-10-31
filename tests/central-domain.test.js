@@ -367,3 +367,17 @@ test('초기화는 미확인 시도를 지우지 않고 완료 기록은 유지�
  assert.ok(f.manager.events().some(x=>x.type==='delivery.confirmed'));
  }finally{f.manager.close();}
 });
+
+test('읽은 슬로우 모드에 여유 3초를 자동 적용하고 읽기 누락 시 이전 제한을 유지한다',()=>{
+ const f=fixture();try{
+ const c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:0});f.apply(c,[f.message()]);const g=f.group([c]);
+ const observed={accountId:c.channel.accountId,guildId:'guild',channelId:'channel',name:'Channel',tabId:1,verified:true};
+ const report=extra=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{...observed,...extra}]},c.instanceId);
+ report({slowmodeMs:60000});assert.equal(f.manager.snapshot().channels[0].effectiveIntervalMs,63000);
+ report({});assert.equal(f.manager.snapshot().channels[0].slowmodeMs,60000);
+ f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a);
+ for(let n=0;n<6;n++){f.advance(10000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();}
+ assert.equal(f.manager.snapshot().attempts.length,1);
+ f.advance(3000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,2);
+ }finally{f.manager.close();}
+});

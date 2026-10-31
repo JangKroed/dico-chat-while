@@ -1,3 +1,4 @@
+import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
 import {createCentralExecutor} from './executor.js';
 
@@ -28,7 +29,8 @@ async function observation() {
   for(const record of records) {
     const seen=await observe(record.tabId);
     if(!seen || seen.accountId!==record.accountId || seen.guildId!==record.guildId || seen.channelId!==record.channelId)continue;
-    channels.push({...seen,tabId:record.tabId,slowmodeMs:record.slowmodeMs || 0});
+    const limit=await observeChannelLimit(chrome,record);
+    channels.push({...seen,tabId:record.tabId,...limit});
   }
   return executor.request({type:'OBSERVATION',channels,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
 }

@@ -7,6 +7,7 @@ const ACTIVE = new Set(['preparing','permitted','unknown']);
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const clone = value => structuredClone(value);
+const effectiveInterval = c => Math.max(c.intervalMs, c.slowmodeMs>0?c.slowmodeMs+3000:0);
 const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
@@ -111,7 +112,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
     if(outcome==='confirmed'){
       g.cursor=(g.cursor+1)%g.members.length;g.lastConfirmedAt=now();g.nextMono=monotonicNow()+g.intervalMs;
-      c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.nextMono=monotonicNow()+Math.max(c.intervalMs,c.slowmodeMs||0);
+      c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.nextMono=monotonicNow()+effectiveInterval(c);
     }
     for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)))cmd.status='completed';
     resolveIncidents(a.id);
@@ -126,7 +127,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(state.service.status==='resume_required'){
       state.service.status='ready';state.service.reasonCode=null;
       for(const x of state.groups)if(x.lastConfirmedAt)x.nextMono=monotonicNow()+x.intervalMs;
-      for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+Math.max(c.intervalMs,c.slowmodeMs||0);
+      for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+effectiveInterval(c);
     }
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
     g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
@@ -167,7 +168,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         event('settings.reset',removed,'warning');return{reset:true,removed,historyPreserved:true};
       }
       case 'service.stopAll':state.service.status='stopped';for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
-      case 'service.resume':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups)if(g.lastConfirmedAt)g.nextMono=monotonicNow()+g.intervalMs;for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+Math.max(c.intervalMs,c.slowmodeMs||0);lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
+      case 'service.resume':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups)if(g.lastConfirmedAt)g.nextMono=monotonicNow()+g.intervalMs;for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+effectiveInterval(c);lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
       case 'incident.read':{const i=get('incidents',p.id);i.read=p.read!==false;event('incident.read',{incidentId:i.id});return i;}
       case 'settings.update':updateSettings(p);event('settings.updated');return state.settings;
@@ -301,7 +302,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           const tabChanged=c.tabId!==observed.tabId||c.sessionId!==i.sessionId;
           if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))markUnknown(a,'execution_tab_changed');continue;}
           c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();
-          if(observed.slowmodeMs!==undefined){c.slowmodeMs=duration(observed.slowmodeMs,'slowmodeMs');if(c.lastConfirmedMono!==undefined)c.nextMono=Math.max(c.nextMono||0,c.lastConfirmedMono+Math.max(c.intervalMs,c.slowmodeMs));}
+          if(observed.slowmodeMs!==undefined){const previous=c.slowmodeMs;c.slowmodeMs=duration(observed.slowmodeMs,'slowmodeMs');c.slowmodeObservedAt=now();if(previous!==c.slowmodeMs)event('channel.slowmode_observed',{channelId:c.id,slowmodeMs:c.slowmodeMs,effectiveIntervalMs:effectiveInterval(c)});if(c.lastConfirmedMono!==undefined)c.nextMono=Math.max(c.nextMono||0,c.lastConfirmedMono+effectiveInterval(c));}
           if(c.verified&&c.playlist.length&&c.appliedVersion!==c.configVersion&&!state.commands.some(cmd=>cmd.type==='CONFIG_SYNC'&&cmd.payload.bindingId===c.id&&cmd.payload.configVersion===c.configVersion&&cmd.sessionId===i.sessionId&&['queued','received'].includes(cmd.status))){
             command('CONFIG_SYNC',i.id,{bindingId:c.id,accountId,guildId,channelId,tabId:c.tabId,configVersion:c.configVersion,intervalMs:c.intervalMs,items:c.playlist.map(item=>{const m=get('messages',item.messageId);return{...item,name:m.name,body:m.revisions.find(r=>r.id===item.revisionId).body};})});
           }
@@ -399,7 +400,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   });}
   function commands(instanceId,{pendingOnly=true}={}){const i=get('instances',instanceId);return clone(state.commands.filter(c=>c.instanceId===instanceId&&c.sessionId===i.sessionId&&(!pendingOnly||['queued','received'].includes(c.status))));}
   function publicInstance(i){const{sessionId,lastSeenMono,stableSinceMono,...dto}=i;return clone(dto);}
-  function publicChannel(c){const{sessionId,nextMono,lastConfirmedMono,...dto}=c;return clone(dto);}
+  function publicChannel(c){const{sessionId,nextMono,lastConfirmedMono,...dto}=c;return {...clone(dto),effectiveIntervalMs:effectiveInterval(c)};}
   function publicGroup(g){const{nextMono,...dto}=g;return clone(dto);}
   function publicAttempt(a){const{sessionId,body,readyMono,permitId,...dto}=a;return clone(dto);}
   function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}
