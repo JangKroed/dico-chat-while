@@ -310,3 +310,116 @@ test('지연된 Enter 전 대기 승인 응답은 현재 허가로 사용하지 
  };
  await r.client.handleCommand(cmd('COMMIT_PERMIT'));
 });
+
+test('최종 불명 응답을 영구 저장한 뒤 실행 차단을 보고하고 늦은 Enter 승인을 거절한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ let resolveAuthorization,authorization;
+ const request=r.transport.request;
+ r.transport.request=async m=>{
+  if(m.type==='AUTHORIZE_ENTER')return new Promise(resolve=>{resolveAuthorization=resolve;});
+  if(m.type==='DELIVERY_RESULT'){
+   assert.equal(r.state.attempts.attempt.phase,'unknown');
+   assert.equal(r.state.attempts.attempt.result.executionBlocked,true);
+   assert.equal(m.outcome,'unknown');assert.equal(m.executionBlocked,true);
+  }
+  return request(m);
+ };
+ r.chrome.tabs.sendMessage=async()=>{
+  authorization=r.client.canSend({id:'attempt',phase:'commit'},7);
+  await new Promise(resolve=>setImmediate(resolve));
+  return{status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,composerRetained:true}};
+ };
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.result.executionBlocked,true);
+ assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT')?.executionBlocked,true);
+ resolveAuthorization({allowed:true});
+ assert.equal(await authorization,false);
+ assert.equal(await r.client.canSend({id:'attempt',phase:'commit'},7),false);
+});
+
+test('응답 유실 또는 불완전한 최종 증거는 실행 차단 확인으로 보고하지 않는다',async()=>{
+ const cases=[undefined,{status:'uncertain'},{status:'uncertain',deliveryEvidence:{phase:'commit',stage:'inspect',enterAttempted:false}},{status:'uncertain',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:false}},{status:'uncertain',deliveryEvidence:{phase:'prepare',stage:'observe',enterAttempted:true}},{status:'uncertain',deliveryEvidence:{phase:'commit',stage:'unknown',enterAttempted:false}},{status:'unknown',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true}},new Error('lost')];
+ for(const result of cases){
+  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+  r.chrome.tabs.sendMessage=async()=>{if(result instanceof Error)throw result;return result;};
+  await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+  const report=r.reports.find(m=>m.type==='DELIVERY_RESULT');
+  assert.equal(report.outcome,'unknown');assert.equal(report.executionBlocked,false);
+ }
+});
+
+test('재시도 준비는 이전 불명 결과의 중앙 종료 상태를 먼저 영구 반영한다',async()=>{
+ const r=rig();await configured(r);
+ r.client.state.attempts.previous={...payload,attemptId:'previous',sessionId:'session',phase:'unknown',enterRequested:true,result:{outcome:'unknown',executionBlocked:true}};await r.client.save();
+ const request=r.transport.request,send=r.chrome.tabs.sendMessage;
+ r.transport.request=async m=>{
+  await request(m);
+  if(m.type==='HEARTBEAT'){
+   assert.deepEqual(m.knownAttemptIds,['previous']);assert.equal(m.sessionId,'session');
+   return{ok:true,terminalAttempts:[{attemptId:'previous',status:'not_sent'}]};
+  }
+  return{ok:true};
+ };
+ r.chrome.tabs.sendMessage=async(id,m)=>{
+  if(m.type==='DICO_DRAFT_INSPECT'||m.type==='DICO_PREPARE')assert.equal(r.state.attempts.previous.phase,'not_sent');
+  return send(id,m);
+ };
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.attempts.attempt.phase,'prepared');assert.equal(r.state.attempts.previous.reported,true);
+ assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
+ assert.equal(r.reports.some(m=>m.type==='ACK'&&m.status==='rejected'),false);
+});
+
+test('이전 불명 결과가 중앙에서 종료되지 않았거나 응답이 유실되면 재시도 준비를 막는다',async()=>{
+ const cases=[undefined,{ok:true,terminalAttempts:[]},{ok:false,terminalAttempts:[{attemptId:'previous',status:'not_sent'}]},{ok:true,terminalAttempts:[{attemptId:'previous',status:'executing'}]},{ok:true,terminalAttempts:[{attemptId:'previous',status:'confirmed',messageId:'invalid'}]},new Error('lost')];
+ for(const result of cases){
+  const r=rig();await configured(r);
+  r.client.state.attempts.previous={...payload,attemptId:'previous',phase:'unknown',enterRequested:true};await r.client.save();
+  const request=r.transport.request;r.transport.request=async m=>{if(m.type==='HEARTBEAT'){if(result instanceof Error)throw result;return result;}return request(m);};
+  await r.client.handleCommand(cmd('PREPARE'));
+  assert.equal(r.state.attempts.previous.phase,'unknown');
+  assert.equal(r.messages.some(m=>m.type==='DICO_PREPARE'),false);
+  assert.equal(r.reports.at(-1).rejectionCode,'ATTEMPT_UNRESOLVED');
+ }
+});
+
+test('재시도 종료 동기화는 요청한 같은 연결의 이전 불명 시도에만 적용한다',async()=>{
+ const r=rig();await configured(r);
+ r.client.state.attempts.previous={...payload,attemptId:'previous',phase:'unknown',enterRequested:true};
+ r.client.state.attempts.other={...payload,bindingId:'other-binding',channelId:'55555555555555555',attemptId:'other',phase:'unknown',enterRequested:true};await r.client.save();
+ const request=r.transport.request;r.transport.request=async m=>{
+  await request(m);return m.type==='HEARTBEAT'?{ok:true,terminalAttempts:[{attemptId:'previous',status:'not_sent'},{attemptId:'other',status:'not_sent'},{attemptId:'attempt',status:'not_sent'}]}:{ok:true};
+ };
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.attempts.previous.phase,'not_sent');assert.equal(r.state.attempts.other.phase,'unknown');assert.equal(r.state.attempts.attempt.phase,'prepared');
+});
+
+test('이전 결과 동기화 중 세션 변경이나 실행 중지는 새 준비 기록을 만들지 않는다',async()=>{
+ for(const interruption of ['session','stop']){
+  const r=rig();await configured(r);
+  r.client.state.attempts.previous={...payload,attemptId:'previous',phase:'unknown',enterRequested:true};await r.client.save();
+  const request=r.transport.request;
+  r.transport.request=async m=>{
+   if(m.type==='HEARTBEAT'){
+    if(interruption==='session')await r.client.setSession({instanceId:'instance',sessionId:'replacement-session'});
+    else r.client.state.stoppedRuns[payload.runId]=true;
+    return{ok:true,terminalAttempts:[{attemptId:'previous',status:'not_sent'}]};
+   }
+   return request(m);
+  };
+  await r.client.handleCommand(cmd('PREPARE'));
+  assert.equal(r.state.attempts.attempt,undefined);
+  assert.equal(r.messages.length,0);
+ }
+});
+
+
+test('중앙에서 종료된 재시작 전 실행 기록도 재시도 준비 전에 동기화한다',async()=>{
+ for(const phase of ['preparing','prepared','executing']){
+  const r=rig();await configured(r);
+  r.client.state.attempts.previous={...payload,attemptId:'previous',phase,enterRequested:phase==='executing'};await r.client.save();
+  const request=r.transport.request;r.transport.request=async m=>{await request(m);return m.type==='HEARTBEAT'?{ok:true,terminalAttempts:[{attemptId:'previous',status:'not_sent'}]}:{ok:true};};
+  await r.client.handleCommand(cmd('PREPARE'));
+  assert.equal(r.state.attempts.previous.phase,'not_sent');assert.equal(r.state.attempts.attempt.phase,'prepared');
+ }
+});

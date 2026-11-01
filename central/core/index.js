@@ -362,6 +362,31 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'service.stopAll':state.service.status='stopped';for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
       case 'service.resume':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups)if(g.lastConfirmedAt)g.nextMono=monotonicNow()+g.intervalMs;for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+effectiveInterval(c);lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
+      case 'attempt.retryNotSent':{
+        ensure(p.confirmation==='CONFIRM_NOT_SENT','VALIDATION','Explicitly confirm that this attempt was not sent.');
+        const a=get('attempts',p.id),g=get('groups',a.groupId);
+        ensure(['unknown','not_sent'].includes(a.status),'ATTEMPT_STATE','Only an unconfirmed or unsent attempt can be retried.',409);
+        ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);
+        ensure(state.attempts.findLast(item=>item.groupId===g.id)?.id===a.id&&g.version===a.groupVersion&&g.members[g.cursor]===a.bindingId,'STALE_ATTEMPT','The group or its latest attempt changed. Refresh before continuing.',409);
+        ensure(!g.activeAttemptId||g.activeAttemptId===a.id,'STALE_ATTEMPT','Another attempt is already active.',409);
+        if(a.retryRunId){
+          ensure(g.runId===a.retryRunId&&g.status==='running'&&!g.controlIntent,'STALE_ATTEMPT','This retry was already handled. Use the current group controls.',409);
+          return{status:'already_started',attemptId:a.id,groupId:g.id,runId:g.runId};
+        }
+        ensure(g.runId===a.runId,'STALE_ATTEMPT','This attempt belongs to an earlier group run.',409);
+        if(a.status==='unknown'){
+          ensure(g.activeAttemptId===a.id,'STALE_ATTEMPT','This attempt is no longer active.',409);
+          finish(a,'not_sent',{manual:true});
+        }
+        // A pending stop belongs to all group members. Record the user's outcome
+        // now, but require another explicit continue after every control is applied.
+        if(g.controlIntent)return{status:'waiting',reasonCode:'CONTROL_PENDING',attemptId:a.id,groupId:g.id};
+        if(state.service.status==='stopped')state.service.status='resume_required';
+        // Failure rolls back the outcome, service state and locks together.
+        start(g);a.retryRunId=g.runId;
+        event('delivery.retry_not_sent',{attemptId:a.id,groupId:g.id,runId:g.runId});
+        return{status:'started',attemptId:a.id,groupId:g.id,runId:g.runId};
+      }
       case 'attempt.resolveMany':{
         ensure(p.outcome==='not_sent'&&p.confirmation==='CONFIRM_NOT_SENT','VALIDATION','Explicitly confirm that every selected attempt was not sent.');
         ensure(Array.isArray(p.ids)&&p.ids.length>=1&&p.ids.length<=200&&p.ids.every(value=>typeof value==='string'&&value.length>0&&value.length<=100)&&new Set(p.ids).size===p.ids.length,'VALIDATION','Select 1–200 distinct attempt IDs.');

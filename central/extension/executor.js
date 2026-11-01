@@ -12,6 +12,7 @@ function deliveryEvidence(value) {
   return Object.keys(evidence).length?evidence:undefined;
 }
 const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
+const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
 export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
@@ -45,6 +46,23 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
     await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
+  }
+  async function synchronizePreviousAttempts(p) {
+    const knownAttemptIds=Object.values(state.attempts).filter(a=>a.attemptId!==p.attemptId&&a.bindingId===p.bindingId&&['preparing','prepared','executing','unknown'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
+    if(!knownAttemptIds.length)return;
+    const sessionId=state.sessionId,instanceId=state.instanceId;
+    let response;
+    try{response=await request({type:'HEARTBEAT',knownAttemptIds});}catch{return;}
+    if(response?.ok!==true||!Array.isArray(response.terminalAttempts)||sessionId!==state.sessionId||instanceId!==state.instanceId)return;
+    const requested=new Set(knownAttemptIds);let changed=false;
+    for(const item of response.terminalAttempts){
+      const local=state.attempts[item?.attemptId];
+      if(!requested.has(item?.attemptId)||!local||!['preparing','prepared','executing','unknown'].includes(local.phase)||!['confirmed','not_sent','cancelled'].includes(item.status))continue;
+      if(item.status==='confirmed'&&!/^\d{17,20}$/.test(item.messageId||''))continue;
+      local.phase=item.status;local.reported=true;
+      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',...(item.messageId?{messageId:item.messageId}:{}),executionBlocked:true};changed=true;
+    }
+    if(changed)await save();
   }
   async function preEnterWait(message,tabId){
     await load();const a=state.attempts[message?.id];
@@ -99,6 +117,11 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(!p.runId || state.stoppedRuns[p.runId] || volatileStoppedRuns.has(p.runId) || state.emergencyStopped)throw Error('이미 중지된 실행의 입력 준비를 다시 시작할 수 없습니다.');
       const config=state.bindings[p.bindingId];
       if(!config || config.configVersion!==p.configVersion || config.accountId!==p.accountId || config.channelId!==p.channelId || !await tabMatches(p))throw Object.assign(Error('채널 또는 적용된 구성 버전이 다릅니다.'),{code:'CONFIG_MISMATCH'});
+      // Native command delivery can precede the periodic heartbeat after a
+      // manual retry. Resolve old ledger entries only from the service first.
+      await synchronizePreviousAttempts(p);
+      if(c.sessionId!==state.sessionId||c.instanceId!==state.instanceId)return;
+      if(!transport.connected||state.stoppedRuns[p.runId]||volatileStoppedRuns.has(p.runId)||state.emergencyStopped)throw Object.assign(Error('이전 결과 확인 중 발송 준비가 중지되었습니다.'),{code:'EXECUTION_STOPPED'});
       let a=state.attempts[p.attemptId];
       if(a?.phase==='confirmed'&&a.sessionId===state.sessionId){
         const receipt=planDraftPreparation({attempt:p,attempts:state.attempts});
@@ -131,12 +154,17 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         if(a.phase!=='prepared' || state.stoppedGroups[a.groupId] || volatileStops.has(a.groupId) || !transport.connected || !await tabMatches(a))throw Error('현재 발송을 실행할 수 없습니다.');
         a.permitId=p.permitId;a.phase='executing';a.enterRequested=true;await save();
         let result;
-        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVER',target:target(a),delivery:delivery(a)});}catch{result={status:'uncertain'};}
+        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVER',target:target(a),delivery:delivery(a)});}catch{}
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')) {
           a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationMs:result.timing?.confirmationMs,...diagnostic(result)};
         } else if(result?.status==='blocked' || result?.status==='deferred') {
           a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true,...diagnostic(result)};
-        } else {a.phase='unknown';a.result={outcome:'unknown',...diagnostic(result)};}
+        } else {
+          a.phase='unknown';a.result={outcome:'unknown',...(finalUnknownResponse(result)?{executionBlocked:true}:{}),...diagnostic(result)};
+          // A final observation drains the content operation; the persisted phase
+          // also revokes any delayed AUTHORIZE_ENTER response. Lost responses
+          // and busy/duplicate guards provide no such evidence.
+        }
         await save();await report(a);await ack(c,'applied');
       }
     } else if(c.type==='CONTROL') {

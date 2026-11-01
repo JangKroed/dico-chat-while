@@ -40,6 +40,11 @@ test('unknown delivery routes to history and never treats stop as evidence of no
   const s=snapshot();s.attempts=[{id:'attempt',status:'unknown',groupId:'group',instanceId:'browser'}];
   const advice=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
   assert.equal(advice.page,'history');assert.ok(advice.steps.some(step=>step.includes('미발송의 증거')));
+  assert.ok(advice.steps.some(step=>step.includes('해당 그룹의 중지')));
+  s.attempts[0].executionBlocked=true;
+  const blocked=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
+  assert.ok(blocked.steps.some(step=>step.includes('같은 계정에서 계속')));
+  assert.ok(blocked.steps.every(step=>!step.includes('전체 중지')));
 });
 test('read state never resolves a current issue and default list excludes resolved issues',()=>{
   const s=snapshot();const read={id:'read',code:'command_rejected',readAt:1};const resolved={id:'resolved',code:'command_rejected',resolvedAt:2};

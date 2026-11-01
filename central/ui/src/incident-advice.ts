@@ -60,7 +60,12 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
     else if(commandType==='CONTROL')remedy={title:'중지·일시정지 적용을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 제어 명령이 적용되지 않았으므로 중지 완료로 판단할 수 없습니다.',steps:controlSteps,page:'groups',actionLabel:'그룹·중지 상태 확인'}
     else remedy={title:'확장 요청을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 현재 기록만으로 초안·계정·버전 등의 원인을 단정할 수 없습니다.',steps:['아래 대상 브라우저와 확장 상태를 확인하세요.','진행 중·미확인 시도가 있으면 전체 중지를 요청하고 실제 Discord 게시 내역을 확인하세요. 중지만으로 미발송 여부를 판단하지 마세요.','관리 프로그램과 모든 확장을 업데이트하고 필요한 초안을 보관한 뒤 Discord를 새로고침하세요. 같은 문제가 반복되면 새로 기록된 거절 사유를 확인하세요.'],page:attempt?.status==='unknown'?'history':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'channels':'connections',actionLabel:attempt?.status==='unknown'?'미확인 실행 기록 확인':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'채널·적용 상태 확인':'계정·브라우저 확인'}
   }else if(i.code==='delivery_unknown'){
-    remedy={title:'실제 Discord 게시 여부를 확인해야 합니다',cause:unknownDeliveryCause(attempt?.reasonCode||text(i.reasonCode)),steps:['전체 중지를 요청하고 확장의 실행 차단 확인을 기다리세요.','해당 계정·채널의 실제 Discord 게시 내역을 확인하세요. 중지와 실행 차단은 과거 미발송의 증거가 아닙니다.','실행 기록에서 게시된 메시지 ID를 입력하거나 실제 미발송을 확인한 경우에만 결과를 확정하세요. 확인되지 않은 시도를 다시 보내지 마세요.'],page:'history',actionLabel:'미확인 실행 기록 확인'};knownReason=true
+    remedy={title:'실제 Discord 게시 여부를 확인해야 합니다',cause:unknownDeliveryCause(attempt?.reasonCode||text(i.reasonCode)),steps:[
+      attempt?.executionBlocked===true?'이전 시도의 실행 차단이 확인됐습니다. 해당 계정·채널의 실제 Discord 게시 내역을 직접 확인하세요.':'이전 실행의 최종 결과와 실행 차단 확인을 기다리세요. 필요하면 해당 그룹의 중지를 요청하고 확장의 적용 확인 응답을 기다리세요.',
+      '중지와 실행 차단은 과거 미발송의 증거가 아닙니다. 게시 내역에서 실제 게시 여부를 판단하세요.',
+      '실제 미발송이면 ‘미발송 확인 · 같은 계정에서 계속’을 눌러 같은 그룹의 해당 계정 차례에서 계속하세요. 확정 전에는 다시 보내지 마세요.',
+      '다른 초안이 남아 있으면 보관한 뒤 직접 정리하세요. Discord 제한 해제 대기와 같은 계정·채널의 준비 상태도 확인하세요.'
+    ],page:'history',actionLabel:'미확인 실행 기록 확인'};knownReason=true
   }else if(i.code==='connection_lost'){
     remedy={title:'브라우저 연결이 끊겼습니다',cause:'중앙 관리 프로그램이 해당 브라우저의 연결을 유지하지 못했습니다.',steps:['해당 브라우저와 DICO 확장이 실행 중인지 확인하고 관리 프로그램에 다시 연결하세요.','계정 등록과 채널 검증 상태를 확인하세요.','진행 중·미확인 발송은 실제 Discord 게시 내역을 확인한 뒤 실행 기록에서 처리하세요.'],page:'connections',actionLabel:'브라우저 연결 확인'};knownReason=true
   }else if(i.code==='channel_unverified'){

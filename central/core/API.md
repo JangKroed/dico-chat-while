@@ -59,6 +59,7 @@ Existing editable entities require `expectedVersion`; control actions use curren
 | `group.start/resume/pause/stop` | `{id}` |
 | `service.stopAll/resume` | `{}` |
 | `attempt.resolve` | `{id,outcome:'confirmed',messageId}` or `{id,outcome:'not_sent'}` |
+| `attempt.retryNotSent` | `{id,confirmation:'CONFIRM_NOT_SENT'}` — explicitly confirm non-delivery and continue the current group/account |
 | `incident.read` | `{id,read?}`; does not resolve the incident |
 | `settings.update` | Notification booleans/types, cooldownMs, quietHours, retentionDays, onboardingStep |
 | `maintenance.prune` | `{}`; preserves unsafe and deduplication state |
@@ -119,3 +120,12 @@ Channel DTO: `intervalMode: auto|custom`, `minimumIntervalMs`, 실제 `intervalM
 `channel.update`의 `intervalMode: auto`는 자동으로 전환한다. custom은 `intervalMs`를 입력하며 현재 minimumIntervalMs 미만이면 서버가 거부한다. 오래된 클라이언트가 intervalMs만 보내면 직접 설정 의도로 처리한다. 느려진 제한에 따라 실제 주기를 올려도 원래 customIntervalMs는 보존한다. 진행·미확인 시도가 있으면 구성 동기화를 결과 확정 이후로 미룬다.
 
 `incident.recheck`는 OPEN_CHANNEL 명령의 전체 라우팅 ID와 현재 verified 세션, 최신 heartbeat, 마지막 거절 이후 관측 증거를 확인하면 `connection_reverified`로 과거 알림을 해결한다. 연결 복구를 발송 결과 확정으로 사용하지 않는다.
+
+
+### Retry after user-confirmed non-delivery (0.4.10)
+
+`attempt.retryNotSent` accepts only the latest unknown or not-sent attempt of an unchanged group/run/cursor with `executionBlocked:true`. It records manual non-delivery and starts a fresh run of that group without advancing its account or playlist cursor. Other groups remain stopped. Eligibility or readiness failures roll back the outcome, locks and service state together. A duplicate request returns `already_started` while the same retry run is still current; a stale click cannot restart a newer or explicitly stopped run.
+
+The result is `{status:'started'|'already_started',attemptId,groupId,runId}` or `{status:'waiting',reasonCode:'CONTROL_PENDING',attemptId,groupId}`. Waiting records the non-delivery outcome but does **not** schedule a restart. After outstanding stop acknowledgements arrive, a fresh explicit request may continue the same latest not-sent attempt.
+
+The executor reports unknown-result blocking proof only after a final commit observation response has returned with `enterAttempted:true`. This revokes future execution without claiming the earlier Enter did not post. Before a retry PREPARE, authenticated HEARTBEAT terminal reconciliation durably updates prior nonterminal local records; session and stop checks run again after this asynchronous boundary.

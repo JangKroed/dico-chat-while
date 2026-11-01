@@ -3,7 +3,7 @@ export type Message = { id:string; name:string; body:string; tags:string[]; arch
 export type Channel = { id:string; instanceId:string; accountId:string; guildId:string; channelId:string; name:string; verified:boolean; verificationReason?:string|null; tabId?:number; version:number; configVersion:number; appliedVersion:number; playlist:{messageId:string;revisionId:string}[]; playlistIndex:number; intervalMs:number;intervalMode?:'auto'|'custom';minimumIntervalMs?:number;customIntervalMs?:number;pendingIntervalSync?:boolean;nextEligibleAt?:Timestamp|null; slowmodeMs:number;slowmodeObservedAt?:number|null;effectiveIntervalMs?:number }
 export type Account = {id:string;instanceId:string;accountId:string;name:string;version:number;verified:boolean;connected?:boolean;lastVerifiedAt?:Timestamp}
 export type Target = {id:string;guildId:string;channelId:string;name:string;url?:string;version?:number}
-export type Group = { id:string; name:string; guildId:string; channelId:string; members:string[]; intervalMs:number; version:number; status:'stopped'|'running'|'paused'|'needs_review'|'resume_required'|'stop_pending'|'pause_pending'; cursor:number; activeAttemptId?:string; waitReason?:string; nextEligibleAt?:Timestamp|null }
+export type Group = { id:string; name:string; guildId:string; channelId:string; members:string[]; intervalMs:number; version:number; runId?:string; status:'stopped'|'running'|'paused'|'needs_review'|'resume_required'|'stop_pending'|'pause_pending'; cursor:number; activeAttemptId?:string; waitReason?:string; nextEligibleAt?:Timestamp|null }
 export type Instance = {id:string;name:string;browser?:string;status?:string;connected?:boolean;lastSeenAt?:Timestamp;version?:number;accountId?:string;extensionVersion?:string;[key:string]:unknown}
 export type DeliveryEvidence = {phase?:'prepare'|'commit'|'send';stage?:'inspect'|'authorize'|'prepare'|'stable'|'enter'|'observe';enterAttempted?:boolean;composerRetained?:boolean;newMessage?:boolean;matchingMessage?:boolean;sendingSeen?:boolean;failedSeen?:boolean;authorMismatch?:boolean;authorUnknown?:boolean;timeMismatch?:boolean}
 export type Attempt = {id:string;groupId?:string;bindingId?:string;channelId?:string;accountId?:string;messageId?:string;messageIdRef?:string;messageName?:string;revisionId?:string;status?:string;state?:string;createdAt?:Timestamp;permittedAt?:Timestamp;finalizedAt?:Timestamp;attemptedAt?:Timestamp;confirmedAt?:Timestamp;postedAt?:Timestamp;executionBlocked?:boolean;manual?:boolean;reasonCode?:string;deliveryEvidence?:DeliveryEvidence;uncertain?:boolean;[key:string]:unknown}
@@ -29,6 +29,9 @@ const requestErrorGuidance:Record<string,string> = {
   PLAYLIST_EMPTY:'적용된 메시지가 없습니다. ‘채널 설정’에서 사용할 메시지를 선택해 적용하세요.',
   CONFIG_PENDING:'확장이 최신 메시지·설정을 아직 적용하지 않았습니다. 대상 브라우저의 연결과 채널 적용 상태를 확인하고 적용 완료를 기다리세요.',
   ATTEMPT_UNRESOLVED:'결과가 확정되지 않은 발송 시도가 있습니다. 실제 Discord 게시 내역을 확인한 뒤 ‘실행 기록’에서 결과를 확정하세요.',
+  EXECUTION_UNCERTAIN:'이전 시도의 실행 차단이 아직 확인되지 않았습니다. 확장의 최종 결과와 중지 적용 상태를 기다린 뒤 실제 게시 내역을 다시 확인해 주세요.',
+  STALE_ATTEMPT:'그룹이나 최근 발송 시도가 변경됐습니다. 최신 실행 기록을 확인한 뒤 현재 시도에서 다시 요청해 주세요.',
+  ATTEMPT_STATE:'이 시도는 더 이상 미확인 또는 미발송 상태가 아닙니다. 최신 실행 기록을 확인해 주세요.',
   CONTROL_PENDING:'중지·일시정지 확인 응답을 기다리고 있습니다. 대상 브라우저와 확장의 연결을 확인하고 적용 완료를 기다리세요.',
   RESOURCE_BUSY:'이 채널 또는 계정을 다른 그룹이 사용 중입니다. ‘발송 그룹’에서 겹치는 그룹을 확인하고 중지 적용이 완료된 뒤 실행하세요.',
   SERVICE_STOPPED:'중앙 서비스가 중지되어 있습니다. 대시보드에서 서비스를 재개하고 그룹의 준비 상태를 확인하세요.',

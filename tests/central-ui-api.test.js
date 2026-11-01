@@ -24,6 +24,12 @@ test('pending execution errors give a next step without implying safe resend',()
   assert.match(requestErrorMessage(new ApiError('Apply messages.',409,'PLAYLIST_EMPTY')),/메시지.*적용/);
 });
 
+test('retry rejection guidance distinguishes missing execution proof from stale and terminal attempts',()=>{
+  assert.match(requestErrorMessage(new ApiError('Proof pending.',409,'EXECUTION_UNCERTAIN')),/실행 차단.*확인되지/);
+  assert.match(requestErrorMessage(new ApiError('Group changed.',409,'STALE_ATTEMPT')),/그룹이나 최근 발송 시도.*변경/);
+  assert.match(requestErrorMessage(new ApiError('Confirmed.',409,'ATTEMPT_STATE')),/미확인 또는 미발송 상태가 아닙니다/);
+});
+
 test('unknown errors preserve server detail and do not invent a cause',()=>{
   assert.equal(requestErrorMessage(new ApiError('새로운 서버 진단',409,'NEW_ERROR')),'새로운 서버 진단');
   assert.equal(requestErrorMessage(new Error('연결 실패')),'연결 실패');
