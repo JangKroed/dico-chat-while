@@ -1,6 +1,7 @@
 import type { Incident, Snapshot } from './api'
 import {accountLabel} from './account-label.ts'
 import {unknownDeliveryCause} from './delivery-evidence.ts'
+import {channelVerification} from './channel-window.ts'
 
 type AdvicePage='connections'|'channels'|'history'|'groups'|'settings'
 export type IncidentAdvice={title:string;cause:string;steps:string[];page:AdvicePage;actionLabel:string;knownReason:boolean;affected:string[];commandType?:string;rejectionCode?:string}
@@ -57,6 +58,9 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
     remedy={title:'실제 Discord 게시 여부를 확인해야 합니다',cause:unknownDeliveryCause(attempt?.reasonCode||text(i.reasonCode)),steps:['전체 중지를 요청하고 확장의 실행 차단 확인을 기다리세요.','해당 계정·채널의 실제 Discord 게시 내역을 확인하세요. 중지와 실행 차단은 과거 미발송의 증거가 아닙니다.','실행 기록에서 게시된 메시지 ID를 입력하거나 실제 미발송을 확인한 경우에만 결과를 확정하세요. 확인되지 않은 시도를 다시 보내지 마세요.'],page:'history',actionLabel:'미확인 실행 기록 확인'};knownReason=true
   }else if(i.code==='connection_lost'){
     remedy={title:'브라우저 연결이 끊겼습니다',cause:'중앙 관리 프로그램이 해당 브라우저의 연결을 유지하지 못했습니다.',steps:['해당 브라우저와 DICO 확장이 실행 중인지 확인하고 관리 프로그램에 다시 연결하세요.','계정 등록과 채널 검증 상태를 확인하세요.','진행 중·미확인 발송은 실제 Discord 게시 내역을 확인한 뒤 실행 기록에서 처리하세요.'],page:'connections',actionLabel:'브라우저 연결 확인'};knownReason=true
+  }else if(i.code==='channel_unverified'){
+    const verification=channelVerification({verified:false,verificationReason:text(i.verificationReason)||binding?.verificationReason})
+    remedy={title:verification.title,cause:`이 채널 연결을 현재 검증할 수 없습니다. ${verification.action}`,steps:[verification.action,'채널 설정에서 이 계정의 실제 채널 연결 상태를 확인하세요. 확인되기 전에는 발송 준비로 처리하지 않습니다.','진행 중·미확인 발송이 있으면 실행 기록에서 실제 Discord 게시 여부를 확인하세요.'],page:'channels',actionLabel:'채널 연결 확인'};knownReason=true
   }else if(i.code==='account_mismatch'){
     remedy=remedies.ACCOUNT_UNVERIFIED;knownReason=true
   }else if(i.code==='storage_failure'){

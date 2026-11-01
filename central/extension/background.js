@@ -6,8 +6,14 @@ import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
 import {createCentralExecutor} from './executor.js';
 import {channelTabContext} from './panel-context.js';
+import {createManagedWindow,createManagedWindowController} from './managed-windows.js';
+import {createObservationQueue,createSingleFlight,observeManagedChannel,observeRegisteredAccount} from './observation-queue.js';
 
-const transport=createNativeTransport(chrome),executor=createCentralExecutor({chrome,transport,openChannel:openManagedChannel});
+const windowController=createManagedWindowController({chrome});
+const transport=createNativeTransport(chrome),executor=createCentralExecutor({chrome,transport,openChannel:openManagedChannel,manageChannelWindow});
+const observation=createObservationQueue(collectObservation,publishObservation);
+const heartbeat=createSingleFlight(runHeartbeat);
+let channelOpening=Promise.resolve();
 let connecting=null,heartbeatTimer=null,lastError=null,updateIssue=null;
 const updater=createExtensionUpdater({chrome,executor,transport,loadedBuildId:BUILD_ID,onIssue:message=>{updateIssue=message;}});
 async function configurePanelAction(){
@@ -42,13 +48,8 @@ async function observe(tabId) {
   try{return (await chrome.scripting.executeScript({target:{tabId},func:pageIdentityObservation}))[0]?.result || {verified:false,reason:'SCRIPT_UNAVAILABLE'};}catch{return {verified:false,reason:'SCRIPT_UNAVAILABLE'};}
 }
 let lastAccountObservation=null;
-async function currentAccount(expectedId,preferredTabId) {
-  const candidates=[];
-  if(Number.isInteger(preferredTabId))candidates.push(preferredTabId);
-  for(const tab of await chrome.tabs.query({url:'https://discord.com/*'}))if(Number.isInteger(tab.id)&&!candidates.includes(tab.id))candidates.push(tab.id);
-  for(const tabId of candidates.slice(0,30)){const seen=await observe(tabId);if(seen?.verified&&(!expectedId||seen.accountId===expectedId))return{...seen,tabId};}
-  return null;
-}
+const currentAccountResult=(expectedId,preferredTabId)=>observeRegisteredAccount(chrome,observe,expectedId,preferredTabId);
+async function currentAccount(expectedId,preferredTabId){return(await currentAccountResult(expectedId,preferredTabId)).seen;}
 async function registerActiveAccount(windowId) {
   if(!executor.state?.legacyDeclaration)throw Error('기존 실행기 사용 여부를 먼저 확인 상태 저장으로 기록해 주세요.');
   if(!transport.connected)await connect();
@@ -58,28 +59,26 @@ async function registerActiveAccount(windowId) {
   const account={accountId:seen.accountId,sourceTabId:tab.id};
   const result=await executor.request({type:'ACCOUNT_OBSERVATION',accountId:seen.accountId,verified:true,legacyFrozen:true,legacyPending:false});
   await chrome.storage.local.set({dicoCentralAccount:account});lastAccountObservation={accountId:seen.accountId,verified:true};
+  await observation();
   return{registered:true,account:result.account};
 }
-async function refreshRegisteredAccount() {
-  const saved=(await chrome.storage.local.get('dicoCentralAccount')).dicoCentralAccount;
-  if(!saved)return;
-  const seen=await currentAccount(saved.accountId,saved.sourceTabId);
-  lastAccountObservation={accountId:saved.accountId,verified:Boolean(seen)};
-  await executor.request({type:'ACCOUNT_OBSERVATION',accountId:saved.accountId,verified:Boolean(seen)});
+async function collectObservation() {
+  await executor.load();
+  const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralAccount']);
+  const records=saved.dicoCentralTabs||[],account=saved.dicoCentralAccount;
+  // Channel-limit reads can each wait 1.5 seconds. Independent channel reads
+  // run together so a browser with many tabs does not age the first result.
+  const [accountResult,channels]=await Promise.all([
+    account?currentAccountResult(account.accountId,account.sourceTabId):null,
+    Promise.all(records.map(record=>observeManagedChannel(chrome,record,{observe,observeLimit:observeChannelLimit}))),
+  ]);
+  return{account:account?{accountId:account.accountId,verified:Boolean(accountResult.seen),verificationReason:accountResult.verificationReason}:null,channels};
 }
-async function observation() {
-  await executor.load();const records=(await chrome.storage.local.get('dicoCentralTabs')).dicoCentralTabs || [];
-  await refreshRegisteredAccount();
-  const channels=[];
-  for(const record of records) {
-    const seen=await observe(record.tabId);
-    if(!seen || seen.accountId!==record.accountId || seen.guildId!==record.guildId || seen.channelId!==record.channelId)continue;
-    const limit=await observeChannelLimit(chrome,record);
-    channels.push({...seen,tabId:record.tabId,...limit});
-  }
-  return executor.request({type:'OBSERVATION',channels,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
+async function publishObservation(snapshot){
+  if(snapshot.account){lastAccountObservation=snapshot.account;await executor.request({type:'ACCOUNT_OBSERVATION',...snapshot.account});}
+  return executor.request({type:'OBSERVATION',channels:snapshot.channels,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
 }
-async function heartbeat() {
+async function runHeartbeat() {
   try {
     const knownAttemptIds=Object.values(executor.state.attempts).filter(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
     const result=await executor.request({type:'HEARTBEAT',knownAttemptIds});
@@ -103,7 +102,7 @@ async function connect() {
       // Same-ID developer upgrades must never reactivate an older scheduler.
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
       const browser=await detectConnectedBrowser(chrome,navigator);
-      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','managed-update-v1','early-prepare-v1']});
+      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','managed-window-v1','managed-update-v1','early-prepare-v1']});
       await executor.setSession(response);
       for(const command of response.commands || [])void executor.handleCommand(command);
       await refreshManagedContent();await observation();void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
@@ -111,7 +110,18 @@ async function connect() {
     } catch(error){lastError=String(error.message || error).slice(0,200);transport.disconnect();throw Error(lastError);}
   })().finally(()=>{connecting=null;});return connecting;
 }
-async function openManagedChannel(p) {
+function openManagedChannel(p){
+  const next=channelOpening.then(()=>openManagedChannelNow(p));channelOpening=next.catch(()=>{});return next;
+}
+async function manageChannelWindow(p){
+  if(p.action!=='consolidate')return windowController(p);
+  const next=channelOpening.then(async()=>{
+    if(Object.values(executor.state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 창을 정리하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    return windowController(p);
+  });
+  channelOpening=next.catch(()=>{});return next;
+}
+async function openManagedChannelNow(p) {
   if(!executor.state?.legacyDeclaration)throw Object.assign(Error('기존 실행기 사용 여부를 먼저 확인하세요.'),{code:'LEGACY_UNRESOLVED'});
   if(!/^\d{17,20}$/.test(p.accountId||'')||!/^\d{1,30}$/.test(p.guildId||'')||!/^\d{1,30}$/.test(p.channelId||''))throw Object.assign(Error('연결할 계정·채널 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
   const saved=(await chrome.storage.local.get('dicoCentralAccount')).dicoCentralAccount;
@@ -125,9 +135,9 @@ async function openManagedChannel(p) {
     try{await chrome.tabs.get(existing.tabId);throw Object.assign(Error('기존 전송용 창이 다른 화면에 있습니다. 원래 채널로 돌아가거나 창을 닫고 다시 연결하세요.'),{code:'TARGET_MISMATCH'});}catch(error){if(error.code==='TARGET_MISMATCH')throw error;}
     records.splice(records.indexOf(existing),1);
   }
-  const win=await chrome.windows.create({url:`https://discord.com/channels/${p.guildId}/${p.channelId}`,type:'normal',focused:false,width:1080,height:800});
+  const win=await createManagedWindow(chrome,p);
   const tab=win.tabs?.[0];if(!tab)throw Error('전송용 창을 열지 못했습니다.');
-  records.push({accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id});await chrome.storage.local.set({dicoCentralTabs:records});
+  records.push({accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id});await chrome.storage.local.set({dicoCentralTabs:records});
   for(let n=0;n<20;n++) {
     const ready=await observe(tab.id);
     if(ready?.verified&&ready.accountId===p.accountId&&ready.guildId===p.guildId&&ready.channelId===p.channelId){await observation();return {connected:true};}

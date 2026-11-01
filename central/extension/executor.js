@@ -11,7 +11,7 @@ function deliveryEvidence(value) {
   return Object.keys(evidence).length?evidence:undefined;
 }
 const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
-export function createCentralExecutor({chrome,transport,openChannel,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
+export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
@@ -69,7 +69,14 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
     if(state.processed[c.id])return;
     if(maintenance&&c.type!=='CONTROL')throw Object.assign(Error('확장 업데이트 적용 중입니다.'),{code:'UPDATE_IN_PROGRESS'});
     await ack(c,'received');
-    if(c.type==='OPEN_CHANNEL') {
+    if(c.type==='MANAGE_WINDOW') {
+      if(typeof manageChannelWindow!=='function')throw Object.assign(Error('전송 창 관리를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
+      if(!['reveal','hide','consolidate'].includes(p.action))throw Object.assign(Error('지원하지 않는 창 관리 요청입니다.'),{code:'INVALID_WINDOW_ACTION'});
+      if(p.action==='consolidate'&&(inFlight>1||Object.values(state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase))))throw Object.assign(Error('발송을 중지하고 미확인 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+      if(p.action==='consolidate')maintenance=true;
+      try{await manageChannelWindow(p);}finally{if(p.action==='consolidate')maintenance=false;}
+      await ack(c,'applied');
+    } else if(c.type==='OPEN_CHANNEL') {
       if(state.emergencyStopped)throw Object.assign(Error('긴급 중지를 해제하고 다시 연결하세요.'),{code:'EXECUTION_STOPPED'});
       if(typeof openChannel!=='function')throw Object.assign(Error('채널 연결 기능을 지원하는 확장으로 업데이트하세요.'),{code:'OPEN_CHANNEL_UNSUPPORTED'});
       await openChannel({...p,commandId:c.id});await ack(c,'applied');

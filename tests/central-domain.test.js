@@ -1025,3 +1025,40 @@ test('sixty-three-second interval begins preparation exactly five seconds ahead 
   for(let n=0;n<5;n++){assert.equal(report(second).permitIssued,false);step(1000);}
   assert.ok(report(second).permitId);assert.equal(f.manager.snapshot().attempts.length,2);f.manager.close();
 });
+
+test('temporary channel read failure has explicit reason and recovery closes its warning',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.manager.execute('group.start',{id:g.id});
+ const observation=channels=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels},c.instanceId);
+ observation([{accountId:'a',guildId:'guild',channelId:'channel',tabId:1,verified:false,verificationReason:'script_unavailable'}]);
+ let s=f.manager.snapshot();assert.equal(s.channels[0].verificationReason,'script_unavailable');assert.equal(s.incidents.some(i=>i.code==='account_mismatch'),false);assert.equal(s.incidents.some(i=>i.code==='channel_unverified'&&i.status==='open'),true);
+ observation([{accountId:'a',guildId:'guild',channelId:'channel',tabId:1,verified:true}]);
+ s=f.manager.snapshot();assert.equal(s.channels[0].verificationReason,undefined);assert.equal(s.incidents.some(i=>i.code==='channel_unverified'&&i.status==='open'),false);assert.notEqual(s.groups[0].waitReason,'account_unverified');f.manager.close();
+});
+
+test('window commands reveal exact binding without requiring successful channel verification',()=>{
+ const f=fixture(),c=f.connect('a','channel',['managed-window-v1']);
+ const result=f.manager.execute('channel.reveal',{id:c.channel.id});assert.equal(result.status,'queued');
+ const command=f.manager.commands(c.instanceId).find(c=>c.type==='MANAGE_WINDOW');assert.equal(command.payload.tabId,1);assert.equal(command.payload.action,'reveal');assert.equal(f.manager.snapshot().attempts.length,0);f.manager.close();
+});
+
+test('explicit temporary account read failure blocks verification without inventing account switch',()=>{
+ const f=fixture(),c=f.connect('11111111111111111');f.apply(c,[f.message()]);const g=f.group([c]);f.manager.execute('group.start',{id:g.id});
+ f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'11111111111111111',verified:false,verificationReason:'script_unavailable'},c.instanceId);
+ let s=f.manager.snapshot();assert.equal(s.channels[0].verified,false);assert.equal(s.channels[0].verificationReason,'script_unavailable');assert.equal(s.groups[0].status,'running');assert.equal(s.incidents.some(i=>i.code==='account_mismatch'||i.code==='connection_lost'),false);
+ f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'11111111111111111',guildId:'guild',channelId:'channel',tabId:1,verified:true}]},c.instanceId);
+ assert.equal(f.manager.snapshot().channels[0].verified,true);f.manager.close();
+});
+
+test('consolidation requires stopped groups and supported current-session bindings',()=>{
+ const f=fixture(),c=f.connect('a','channel',['managed-window-v1']);f.apply(c,[f.message()]);const g=f.group([c]);f.manager.execute('group.start',{id:g.id});
+ assert.throws(()=>f.manager.execute('channel.consolidate',{id:c.channel.id}),{code:'GROUP_RUNNING'});
+ f.manager.execute('group.stop',{id:g.id});const stop=f.manager.commands(c.instanceId).find(c=>c.type==='CONTROL');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:stop.id,status:'applied',executionBlocked:true},c.instanceId);
+ const result=f.manager.execute('channel.consolidate',{id:c.channel.id});assert.equal(result.status,'queued');assert.equal(f.manager.snapshot().attempts.length,0);f.manager.close();
+});
+
+test('queued window consolidation fences starts until its actual applied acknowledgment',()=>{
+ const f=fixture(),c=f.connect('a','channel',['managed-window-v1']);f.apply(c,[f.message()]);const g=f.group([c]);
+ const result=f.manager.execute('channel.consolidate',{id:c.channel.id});assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'WINDOW_MANAGEMENT_PENDING'});
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:result.commandId,status:'received'},c.instanceId);assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'WINDOW_MANAGEMENT_PENDING'});
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:result.commandId,status:'applied'},c.instanceId);f.manager.execute('group.start',{id:g.id});assert.equal(f.manager.snapshot().groups[0].status,'running');f.manager.close();
+});

@@ -6,6 +6,8 @@ export { CentralError } from './validation.js';
 const ACTIVE = new Set(['preparing','permitted','unknown']);
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
+const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
+const verificationReason=value=>verificationReasons.has(value)?value:'identity_unverified';
 const clone = value => structuredClone(value);
 function deliveryEvidence(value){
   if(!value||typeof value!=='object'||!['prepare','commit','send'].includes(value.phase)||!['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage)||typeof value.enterAttempted!=='boolean')return undefined;
@@ -96,10 +98,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.commands.push(c);event('command.queued',{commandId:c.id,instanceId,groupId:payload.groupId,attemptId:payload.attemptId});return c;
   }
   function incident(code,details={}){
-    const key=[code,(code==='command_rejected'&&details.commandId)||details.attemptId||details.instanceId||details.groupId||'service'].join(':');
+    const key=[code,(code==='command_rejected'&&details.commandId)||(['channel_unverified','account_mismatch'].includes(code)&&details.bindingId)||details.attemptId||details.instanceId||details.groupId||'service'].join(':');
     let i=state.incidents.find(i=>i.key===key&&i.status==='open');
     if(i){
       i.count++;i.lastSeenAt=now();
+      if(['channel_unverified','account_mismatch'].includes(code)&&details.verificationReason)i.verificationReason=verificationReason(details.verificationReason);
       if(code==='command_rejected')for(const key of ['commandId','commandType','rejectionCode','attemptId','groupId','instanceId']){if(details[key]!==undefined)i[key]=details[key];else delete i[key];}
       return i;
     }
@@ -120,6 +123,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if((command?.type||i.commandType)==='CONTROL'&&(command?.payload.groupId||i.groupId)===groupId)resolveIncident(i,{groupId});
     }
   }
+  function identityRecovered(problem){
+    const instance=state.instances.find(i=>i.id===problem.instanceId);
+    if(!instance?.connected||now()-instance.lastSeenAt>15000||now()<instance.lastSeenAt)return false;
+    const group=state.groups.find(g=>g.id===problem.groupId);
+    if(state.attempts.some(a=>ACTIVE.has(a.status)&&(a.instanceId===instance.id)&&(!group||a.groupId===group.id)))return false;
+    const channels=state.channels.filter(c=>c.instanceId===instance.id&&(!problem.bindingId||c.id===problem.bindingId)&&(!group||group.members.includes(c.id)));
+    const after=problem.lastSeenAt??problem.createdAt;
+    return channels.length>0&&channels.every(c=>c.verified&&c.sessionId===instance.sessionId&&Number.isFinite(c.observedAt)&&c.observedAt>=after&&c.observedAt<=now()&&now()-c.observedAt<=15000);
+  }
   function recheckIncidents(incidentId){
     const selected=incidentId===undefined?state.incidents:[get('incidents',incidentId)];
     let resolved=0;const blocked=[];
@@ -132,6 +144,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         block='ATTEMPT_UNRESOLVED';message='전송 결과가 아직 확정되지 않았습니다. 기록에서 결과를 확인하세요.';page='history';
       }else if((i.code==='delivery_unknown'||i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(type))&&a&&TERMINAL.has(a.status)){
         reasonCode='terminal_attempt';
+      }else if(['channel_unverified','account_mismatch'].includes(i.code)){
+        if(identityRecovered(i))reasonCode='connection_reverified';
+        else{block='CONNECTION_UNVERIFIED';message='해당 전송용 탭의 현재 계정·채널 확인이 필요합니다. 전송 창 보기로 상태를 확인하세요.';page='channels';}
       }else if(i.code==='command_rejected'&&type==='OPEN_CHANNEL'){
         block='CONNECTION_UNVERIFIED';message='거절된 계정·채널의 현재 연결을 확인하지 못했습니다. 채널 관리에서 해당 브라우저의 계정을 다시 연결하고 연결됨 표시를 확인하세요.';page='channels';
         const payload=c?.payload,instance=state.instances.find(instance=>instance.id===c?.instanceId);
@@ -190,7 +205,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function blockInstanceGroups(instanceId,reasonCode){
     for(const g of state.groups.filter(g=>g.status==='running'&&g.members.some(m=>get('channels',m).instanceId===instanceId))){
       g.status=g.activeAttemptId?'needs_review':'resume_required';g.waitReason=reasonCode;g.nextEligibleAt=null;
-      incident('connection_lost',{instanceId});event('group.resume_required',{groupId:g.id,instanceId,reasonCode},'warning');
+      incident(reasonCode==='connection_lost'?'connection_lost':'account_mismatch',{instanceId});event('group.resume_required',{groupId:g.id,instanceId,reasonCode},'warning');
     }
   }
   function ensureSession(message,instanceId){const instance=get('instances',instanceId);ensure(instance.sessionId===message.sessionId,'STALE_SESSION','Session changed; reconnect and reconcile previous attempts.',409);if(!instance.connected)instance.stableSinceMono=monotonicNow();instance.lastSeenAt=now();instance.lastSeenMono=monotonicNow();instance.connected=true;return instance;}
@@ -205,6 +220,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const key of keys)if(!state.locks.some(l=>l.key===key))state.locks.push({key,groupId:g.id});
   }
   function eligibleChannel(c){
+    ensure(!state.commands.some(cmd=>cmd.type==='MANAGE_WINDOW'&&cmd.instanceId===c.instanceId&&cmd.payload.action==='consolidate'&&['queued','received'].includes(cmd.status)),'WINDOW_MANAGEMENT_PENDING','전송 창 정리가 끝난 뒤 실행하세요.',409);
     const i=get('instances',c.instanceId);ensure(i.connected&&now()-i.lastSeenAt<=15000,'CONNECTION_LOST','Connect this browser before starting.',409);
     ensure(i.legacyFrozen===true&&i.legacyPending===false,'LEGACY_UNRESOLVED','Legacy execution must be frozen and pending attempts resolved.',409);
     ensure(c.verified&&c.sessionId===i.sessionId,'ACCOUNT_UNVERIFIED','Verify the account and channel in this browser.',409);
@@ -275,6 +291,20 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(typeof p.url==='string'&&/^https:\/\/discord\.com\/channels\/\d{1,30}\/\d{1,30}\/?$/.test(p.url),'VALIDATION','Use a Discord server channel URL: https://discord.com/channels/server/channel.');
         const [,guildId,channelId]=/^https:\/\/discord\.com\/channels\/(\d+)\/(\d+)\/?$/.exec(p.url);
         return upsertTarget(guildId,channelId,p.name===undefined?undefined:text(p.name,'name'));
+      }
+      case 'channel.reveal':case 'channel.hide':case 'channel.consolidate':{
+        const channel=get('channels',p.id),instance=get('instances',channel.instanceId);
+        ensure(instance.connected&&now()-instance.lastSeenAt<=15000,'CONNECTION_LOST','Connect this browser first.',409);
+        ensure(instance.capabilities?.includes('managed-window-v1'),'EXTENSION_UPDATE_REQUIRED','전송 창 관리를 지원하는 확장으로 업데이트하세요.',409);
+        ensure(Number.isInteger(channel.tabId)&&channel.sessionId===instance.sessionId,'MANAGED_TAB_MISSING','기존 전송용 탭을 찾지 못했습니다. 채널 연결 상태를 확인하세요.',409);
+        const windowAction=action.slice('channel.'.length);
+        if(windowAction==='consolidate'){
+          ensure(!state.attempts.some(a=>a.instanceId===instance.id&&ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','발송을 중지하고 미확인 결과를 정리한 뒤 창을 모으세요.',409);
+          ensure(state.groups.filter(g=>g.members.some(member=>get('channels',member).instanceId===instance.id)).every(g=>['stopped','paused'].includes(g.status)&&!g.controlIntent),'GROUP_RUNNING','해당 브라우저의 그룹을 중지한 뒤 창을 모으세요.',409);
+        }
+        const pending=state.commands.find(c=>c.type==='MANAGE_WINDOW'&&c.instanceId===instance.id&&c.sessionId===instance.sessionId&&c.payload.bindingId===channel.id&&c.payload.action===windowAction&&['queued','received'].includes(c.status));
+        const queued=pending||command('MANAGE_WINDOW',instance.id,{action:windowAction,bindingId:channel.id,accountId:channel.accountId,guildId:channel.guildId,channelId:channel.channelId,tabId:channel.tabId});
+        return{status:'queued',commandId:queued.id};
       }
       case 'channel.connect':{
         const account=get('accounts',p.accountId),target=get('targets',p.targetId),instance=get('instances',account.instanceId);
@@ -459,7 +489,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(i.sessionId)blockInstanceGroups(i.id,'session_changed');
         for(const c of state.commands.filter(c=>c.instanceId===i.id&&(!['completed','applied','rejected'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')))c.status='superseded';
         invalidateAccounts(i.id);i.sessionId=id();i.connected=true;i.stableSinceMono=monotonicNow();i.lastSeenAt=now();i.lastSeenMono=monotonicNow();i.legacyFrozen=false;i.legacyPending=true;
-        for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.appliedVersion=0;delete c.tabId;}
+        for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='session_changed';c.appliedVersion=0;delete c.tabId;}
         for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
         for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
         event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,commands:commands(i.id)};
@@ -495,22 +525,24 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           i.legacyFrozen=message.legacyFrozen;i.legacyPending=message.legacyPending;
         }
         const affected=accountId=>message.verified?accountId!==message.accountId:accountId===message.accountId;
+        const transientReasons=new Set(['tab_loading','tab_missing','script_unavailable','identity_unverified','content_refresh_required','awaiting_observation']);
+        const confirmedMismatch=message.verified===true||!transientReasons.has(message.verificationReason);
         const mismatched=state.accounts.some(a=>a.instanceId===i.id&&affected(a.accountId)&&a.verified)||state.channels.some(c=>c.instanceId===i.id&&affected(c.accountId)&&c.verified)||state.attempts.some(a=>a.instanceId===i.id&&affected(a.accountId)&&ACTIVE.has(a.status));
         for(const a of state.accounts.filter(a=>a.instanceId===i.id&&affected(a.accountId)))a.verified=false;
-        for(const c of state.channels.filter(c=>c.instanceId===i.id&&affected(c.accountId)))c.verified=false;
-        if(mismatched){
+        for(const c of state.channels.filter(c=>c.instanceId===i.id&&affected(c.accountId))){c.verified=false;c.verificationReason=confirmedMismatch?'account_mismatch':verificationReason(message.verificationReason);}
+        if(mismatched&&confirmedMismatch){
           blockInstanceGroups(i.id,'account_mismatch');
           for(const a of state.attempts.filter(a=>a.instanceId===i.id&&affected(a.accountId)&&ACTIVE.has(a.status)))markUnknown(a,'account_mismatch');
           incident('account_mismatch',{instanceId:i.id});
         }
-        for(const c of state.commands.filter(c=>c.instanceId===i.id&&c.payload.accountId&&affected(c.payload.accountId)&&(['queued','received'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')&&['OPEN_CHANNEL','PREPARE','COMMIT_PERMIT'].includes(c.type)))c.status='superseded';
+        for(const c of state.commands.filter(c=>confirmedMismatch&&c.instanceId===i.id&&c.payload.accountId&&affected(c.payload.accountId)&&(['queued','received'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')&&['OPEN_CHANNEL','PREPARE','COMMIT_PERMIT'].includes(c.type)))c.status='superseded';
         const account=message.verified?upsertAccount(i.id,message.accountId,{verified:true,sessionId:i.sessionId}):state.accounts.find(a=>a.instanceId===i.id&&a.accountId===message.accountId);
         event('account.observed',{accountEntityId:account?.id,instanceId:i.id,verified:message.verified});return{ok:true,account:account?publicAccount(account):null,commands:commands(i.id)};
       }
       if(message.type==='OBSERVATION'){
         ensure(Array.isArray(message.channels)&&message.channels.length<=100,'VALIDATION','Invalid channel observations.');
         i.legacyFrozen=message.legacyFrozen===true;i.legacyPending=message.legacyPending!==false;
-        for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
+        for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='awaiting_observation';}
         const seenTabs=new Set();
         for(const observed of message.channels){
           const accountId=text(observed.accountId,'accountId',100),channelId=text(observed.channelId,'channelId',100),guildId=text(observed.guildId||'@me','guildId',100);
@@ -528,7 +560,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(!c){c={id:id(),instanceId:i.id,accountId,guildId,channelId,name:typeof observed.name==='string'?observed.name.slice(0,200):channelId,version:1,configVersion:0,appliedVersion:0,playlist:[],playlistIndex:0,intervalMode:'auto',intervalMs:3000,slowmodeMs:0,createdAt:now()};state.channels.push(c);event('channel.discovered',{channelId:c.id,instanceId:i.id});}
           const tabChanged=c.tabId!==observed.tabId||c.sessionId!==i.sessionId;
           if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))markUnknown(a,'execution_tab_changed');continue;}
-          c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();
+          c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
             upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId});upsertTarget(guildId,channelId,c.name);
             for(const cmd of state.commands.filter(cmd=>cmd.type==='OPEN_CHANNEL'&&cmd.instanceId===i.id&&cmd.sessionId===i.sessionId&&['queued','received','applied'].includes(cmd.status)&&cmd.payload.accountId===accountId&&cmd.payload.guildId===guildId&&cmd.payload.channelId===channelId)){cmd.status='completed';cmd.completedAt=now();}
@@ -543,7 +575,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             command('CONFIG_SYNC',i.id,{bindingId:c.id,accountId,guildId,channelId,tabId:c.tabId,configVersion:c.configVersion,intervalMs:c.intervalMs,items:c.playlist.map(item=>{const m=get('messages',item.messageId);return{...item,name:m.name,body:m.revisions.find(r=>r.id===item.revisionId).body};})});
           }
         }
-        for(const g of state.groups.filter(g=>g.status==='running'))for(const bindingId of g.members){const c=get('channels',bindingId);if(c.instanceId===i.id&&!c.verified){g.waitReason='account_unverified';incident('account_mismatch',{groupId:g.id,instanceId:i.id});}}
+        for(const g of state.groups.filter(g=>g.status==='running'))for(const bindingId of g.members){const c=get('channels',bindingId);if(c.instanceId===i.id&&!c.verified){g.waitReason='account_unverified';incident(c.verificationReason==='account_mismatch'?'account_mismatch':'channel_unverified',{groupId:g.id,instanceId:i.id,bindingId:c.id,verificationReason:c.verificationReason});}}
+        for(const g of state.groups.filter(g=>g.status==='running'&&g.waitReason==='account_unverified'))if(g.members.every(member=>{const c=get('channels',member),owner=get('instances',c.instanceId);return c.verified&&c.sessionId===owner.sessionId&&owner.connected;}))g.waitReason=g.activeAttemptId?'preparing':null;
+        for(const problem of state.incidents.filter(p=>p.status==='open'&&['account_mismatch','channel_unverified'].includes(p.code)))if(identityRecovered(problem))resolveIncident(problem,{reasonCode:'connection_reverified'});
         event('instance.observed',{instanceId:i.id,channelCount:message.channels.length});return{ok:true,channels:state.channels.filter(c=>c.instanceId===i.id).map(c=>publicChannel(c)),commands:commands(i.id)};
       }
       if(message.type==='ACK'){

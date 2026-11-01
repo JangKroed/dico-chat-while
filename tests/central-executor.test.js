@@ -193,3 +193,19 @@ test('준비 대기 중 연결이 끊기면 추가 검사와 허가 요청을 �
  assert.equal(r.messages.filter(x=>x.type==='DICO_INSPECT').length,1);
  assert.equal(r.messages.filter(x=>x.type==='DICO_DELIVER').length,0);
 });
+
+test('전송 창 보기 명령은 기존 창 콜백만 호출하고 입력·발송을 실행하지 않는다',async()=>{
+ const r=rig(),seen=[];const client=createCentralExecutor({chrome:r.chrome,transport:r.transport,manageChannelWindow:async p=>seen.push(p)});
+ await client.load();await client.setSession({instanceId:'instance',sessionId:'session'});
+ const c={...cmd('MANAGE_WINDOW'),payload:{...payload,action:'reveal'}};
+ await client.handleCommand(c);await client.handleCommand(c);
+ assert.equal(seen.length,1);assert.equal(r.messages.length,0);assert.equal(seen[0].tabId,7);
+ assert.ok(r.reports.some(m=>m.type==='ACK'&&m.status==='applied'));
+});
+
+test('미확인 발송이 남으면 탭 모으기 콜백에 진입하지 않는다',async()=>{
+ const r=rig(),seen=[];r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,manageChannelWindow:async p=>seen.push(p)});
+ await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ await r.client.handleCommand({...cmd('MANAGE_WINDOW'),payload:{...payload,action:'consolidate'}});
+ assert.equal(seen.length,0);assert.ok(r.reports.some(m=>m.type==='ACK'&&m.rejectionCode==='ATTEMPT_UNRESOLVED'));
+});
