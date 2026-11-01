@@ -267,14 +267,24 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){g.status='paused';release(g);}
     event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual});return a;
   }
+  function restoreConfirmedDeadlines(){
+    const wall=now(),mono=monotonicNow();
+    // Restarting or explicitly resuming does not constitute a new delivery.
+    // A future wall timestamp cannot prove elapsed time, so bound it at zero.
+    const elapsed=entity=>Number.isFinite(entity.lastConfirmedAt)?Math.max(0,wall-entity.lastConfirmedAt):null;
+    for(const g of state.groups){const age=elapsed(g);g.nextMono=mono+(age===null?0:Math.max(0,g.intervalMs-age));}
+    for(const c of state.channels){
+      const age=elapsed(c);c.nextMono=mono+(age===null?0:Math.max(0,effectiveInterval(c)-age));
+      if(age===null)delete c.lastConfirmedMono;else c.lastConfirmedMono=mono-age;
+    }
+  }
   function start(g){
     ensure(!g.activeAttemptId,'ATTEMPT_UNRESOLVED','Resolve the current attempt before resuming.',409);
     ensure(!g.controlIntent,'CONTROL_PENDING','Wait for actual stop/pause acknowledgments.',409);
     acquire(g);g.members.map(m=>get('channels',m)).forEach(eligibleChannel);
     if(state.service.status==='resume_required'){
       state.service.status='ready';state.service.reasonCode=null;
-      for(const x of state.groups)if(x.lastConfirmedAt)x.nextMono=monotonicNow()+x.intervalMs;
-      for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+effectiveInterval(c);
+      restoreConfirmedDeadlines();
     }
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
     g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
@@ -360,7 +370,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         event('settings.reset',removed,'warning');return{reset:true,removed,historyPreserved:true};
       }
       case 'service.stopAll':state.service.status='stopped';for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
-      case 'service.resume':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups)if(g.lastConfirmedAt)g.nextMono=monotonicNow()+g.intervalMs;for(const c of state.channels)if(c.lastConfirmedAt)c.nextMono=monotonicNow()+effectiveInterval(c);lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
+      case 'service.resume':state.service.status='ready';state.service.reasonCode=null;restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
       case 'attempt.retryNotSent':{
         ensure(p.confirmation==='CONFIRM_NOT_SENT','VALIDATION','Explicitly confirm that this attempt was not sent.');
