@@ -4,15 +4,15 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,throwAfterEnter=false,prepareDelay=0,lateCooldown=null}={}) {
+function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,throwAfterEnter=false,prepareDelay=0,lateCooldown=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
- const nodes=[],events=[],traces=[];
- const form={querySelector:()=>null,querySelectorAll:()=>cooldown?(Array.isArray(cooldown)?cooldown:[cooldown]).map(textContent=>({textContent,getClientRects:()=>[1]})):[]};
+ const nodes=[],events=[],traces=[],requests=[];let waitHook=null,authorizationHook=null;
+ const form={querySelector:()=>attachment?{}:null,querySelectorAll:()=>{const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=editor;this.focusNode=editor;this.isCollapsed=range.collapsed}};
- const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>form,contains:n=>n===editor,focus(){document.activeElement=editor},dispatchEvent(event){
-  events.push({type:event.type,at:clock});
+ const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>unsupported?{}:null,closest:()=>form,contains:n=>n===editor,focus(){document.activeElement=editor},dispatchEvent(event){
+  events.push({type:event.type,at:clock,selectionCollapsed:selection.isCollapsed});
   if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;if(prepareDelay)nextDelay=prepareDelay;}
   if(event.type==='keydown'){
    if(ignoreEnter)return true;
@@ -46,12 +46,12 @@ function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiN
  const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT'){waitHook?.(m);return{allowed};}const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,events,traces,delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
- request:type=>new Promise(resolve=>listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve))};
+ return {delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
  for (const loggedUser of [null,'999999999999999999']) {
@@ -86,7 +86,7 @@ test('예약 시각 전 Enter 요청·준비 후 변경된 초안·중지·조�
  }
 });
 test('전송 시각에 제한이 남으면 준비된 문구를 보존하고 Enter를 미룬다',async()=>{
- const r=rig();await r.request('DICO_PREPARE');r.tick(3000);r.cooldown('00:08');
+ const r=rig();await r.request('DICO_PREPARE');r.tick(3000);r.cooldown('00:08');r.delayNext(21630000);
  assert.equal((await r.request('DICO_DELIVER')).status,'deferred');assert.equal(r.editor.innerText,'A');
  assert.equal(r.events.some(e=>e.type==='keydown'),false);
 });
@@ -274,4 +274,85 @@ test('최종 승인 후 생긴 해석 불가 쿨다운도 Enter 직전에 차단
  const r=rig({managed:true,lateCooldown:'대기 중'});await r.request('DICO_PREPARE');r.tick(3000);
  assert.equal((await r.request('DICO_INSPECT')).cooldownKnown,true);
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'deferred');assert.equal(result.code,'COOLDOWN_UNVERIFIED');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+
+test('known live cooldown keeps the same commit pending and sends once only after a fresh authorization',async()=>{
+ const r=rig({managed:true});r.delivery.strictAuthorization=true;await r.request('DICO_PREPARE');r.tick(3000);
+ const unlock=r.now()+8000;r.cooldown(now=>now<unlock?'00:'+String(Math.ceil((unlock-now)/1000)).padStart(2,'0'):'');
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.ok(r.events.find(e=>e.type==='keydown').at>=unlock);
+ const waits=r.requests.filter(m=>m.type==='DICO_PRE_ENTER_WAIT');assert.ok(waits.length>0);assert.ok(waits.every(m=>m.id===r.delivery.id&&m.cooldownMs>=0&&m.maxWaitMs===21630000));
+ const finalAuth=r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').at(-1);assert.ok(finalAuth.at>=unlock);assert.equal(waits.at(-1).cooldownMs,0);assert.ok(waits.at(-1).at<=finalAuth.at);
+});
+test('cooldown appearing during final authorization is waited out without replacing the attempt or repeating Enter',async()=>{
+ let unlock;const r=rig({managed:true,lateCooldown:now=>{unlock??=now+3000;return now<unlock?'00:03':'';}});
+ await r.request('DICO_PREPARE');r.tick(3000);assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
+ assert.ok(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length>=3);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.ok(r.events.find(e=>e.type==='keydown').at>=unlock);
+});
+test('stop, edited draft, changed account, and unreadable countdown interrupt a pending pre-Enter wait',async()=>{
+ for(const mode of ['stop','draft','account','unknown']){
+  const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);r.cooldown('00:10');
+  let polls=0;r.onWait(()=>{if(++polls===2){if(mode==='stop')r.stop();if(mode==='draft')r.editor.innerText='personal draft';if(mode==='account')r.account('999999999999999999');if(mode==='unknown')r.cooldown('대기 중');}});
+  const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed',mode);assert.equal(result.deliveryEvidence.enterAttempted,false,mode);assert.equal(r.events.filter(e=>e.type==='keydown').length,0,mode);assert.equal(r.events.filter(e=>e.type==='paste').length,1,mode);
+  if(mode==='unknown')assert.equal(result.code,'COOLDOWN_UNVERIFIED');if(mode==='stop')assert.equal(result.code,'PRE_ENTER_WAIT_CANCELLED');
+ }
+});
+test('a stuck countdown times out without Enter and never consumes the content duplicate-send latch',async()=>{
+ const r=rig({managed:true});await r.request('DICO_PREPARE');r.tick(3000);r.cooldown('00:10');r.delayNext(21630000);const began=r.now();
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'deferred');assert.equal(result.code,'COOLDOWN_WAIT_TIMEOUT');assert.equal(result.deliveryEvidence.enterAttempted,false);assert.ok(r.now()-began>=21630000);assert.equal(r.events.filter(e=>e.type==='keydown').length,0);assert.equal(r.editor.innerText,'A');
+ r.cooldown('');assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+test('stale authorization after countdown waiting still blocks the only Enter',async()=>{
+ const r=rig({managed:true,authorizationLag:60000});r.delivery.strictAuthorization=true;await r.request('DICO_PREPARE');r.tick(3000);const unlock=r.now()+2000;r.cooldown(now=>now<unlock?'00:02':'');
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'blocked');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+
+test('a valid long cooldown stays in the same attempt beyond two minutes',async()=>{
+ const r=rig({managed:true});await r.request('DICO_PREPARE');r.tick(3000);const unlock=r.now()+600000;
+ r.cooldown(now=>now<unlock?'10:00':'');let polls=0;r.onWait(()=>{if(++polls===2)r.tick(590000);});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ assert.ok(r.requests.some(m=>m.type==='DICO_PRE_ENTER_WAIT'&&m.elapsedMs>120000&&m.cooldownMs>0));assert.ok(r.events.find(e=>e.type==='keydown').at>=unlock);
+});
+test('cancellation when the countdown clears prevents final authorization and Enter',async()=>{
+ const r=rig({managed:true});await r.request('DICO_PREPARE');r.tick(3000);const unlock=r.now()+1000;r.cooldown(now=>now<unlock?'00:01':'');r.onWait(m=>{if(m.cooldownMs===0)r.stop();});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'blocked');assert.equal(result.code,'PRE_ENTER_WAIT_CANCELLED');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+test('sleep beyond the wait bound cannot turn an expired attempt into a fresh Enter when the countdown disappears',async()=>{
+ const r=rig({managed:true});await r.request('DICO_PREPARE');r.tick(3000);const unlock=r.now()+1000;r.cooldown(now=>now<unlock?'00:01':'');r.delayNext(21630000);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'deferred');assert.equal(result.code,'COOLDOWN_WAIT_TIMEOUT');assert.equal(result.deliveryEvidence.enterAttempted,false);assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+
+test('managed draft inspection reads foreign text without mutating it and verifies the actual account',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;r.editor.innerText='personal draft';
+ const seen=await r.request('DICO_DRAFT_INSPECT');assert.equal(seen.ok,true);assert.equal(seen.draftText,'personal draft');assert.equal(seen.draftMatches,false);assert.equal(seen.unsupported,false);assert.equal(seen.attachmentOrReply,false);assert.equal(r.events.length,0);
+ r.account('999999999999999999');assert.equal((await r.request('DICO_DRAFT_INSPECT')).code,'ACCOUNT_UNVERIFIED');assert.equal(r.editor.innerText,'personal draft');
+});
+test('an exact backed-up managed draft can be replaced once while the planned draft is reused without paste',async()=>{
+ for(const prior of ['personal draft','A']){
+  const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;r.editor.innerText=prior;
+  if(prior!=='A')r.delivery.replaceExpectedDraft=prior;
+  assert.equal((await r.request('DICO_PREPARE')).status,'prepared');assert.equal(r.editor.innerText,'A');assert.equal(r.events.filter(e=>e.type==='paste').length,prior==='A'?0:1);assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+ }
+});
+test('draft replacement compare-and-swap is rechecked after every authorization and focus wait',async()=>{
+ for(const boundary of ['initial','first authorization','focus wait','last authorization']){
+  const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;r.editor.innerText='backed-up draft';r.delivery.replaceExpectedDraft='backed-up draft';
+  let calls=0;r.onAuthorization(()=>{calls++;if(boundary==='first authorization'&&calls===1||boundary==='last authorization'&&calls===2)r.editor.innerText='new personal draft';});
+  if(boundary==='initial')r.editor.innerText='new personal draft';
+  if(boundary==='focus wait')r.delayNext(1,()=>{r.editor.innerText='new personal draft';});
+  const result=await r.request('DICO_PREPARE');assert.equal(result.status,'blocked',boundary);assert.equal(result.code,'DRAFT_MISMATCH',boundary);assert.equal(r.editor.innerText,'new personal draft');assert.equal(r.events.filter(e=>e.type==='paste').length,0,boundary);
+ }
+});
+test('replacement never overrides attachments, unsupported content, or a personal unmanaged target',async()=>{
+ for(const options of [{attachment:true},{unsupported:true},{managed:false},{coordinated:false}]){
+  const r=rig({managed:true,loggedUser:'123456789012345678',...options});r.target.coordinated=options.coordinated!==false;r.editor.innerText='personal draft';r.delivery.replaceExpectedDraft='personal draft';
+  if(options.attachment||options.unsupported){const seen=await r.request('DICO_DRAFT_INSPECT');assert.equal(seen.ok,true);assert.equal(seen.attachmentOrReply,Boolean(options.attachment));assert.equal(seen.unsupported,Boolean(options.unsupported));}
+  const result=await r.request('DICO_PREPARE');assert.equal(result.status,'blocked');assert.equal(r.editor.innerText,'personal draft');assert.equal(r.events.filter(e=>e.type==='paste').length,0);
+ }
+});
+
+test('an unchanged backed-up draft is fully selected again if the cursor moved during authorization',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;r.editor.innerText='backed-up draft';r.delivery.replaceExpectedDraft='backed-up draft';
+ let calls=0;r.onAuthorization(()=>{if(++calls===2)r.selection.isCollapsed=true;});
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');assert.equal(r.events.find(e=>e.type==='paste').selectionCollapsed,false);assert.equal(r.editor.innerText,'A');
 });

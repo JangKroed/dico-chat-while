@@ -50,3 +50,20 @@ chrome.tabs.onActivated.addListener(activated);chrome.tabs.onUpdated.addListener
 const poll=window.setInterval(()=>{if(!busy)void refresh();},5000);
 window.addEventListener('unload',()=>{window.clearInterval(poll);chrome.tabs.onActivated.removeListener(activated);chrome.tabs.onUpdated.removeListener(updated);chrome.tabs.onRemoved.removeListener(removed);});
 void refresh();
+
+$('#load-backups').addEventListener('click',async()=>{
+ try{
+  const result=await request('CENTRAL_DRAFT_BACKUPS'),list=$('#backup-list');list.replaceChildren();
+  for(const backup of [...(result.backups||[])].reverse()){
+   const label=document.createElement('p');label.textContent=`${new Date(backup.createdAt).toLocaleString()} · 계정 ${backup.accountId} · 채널 ${backup.channelId}`;
+   const field=document.createElement('textarea');field.readOnly=true;field.rows=5;field.value=backup.text;field.setAttribute('aria-label','보관한 초안 원문');field.style.width='100%';
+   list.append(label,field);
+  }
+  if(!result.backups?.length)list.textContent='보관한 초안이 없습니다.';
+ }catch(error){$('#notice').textContent=error.message;}
+});
+
+$('#clear-backups').addEventListener('click',async()=>{
+ if(!confirm('보관한 초안 원문을 모두 삭제할까요? 필요한 문구는 먼저 복사해 주세요.'))return;
+ try{await request('CENTRAL_CLEAR_DRAFT_BACKUPS');$('#backup-list').textContent='보관한 초안을 삭제했습니다.';}catch(error){$('#notice').textContent=error.message;}
+});

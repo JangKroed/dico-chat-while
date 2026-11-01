@@ -1,3 +1,4 @@
+import {recoverConnections} from './connection-recovery.js';
 import {BUILD_ID} from './build-info.js';
 import {createExtensionUpdater,ensureManagedContent} from './update.js';
 import {pageIdentityObservation,identityFailureMessage} from './identity-observation.js';
@@ -14,7 +15,7 @@ const transport=createNativeTransport(chrome),executor=createCentralExecutor({ch
 const observation=createObservationQueue(collectObservation,publishObservation);
 const heartbeat=createSingleFlight(runHeartbeat);
 let channelOpening=Promise.resolve();
-let connecting=null,heartbeatTimer=null,lastError=null,updateIssue=null;
+let connecting=null,heartbeatTimer=null,lastError=null,updateIssue=null,recoveryPending=false;
 const updater=createExtensionUpdater({chrome,executor,transport,loadedBuildId:BUILD_ID,onIssue:message=>{updateIssue=message;}});
 async function configurePanelAction(){
   if(chrome.sidePanel?.setPanelBehavior){
@@ -65,18 +66,25 @@ async function registerActiveAccount(windowId) {
 async function collectObservation() {
   await executor.load();
   const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralAccount']);
-  const records=saved.dicoCentralTabs||[],account=saved.dicoCentralAccount;
+  const records=saved.dicoCentralTabs||[],account=saved.dicoCentralAccount,sessionId=executor.state.sessionId;
   // Channel-limit reads can each wait 1.5 seconds. Independent channel reads
   // run together so a browser with many tabs does not age the first result.
   const [accountResult,channels]=await Promise.all([
     account?currentAccountResult(account.accountId,account.sourceTabId):null,
     Promise.all(records.map(record=>observeManagedChannel(chrome,record,{observe,observeLimit:observeChannelLimit}))),
   ]);
-  return{account:account?{accountId:account.accountId,verified:Boolean(accountResult.seen),verificationReason:accountResult.verificationReason}:null,channels};
+  return{sessionId,account:account?{accountId:account.accountId,verified:Boolean(accountResult.seen),verificationReason:accountResult.verificationReason}:null,channels};
 }
 async function publishObservation(snapshot){
+  if(!transport.connected||executor.state.emergencyStopped||snapshot.sessionId!==executor.state.sessionId)return{ignored:true};
   if(snapshot.account){lastAccountObservation=snapshot.account;await executor.request({type:'ACCOUNT_OBSERVATION',...snapshot.account});}
   return executor.request({type:'OBSERVATION',channels:snapshot.channels,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
+}
+async function restoreSavedConnections(){
+  const sessionId=executor.state.sessionId;
+  await recoverConnections({chrome,state:executor.state,findAccount:currentAccount,openChannel:openManagedChannel,
+    canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
+    report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
 async function runHeartbeat() {
   try {
@@ -89,7 +97,7 @@ async function runHeartbeat() {
     }
     await executor.save();
     for(const command of result.commands || [])void executor.handleCommand(command);
-    await refreshManagedContent();await observation();await updater.check();lastError=null;
+    await refreshManagedContent();if(recoveryPending&&executor.isIdle)await restoreSavedConnections();await observation();await updater.check();lastError=null;
   }catch{lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect() {
@@ -105,7 +113,9 @@ async function connect() {
       const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','managed-window-v1','managed-update-v1','early-prepare-v1']});
       await executor.setSession(response);
       for(const command of response.commands || [])void executor.handleCommand(command);
-      await refreshManagedContent();await observation();void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
+      await refreshManagedContent();
+      await restoreSavedConnections();
+      await observation();void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
       await chrome.alarms.clear('dico-central-reconnect');
     } catch(error){lastError=String(error.message || error).slice(0,200);transport.disconnect();throw Error(lastError);}
   })().finally(()=>{connecting=null;});return connecting;
@@ -122,6 +132,7 @@ async function manageChannelWindow(p){
   channelOpening=next.catch(()=>{});return next;
 }
 async function openManagedChannelNow(p) {
+  if(executor.state?.emergencyStopped||!transport.connected)throw Object.assign(Error('중지된 브라우저에서는 자동 연결을 시작하지 않습니다.'),{code:'EXECUTION_STOPPED'});
   if(!executor.state?.legacyDeclaration)throw Object.assign(Error('기존 실행기 사용 여부를 먼저 확인하세요.'),{code:'LEGACY_UNRESOLVED'});
   if(!/^\d{17,20}$/.test(p.accountId||'')||!/^\d{1,30}$/.test(p.guildId||'')||!/^\d{1,30}$/.test(p.channelId||''))throw Object.assign(Error('연결할 계정·채널 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
   const saved=(await chrome.storage.local.get('dicoCentralAccount')).dicoCentralAccount;
@@ -135,6 +146,7 @@ async function openManagedChannelNow(p) {
     try{await chrome.tabs.get(existing.tabId);throw Object.assign(Error('기존 전송용 창이 다른 화면에 있습니다. 원래 채널로 돌아가거나 창을 닫고 다시 연결하세요.'),{code:'TARGET_MISMATCH'});}catch(error){if(error.code==='TARGET_MISMATCH')throw error;}
     records.splice(records.indexOf(existing),1);
   }
+  if(executor.state.emergencyStopped||!transport.connected)throw Object.assign(Error('브라우저 중지로 채널 열기를 취소했습니다.'),{code:'EXECUTION_STOPPED'});
   const win=await createManagedWindow(chrome,p);
   const tab=win.tabs?.[0];if(!tab)throw Error('전송용 창을 열지 못했습니다.');
   records.push({accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id});await chrome.storage.local.set({dicoCentralTabs:records});
@@ -158,11 +170,14 @@ async function bindActive(windowId) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id)return false;
+  if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.preEnterWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){executor.canSend(message,sender.tab.id).then(allowed=>respond({allowed,authorizedAt:Date.now(),maxAgeMs:2000})).catch(()=>respond({allowed:false}));return true;}
   if(sender.tab){if(['DICO_TRACE','DICO_TIMING_SAMPLE'].includes(message?.type)){respond({ok:true});return true;}return false;}
   if(!sender.url?.startsWith(chrome.runtime.getURL('')))return false;
   const action=async()=>{
     await executor.load();
+    if(message.type==='CENTRAL_CLEAR_DRAFT_BACKUPS'){executor.state.draftBackups=[];await executor.save();return{cleared:true};}
+    if(message.type==='CENTRAL_DRAFT_BACKUPS')return{backups:(executor.state.draftBackups||[]).map(({accountId,channelId,text,createdAt})=>({accountId,channelId,text,createdAt}))};
     if(message.type==='CENTRAL_STATUS')return {connected:transport.connected,instanceId:executor.state.instanceId,legacyDeclaration:executor.state.legacyDeclaration,lastError:updateIssue || lastError || executor.state.lastError,bindings:Object.keys(executor.state.bindings).length,account:lastAccountObservation,activeTab:await activeChannelContext(message.windowId)};
     if(message.type==='CENTRAL_TAB_CONTEXT')return activeChannelContext(message.windowId);
     if(message.type==='CENTRAL_REGISTER_ACCOUNT')return registerActiveAccount(message.windowId);

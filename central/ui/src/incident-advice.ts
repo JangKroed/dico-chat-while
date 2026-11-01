@@ -29,6 +29,11 @@ const remedies:Record<string,Remedy>={
 }
 remedies.COOLDOWN_UNVERIFIED={title:'Discord 실제 남은 대기 시간을 확인해야 합니다',cause:'Discord 화면의 남은 대기 시간을 신뢰할 수 있게 읽지 못해 입력 준비 요청을 중단했습니다. 설정된 슬로우 모드만으로 실제 제한 해제를 판단하지 않습니다.',steps:['해당 브라우저의 전송용 Discord 탭에서 서버 채널·입력창과 남은 대기 표시를 확인하세요.','Discord의 대기 제한이 실제로 해제되는지 확인하세요. 계속 읽히지 않으면 필요한 초안을 보관한 뒤 Discord 탭을 새로고침하고 계정·채널을 다시 검증하세요.','관리 프로그램과 확장이 같은 최신 상태인지 확인하세요.','미확인 시도는 전체 중지·적용 확인 후 실제 Discord 게시 내역을 확인하세요. 확인되지 않은 시도를 다시 보내지 마세요.'],page:'channels',actionLabel:'채널·대기 상태 확인'}
 remedies.PREPARE_WAIT_TIMEOUT={title:'입력 준비 대기가 만료됐습니다',cause:'입력 준비 대기가 허용된 범위를 넘었거나 시간 변화가 감지되어 중단됐습니다. 남은 초안과 실행 결과를 다시 확인해야 합니다.',steps:['그룹의 현재 차례와 전송용 Discord 탭의 로그인 계정·채널·대기 표시를 확인하세요.','필요한 초안을 보관하세요. 화면 로딩이나 대기 표시가 멈춰 있으면 Discord 탭을 새로고침하고 채널을 다시 검증하세요.','그룹을 중지하고 모든 확장의 확인 응답을 기다리세요. 미확인 시도는 실제 Discord 게시 내역으로 확인한 뒤 실행 기록에서 처리하세요.','게시 여부와 적용 상태가 확인되기 전에는 같은 문구를 다시 보내지 마세요.'],page:'groups',actionLabel:'그룹·준비 상태 확인'}
+remedies.DRAFT_INSPECTION_UNAVAILABLE={...remedies.CONTENT_UNAVAILABLE,title:'기존 입력 내용을 확인하지 못했습니다',cause:'입력창의 기존 문구를 비교하지 못해 교체와 발송 준비를 중단했습니다.'}
+remedies.DRAFT_BACKUP_FULL={...remedies.DRAFT_MISMATCH,title:'보관한 초안을 정리해야 합니다',cause:'초안 보관 공간이 가득 차 기존 문구를 덮어쓰지 않았습니다.',steps:['확장 사이드패널의 ‘교체 전에 보관한 초안’에서 필요한 원문을 복사하세요.','보관 내용을 확인한 뒤 ‘보관한 초안 모두 삭제’로 공간을 확보하세요.','현재 채널과 메시지를 확인하고 다시 준비하세요. 미확인 발송은 실제 게시 여부부터 확인하세요.']}
+remedies.DRAFT_BACKUP_INVALID={...remedies.DRAFT_MISMATCH,title:'기존 초안을 안전하게 보관하지 못했습니다',cause:'기존 원문을 보관할 수 없어 입력 내용을 교체하지 않았습니다.'}
+remedies.COOLDOWN_WAIT_TIMEOUT={...remedies.COOLDOWN_UNVERIFIED,title:'Discord 제한 해제 대기가 만료됐습니다',cause:'지원하는 대기 시간을 넘겨 초안과 현재 차례를 보존하고 멈췄습니다.'}
+remedies.PRE_ENTER_WAIT_CANCELLED={...remedies.EXECUTION_STOPPED,title:'발송 대기 중 실행이 차단됐습니다',cause:'중지·연결·세션·설정 상태가 바뀌어 Enter 전에 실행을 차단했습니다.'}
 remedies.OPEN_CHANNEL_UNSUPPORTED=remedies.EXTENSION_UPDATE_REQUIRED
 
 export function isIncidentOpen(i:Incident) {return !i.resolvedAt&&!['resolved','closed'].includes(String(i.status||''))}

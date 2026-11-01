@@ -45,6 +45,25 @@ async function screenshot(name) {
   const {data}=await cmd('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
   await writeFile(resolve(screenshots,name),Buffer.from(data,'base64'));
 }
+async function checkLongAttemptModal() {
+  const dimensions=await evalJS(`(() => {
+    const backdrop=document.createElement('div');backdrop.className='modal-backdrop';backdrop.dataset.layoutCheck='';
+    const dialog=document.createElement('div');dialog.className='modal';dialog.setAttribute('role','dialog');dialog.tabIndex=0;
+    dialog.innerHTML='<div class="panel-head"><h2>발송 시도 상세</h2></div><dl class="detail-list"><dt>결과</dt><dd>게시 여부 확인 필요</dd></dl>';
+    const diagnostics=document.createElement('div');diagnostics.className='attempt-diagnostics';
+    for(let i=0;i<70;i++){const row=document.createElement('p');row.textContent='진단 기록 '+i+' · 발송 시도 상세 증거 확인';diagnostics.append(row)}
+    dialog.append(diagnostics);const close=document.createElement('button');close.textContent='닫기';dialog.append(close);
+    backdrop.append(dialog);document.body.append(backdrop);dialog.focus();
+    return {height:dialog.getBoundingClientRect().height,viewport:innerHeight,scrollHeight:dialog.scrollHeight,clientHeight:dialog.clientHeight,top:dialog.getBoundingClientRect().top};
+  })()`);
+  assert.ok(dimensions.height<=dimensions.viewport-15,`Dialog exceeds viewport: ${JSON.stringify(dimensions)}`);
+  assert.ok(dimensions.top>=0,`Dialog top clipped: ${JSON.stringify(dimensions)}`);
+  assert.ok(dimensions.scrollHeight>dimensions.clientHeight,`Long diagnostics should scroll: ${JSON.stringify(dimensions)}`);
+  await cmd('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End'});
+  await until(async()=>await evalJS('document.querySelector("[data-layout-check] .modal")?.scrollTop>0'));
+  assert.ok(await evalJS('document.querySelector("[data-layout-check] .modal button")?.getBoundingClientRect().bottom<=innerHeight'), 'Close button must be reachable after keyboard scrolling');
+  await evalJS('document.querySelector("[data-layout-check]")?.remove()');
+}
 try {
   runtime=await startCentralRuntime({directory:data,port:0});
   child=spawn(chrome,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check','--disable-extensions','--disable-gpu','--window-size=1440,900','about:blank'],{stdio:['ignore','pipe','pipe']});
@@ -93,8 +112,10 @@ try {
     await clickText('.nav-item',nav);await until(async()=>await evalJS(`document.querySelector('main h1')?.textContent===${JSON.stringify(heading)}`));
     console.log(`PASS route ${heading}`);
   }
+  await checkLongAttemptModal();console.log('PASS desktop long attempt modal scroll');
   await cmd('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
   await until(async()=>await evalJS('innerWidth===390'));
+  await checkLongAttemptModal();console.log('PASS narrow long attempt modal scroll');
   const overflow=await evalJS('document.documentElement.scrollWidth-innerWidth');
   assert.ok(overflow<=2,`Narrow dashboard horizontal overflow: ${overflow}px`);
   await screenshot('narrow-dashboard.png');

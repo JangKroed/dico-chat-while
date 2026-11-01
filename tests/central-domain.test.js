@@ -1004,7 +1004,7 @@ test('early preparation rejects missing cooldown evidence and stop fences waitin
 });
 
 test('late live cooldown blocks without consuming account turn or playlist',()=>{
-  for(const reasonCode of ['deferred','COOLDOWN_UNVERIFIED']){
+  for(const reasonCode of ['deferred','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT']){
     const f=fixture(),c=f.connect();f.apply(c,[f.message('One'),f.message('Two')]);const g=f.group([c]);f.start(g);
     const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
     f.result(c,a,'not_sent',{executionBlocked:true,reasonCode});
@@ -1061,4 +1061,23 @@ test('queued window consolidation fences starts until its actual applied acknowl
  const result=f.manager.execute('channel.consolidate',{id:c.channel.id});assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'WINDOW_MANAGEMENT_PENDING'});
  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:result.commandId,status:'received'},c.instanceId);assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'WINDOW_MANAGEMENT_PENDING'});
  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:result.commandId,status:'applied'},c.instanceId);f.manager.execute('group.start',{id:g.id});assert.equal(f.manager.snapshot().groups[0].status,'running');f.manager.close();
+});
+
+test('live pre-Enter cooldown holds the same attempt and turn beyond thirty seconds',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message('One'),f.message('Two')]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+ const progress=cooldownMs=>f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,cooldownMs},c.instanceId);
+ for(let n=0;n<14;n++){assert.equal(progress(70000-n*5000).allowed,true);f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();}
+ let s=f.manager.snapshot();assert.equal(s.attempts.length,1);assert.equal(s.attempts[0].status,'permitted');assert.equal(s.groups[0].cursor,0);assert.equal(s.channels[0].playlistIndex,0);
+ assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion},c.instanceId).allowed,false);
+ assert.equal(progress(0).allowed,true);
+ for(let n=0;n<4;n++){f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();}
+ assert.equal(f.manager.snapshot().attempts[0].status,'permitted');
+ assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion},c.instanceId).allowed,true);
+ f.result(c,a);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);f.manager.close();
+});
+
+test('automatic recovery respects durable central attempts even if the executor lost local history',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];
+ assert.equal(f.manager.bridge({type:'RECOVERY_STATUS',sessionId:c.sessionId},c.instanceId).allowed,false);
+ f.result(c,a,'not_sent',{executionBlocked:true});assert.equal(f.manager.bridge({type:'RECOVERY_STATUS',sessionId:c.sessionId},c.instanceId).allowed,true);f.manager.close();
 });

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createCentralExecutor} from '../central/extension/executor.js';
+const emptyDraft=()=>({ok:true,draftText:'',draftMatches:false,unsupported:false,attachmentOrReply:false});
 
 function rig() {
   let stored;const messages=[],reports=[];
   const transport={connected:true,request:async message=>{reports.push(message);return {ok:true};}};
-  const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async x=>{stored=structuredClone(x.dicoCentral);}}},tabs:{get:async()=>({id:7,url:'https://discord.com/channels/11111111111111111/22222222222222222'}),sendMessage:async(id,m)=>{messages.push(m);return m.type==='DICO_PREPARE'?{status:'prepared'}:m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:0}:{status:'confirmed',messageId:'33333333333333333'};}}};
+  const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async x=>{stored=structuredClone(x.dicoCentral);}}},tabs:{get:async()=>({id:7,url:'https://discord.com/channels/11111111111111111/22222222222222222'}),sendMessage:async(id,m)=>{messages.push(m);return m.type==='DICO_DRAFT_INSPECT'?emptyDraft():m.type==='DICO_PREPARE'?{status:'prepared'}:m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:0}:{status:'confirmed',messageId:'33333333333333333'};}}};
   const client=createCentralExecutor({chrome,transport});
   return {client,chrome,transport,messages,reports,get state(){return stored;}};
 }
@@ -61,14 +62,14 @@ test('절전 동안 버퍼에 머문 중앙 승인 응답은 Enter 권한으로 
   let permission,actualPermission;
   const waiting=new Promise(resolve=>{started=resolve;});
   r.transport.request=async m=>{r.reports.push(m);if(m.type==='AUTHORIZE_ENTER'){started();return new Promise(resolve=>{release=resolve;});}return {ok:true};};
-  r.chrome.tabs.sendMessage=async(id,m)=>{if(m.type==='DICO_DELIVER'){permission=r.client.canSend({id:'attempt',phase:'commit'},7);await waiting;clock+=60000;release({allowed:true});actualPermission=await permission;return {status:'blocked'};}return {status:'prepared'};};
+  r.chrome.tabs.sendMessage=async(id,m)=>{if(m.type==='DICO_DRAFT_INSPECT')return emptyDraft();if(m.type==='DICO_INSPECT')return{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0};if(m.type==='DICO_DELIVER'){permission=r.client.canSend({id:'attempt',phase:'commit'},7);await waiting;clock+=60000;release({allowed:true});actualPermission=await permission;return {status:'blocked'};}return {status:'prepared'};};
   await r.client.handleCommand(cmd('COMMIT_PERMIT'));
   assert.equal(actualPermission,false);
 });
 
 test('입력 준비 거절 사유 코드를 보고하고 본문이나 오류 원문은 중앙에 보내지 않는다',async()=>{
  const r=rig();await configured(r);
- r.chrome.tabs.sendMessage=async()=>({status:'blocked',code:'DRAFT_MISMATCH',error:'private message text'});
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():({status:'blocked',code:'DRAFT_MISMATCH',error:'private message text'});
  await r.client.handleCommand(cmd('PREPARE'));
  const rejected=r.reports.find(x=>x.type==='ACK'&&x.status==='rejected');
  assert.equal(rejected.rejectionCode,'DRAFT_MISMATCH');
@@ -147,7 +148,7 @@ test('미리 입력한 같은 시도는 현재 초안과 남은 쿨다운을 재
  r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,now:()=>clock,monotonicNow:()=>clock,wait:async ms=>{waits.push(ms);clock+=ms;}});
  const request=r.transport.request;
  r.transport.request=async m=>{await request(m);return m.type==='PREPARED'?(m.cooldownMs>0?{ok:true,permitIssued:false,retryAfterMs:500}:{ok:true,permitIssued:true}):{ok:true};};
- r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);return m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:inspections++===0?500:0,diagnostics:{draft:'private'}}:{status:'prepared'};};
+ r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);return m.type==='DICO_DRAFT_INSPECT'?emptyDraft():m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:inspections++===0?500:0,diagnostics:{draft:'private'}}:{status:'prepared'};};
  await configured(r);await r.client.handleCommand(cmd('PREPARE'));
  assert.deepEqual(waits,[500]);assert.deepEqual(r.reports.filter(x=>x.type==='PREPARED').map(x=>x.cooldownMs),[500,0]);
  assert.equal(r.messages.filter(x=>x.type==='DICO_PREPARE').length,1);assert.equal(r.messages.filter(x=>x.type==='DICO_DELIVER').length,0);
@@ -158,18 +159,18 @@ test('미리 입력 대기 중 중지 요청은 다음 허가 요청을 차단�
  const r=rig();let stop;
  r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,wait:async()=>{stop=r.client.handleCommand({id:'stop-wait',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{groupId:'group',runId:'run',attemptId:'attempt'}});}});
  r.transport.request=async m=>{r.reports.push(m);return m.type==='PREPARED'?{ok:true,permitIssued:false,retryAfterMs:500}:{ok:true};};
- r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:500}:{status:'prepared'};
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:500}:{status:'prepared'};
  await configured(r);await r.client.handleCommand(cmd('PREPARE'));await stop;
  assert.equal(r.reports.filter(x=>x.type==='PREPARED').length,1);assert.equal(r.state.attempts.attempt.phase,'cancelled');
  assert.equal(r.reports.some(x=>x.type==='ACK'&&x.commandId==='stop-wait'&&x.executionBlocked),true);
 });
 
-test('미리 입력 대기의 현재 초안 불일치나 120초 한도는 허가를 요청하지 않고 중단한다',async()=>{
+test('미리 입력 대기의 현재 초안 불일치나 6시간 30초 한도는 허가를 요청하지 않고 중단한다',async()=>{
  for(const kind of ['draft','timeout']){
   const r=rig();let clock=100000;
-  r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,now:()=>clock,monotonicNow:()=>clock,wait:async()=>{clock+=120001;}});
+  r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,now:()=>clock,monotonicNow:()=>clock,wait:async()=>{clock+=21630001;}});
   r.transport.request=async m=>{r.reports.push(m);return m.type==='PREPARED'?{ok:true,permitIssued:false,retryAfterMs:500}:{ok:true};};
-  r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:kind!=='draft',cooldownMs:500}:{status:'prepared'};
+  r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:kind!=='draft',cooldownMs:500}:{status:'prepared'};
   await configured(r);await r.client.handleCommand(cmd('PREPARE'));
   assert.equal(r.reports.filter(x=>x.type==='PREPARED').length,kind==='draft'?0:1);
   assert.equal(r.reports.at(-1).rejectionCode,kind==='draft'?'DRAFT_MISMATCH':'PREPARE_WAIT_TIMEOUT');
@@ -178,7 +179,7 @@ test('미리 입력 대기의 현재 초안 불일치나 120초 한도는 허가
 
 test('해석하지 못한 Discord 카운트다운은 0초로 승인하지 않는다',async()=>{
  const r=rig();await configured(r);
- r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:false,cooldownMs:0}:{status:'prepared'};
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:false,cooldownMs:0}:{status:'prepared'};
  await r.client.handleCommand(cmd('PREPARE'));
  assert.equal(r.reports.some(x=>x.type==='PREPARED'),false);
  assert.equal(r.reports.at(-1).rejectionCode,'COOLDOWN_UNVERIFIED');
@@ -208,4 +209,104 @@ test('미확인 발송이 남으면 탭 모으기 콜백에 진입하지 않는�
  await configured(r);await r.client.handleCommand(cmd('PREPARE'));
  await r.client.handleCommand({...cmd('MANAGE_WINDOW'),payload:{...payload,action:'consolidate'}});
  assert.equal(seen.length,0);assert.ok(r.reports.some(m=>m.type==='ACK'&&m.rejectionCode==='ATTEMPT_UNRESOLVED'));
+});
+
+test('다른 초안은 원문을 먼저 영구 보관한 뒤 정확한 교체 문자열로 준비한다',async()=>{
+ const r=rig(),send=r.chrome.tabs.sendMessage;await configured(r);
+ r.chrome.tabs.sendMessage=async(id,m)=>{
+  if(m.type==='DICO_DRAFT_INSPECT')return{...emptyDraft(),draftText:'개인 초안\n보관'};
+  if(m.type==='DICO_PREPARE'){
+   assert.equal(r.state.draftBackups[0].text,'개인 초안\n보관');
+   assert.equal(m.delivery.replaceExpectedDraft,'개인 초안\n보관');
+  }
+  return send(id,m);
+ };
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.attempts.attempt.phase,'prepared');assert.equal(r.state.draftBackups.length,1);
+ assert.equal(JSON.stringify(r.reports).includes('개인 초안'),false);
+});
+
+test('같은 계획 문구는 교체 토큰이나 백업 없이 준비한다',async()=>{
+ const r=rig(),send=r.chrome.tabs.sendMessage;await configured(r);
+ r.chrome.tabs.sendMessage=async(id,m)=>{
+  if(m.type==='DICO_DRAFT_INSPECT')return{...emptyDraft(),draftText:payload.body,draftMatches:true};
+  if(m.type==='DICO_PREPARE')assert.equal(m.delivery.replaceExpectedDraft,undefined);
+  return send(id,m);
+ };
+ await r.client.handleCommand(cmd('PREPARE'));assert.equal(r.state.draftBackups.length,0);
+});
+
+test('초안 보관 저장 실패 뒤에는 기존 입력을 교체하지 않는다',async()=>{
+ const r=rig(),send=r.chrome.tabs.sendMessage,set=r.chrome.storage.local.set;await configured(r);
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?{...emptyDraft(),draftText:'보존할 초안'}:send(id,m);
+ r.chrome.storage.local.set=async value=>{if(value.dicoCentral.draftBackups.length)throw Error('storage unavailable');return set(value);};
+ await assert.rejects(r.client.handleCommand(cmd('PREPARE')));
+ assert.equal(r.messages.some(m=>m.type==='DICO_PREPARE'),false);
+});
+
+test('이전 미확인 시도가 있으면 새 시도의 초안 교체나 준비를 하지 않는다',async()=>{
+ const r=rig();await configured(r);
+ r.client.state.attempts.previous={...payload,attemptId:'previous',phase:'unknown',enterRequested:true};await r.client.save();
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.reports.at(-1).rejectionCode,'ATTEMPT_UNRESOLVED');assert.equal(r.messages.some(m=>m.type==='DICO_PREPARE'),false);
+});
+
+test('완료된 동일 시도의 다른 준비 명령은 확인 영수증만 재보고한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ const before=r.messages.length;await r.client.handleCommand(cmd('PREPARE','duplicate-prepare'));
+ assert.equal(r.messages.length,before);assert.equal(r.reports.filter(m=>m.type==='DELIVERY_RESULT'&&m.outcome==='confirmed').length,2);
+});
+
+test('Enter 전 대기와 해제는 같은 허가에 보고하며 완료되기 전에는 결과를 만들지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const request=r.transport.request;r.transport.request=async m=>{await request(m);return{ok:true,allowed:true};};
+ r.chrome.tabs.sendMessage=async(id,m)=>{
+  assert.equal(m.type,'DICO_DELIVER');
+  for(const cooldownMs of [1000,500,0]){
+   assert.equal(await r.client.preEnterWait({id:'attempt',phase:'commit',enterAttempted:false,cooldownMs,elapsedMs:1000-cooldownMs},7),true);
+   assert.equal(r.reports.some(m=>m.type==='DELIVERY_RESULT'),false);
+  }
+  return{status:'confirmed',messageId:'33333333333333333'};
+ };
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.deepEqual(r.reports.filter(m=>m.type==='DELIVERY_WAIT').map(m=>m.cooldownMs),[1000,500,0]);
+ assert.equal(r.reports.filter(m=>m.type==='DELIVERY_RESULT').length,1);
+});
+
+test('Enter 전 대기 보고는 잘못된 탭 실제 Enter 흔적 구성변경과 중지 뒤 응답을 거절한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const waitMessage={id:'attempt',phase:'commit',enterAttempted:false,cooldownMs:500,elapsedMs:0};
+ assert.equal(await r.client.preEnterWait(waitMessage,7),false);
+ r.chrome.tabs.sendMessage=async()=>{
+  assert.equal(await r.client.preEnterWait(waitMessage,8),false);
+  assert.equal(await r.client.preEnterWait({...waitMessage,enterAttempted:true},7),false);
+  r.client.state.bindings.binding.configVersion=2;assert.equal(await r.client.preEnterWait(waitMessage,7),false);r.client.state.bindings.binding.configVersion=1;
+  const request=r.transport.request;r.transport.request=async m=>{await request(m);if(m.type==='DELIVERY_WAIT'){r.client.disconnect();return{allowed:true};}return{ok:true};};
+  assert.equal(await r.client.preEnterWait(waitMessage,7),false);
+  return{status:'blocked'};
+ };
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.reports.filter(m=>m.type==='DELIVERY_WAIT').length,1);
+});
+
+test('신선한 검사로 갱신되는 2분 이상의 쿨다운은 동일 준비 시도에서 기다린다',async()=>{
+ const r=rig();let clock=100000,checks=0;
+ r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,now:()=>clock,monotonicNow:()=>clock,wait:async ms=>{clock+=ms;}});
+ const request=r.transport.request;r.transport.request=async m=>{await request(m);return m.type==='PREPARED'?{ok:true,permitIssued:++checks>130,retryAfterMs:1000}:{ok:true};};
+ await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(checks,131);assert.equal(clock,230000);
+ assert.equal(r.messages.filter(m=>m.type==='DICO_PREPARE').length,1);assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
+ assert.equal(r.reports.some(m=>m.status==='rejected'),false);
+});
+
+test('지연된 Enter 전 대기 승인 응답은 현재 허가로 사용하지 않는다',async()=>{
+ const r=rig();let clock=100000;
+ r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,now:()=>clock,monotonicNow:()=>clock});
+ await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const request=r.transport.request;r.transport.request=async m=>{await request(m);if(m.type==='DELIVERY_WAIT'){clock+=2001;return{allowed:true};}return{ok:true};};
+ r.chrome.tabs.sendMessage=async()=>{
+  assert.equal(await r.client.preEnterWait({id:'attempt',phase:'commit',enterAttempted:false,cooldownMs:500,elapsedMs:0},7),false);
+  return{status:'blocked'};
+ };
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
 });

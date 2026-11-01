@@ -29,3 +29,41 @@
 .incident-resolution{color:#177f65;background:#effaf5;border-radius:8px;padding:10px 12px}
 .connect-account-row{border:1px solid #e4ebf5;border-radius:8px;margin:9px 0;padding:0 0 10px}.connect-account-row .connect-account{border:0;margin:0}.connect-account-row .channel-window-actions{padding:0 13px 0 39px}.channel-window-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.runtime-account .channel-window-actions{justify-content:flex-end}.runtime-account .verification-help{color:#96732f}.runtime-account .verification-ok{color:#348661}.record-window-actions{margin:0 22px 18px;padding:12px 14px;background:#f6f9fe;border:1px solid #e3eaf5;border-radius:8px}.record-window-actions>strong{font-size:11px;color:#496486}.incident-actions .channel-window-actions{display:inline-flex;margin:0}.instance-card .outline.small{display:block;margin:9px 0}
 @media(max-width:767px){.runtime-account .channel-window-actions{justify-content:flex-start}.record-window-actions{margin:0 16px 16px}}
+
+.modal-backdrop{overflow-y:auto}
+.modal{max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px);min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+@media(max-width:767px){.modal{max-height:calc(100vh - 16px);max-height:calc(100dvh - 16px - env(safe-area-inset-top));padding-bottom:max(20px,env(safe-area-inset-bottom))}}
+
+/* Dark surfaces retain the same layout, focus rings and semantic status colors. */
+html[data-theme=dark]{color:#e3eaf5;background:#101724;--border:#30405a;--line:#30405a}
+html[data-theme=dark] :where(*){border-color:#30405a}
+html[data-theme=dark] :is(.topbar,.panel,.stat-card,.modal,.notification-popover,.notification-item,.steps-preview,.message-item,.channel-item,.group-card,.registration-guide,.target-item,.registration-help>summary,.incident-recovery,.setup-progress li button){background:#182235;color:#e3eaf5}
+html[data-theme=dark] :is(.outline,input:not([type=checkbox]),textarea,select){background:#121c2c;color:#e0e8f5;border-color:#3b4d68}
+html[data-theme=dark] :is(input,textarea)::placeholder{color:#7f90ab}
+html[data-theme=dark] input[type=checkbox]{accent-color:#7b9ff5}
+html[data-theme=dark] :is(.outline:hover,.message-item:hover,.message-item.selected,.channel-item:hover,.channel-item.selected,.group-card:hover,.group-card.selected,.target-item:hover,.target-item.selected,.member-step.next){background:#253755;color:#f0f4fc}
+html[data-theme=dark] :is(.breadcrumb strong,.notification-item strong,.empty-state strong,td strong,.aggregate-list strong,.detail-list dd,.timeline-list strong,.runtime-channel>header strong,.runtime-account strong,.attempt-diagnostics h3,.attempt-diagnostics dd,.interval-mode strong,.interval-effective strong,.update-migration summary,.update-browser strong,.group-readiness strong,.incident-advice-row .incident-advice>strong,.setup-progress-heading strong,.record-window-actions>strong){color:#d1dff5}
+html[data-theme=dark] :is(.page-heading p,.panel-head p,.secondary,.last-seen,.updated,.stat-top,.stat-value small,.stat-hint,.empty-state,.empty-pop,.notification-item small,.group-identity small,.row-detail small,.checkline,.message-item small,.message-item-meta,.editor-fields label,.editor-fields label>small,.used-list small,.revision-list span,.revision-list p,.instance-card p,.instance-card small,.channel-item small,.subheading span,.playlist-item small,.inline-form span,.group-card>small,.group-card-bottom,.member-step strong small,.member-step p,td,td small,.incident-row p,.incident-row small,.hbars button,.chart-note,.chart-grid,.chart-table,.bar-wrap small,.aggregate-list>div,.guide-step p,.setting-row p,.detail-list dt,.gate p,.switch-label,.import-preview p,.wait-row,.timeline-list>div>span:nth-of-type(2),.timeline-list small,.setup-summary,.setup-check p,.runtime-channel>header small,.runtime-groups strong,.runtime-groups small,.runtime-groups p,.runtime-empty,.runtime-account small,.countdown-text,.countdown-note,.detail-list dd>small,.attempt-diagnostics>small,.timeline-list strong>small,.interval-mode>label,.interval-mode small,.interval-custom>label,.interval-custom>label small,.update-state>small,.update-version,.update-description,.update-actions>small,.update-migration,.update-browser,.incident-advice-row .incident-cause,.incident-advice h3,.incident-steps li,.incident-advice-row .incident-state,.incident-state b,.incident-technical,.setup-progress-heading p,.setup-progress>small,.setup-progress li small,.registration-guide ol,.registration-guide p,.account-card-head small,.account-card>p,.account-name-form label,.target-create label,.target-create label small,.target-item small,.connect-account small,.incident-recovery p,.activity-list small){color:#a6b7cf}
+html[data-theme=dark] :is(th,.list-caption,.popover-footer,.editor-note,.applied-line,.import-preview,.history-resolution,.runtime-channel>header,.runtime-groups,.attempt-diagnostics,.interval-mode,.interval-effective,.update-state,.group-readiness,.incident-technical dl,.setup-progress,.incident-recheck-result,.record-window-actions,.onboarding){background:#1c2c45;color:#b9cbe5}
+html[data-theme=dark] :is(.stat-icon,.group-mark,.empty-icon,.message-item-icon,.instance-icon,.channel-symbol,.order-number,.member-step>span,.guide-step>span,.account-avatar,.setup-progress li button>span,.tabbar span,.message-item em span,.incident-affected li,.playlist-item button){background:#293d5f;color:#b3cbff}
+html[data-theme=dark] :is(.text-action,.eyebrow,.popover-footer,.applied-line strong,.member-step em,.group-card-bottom b,.group-card-bottom>span,.target-item>span,.tabbar button.active,.list-caption b,.setting-row>span){color:#95b6ff}
+html[data-theme=dark] :is(.issue-banner,.callout,.draft-warning,.interval-sync,.update-next-step,.update-blockers,.binding-blockers){background:#362e20;border-color:#665337;color:#edcc91}
+html[data-theme=dark] :is(.issue-banner p,.issue-banner button,.callout span,.draft-warning span,.update-next-step strong,.update-blockers strong,.account-name-form p,.account-connection-state,.runtime-account .verification-help){color:#ddbc80}
+html[data-theme=dark] :is(.issue-icon,.alert-symbol){background:#594321;color:#ffd68f}
+html[data-theme=dark] :is(.status.warn,.level.WARN,.setup-status.warning){background:#3d321e;color:#f1c979}
+html[data-theme=dark] :is(.status.bad,.level.ERROR,.level.CRITICAL,.setup-status.error,.update-error,.danger-button){background:#402632;color:#ffb0b7;border-color:#734451}
+html[data-theme=dark] .danger-button:hover{background:#58303c}
+html[data-theme=dark] :is(.text-danger,.import-error,.interval-error,.target-error){color:#ffa9b3}
+html[data-theme=dark] .interval-custom input[aria-invalid=true]{background:#35222c;border-color:#cc7e85}
+html[data-theme=dark] :is(.status.good,.setup-status.ok,.guide-step>span.done,.alert-symbol.resolved,.setup-progress li button>span.done,.incident-resolution){background:#1b3b32;color:#8bdfb8}
+html[data-theme=dark] :is(.connection,.countdown-text.ready,.account-connection-state.verified,.runtime-account .verification-ok,.channel-indicator){color:#8bdfb8}
+html[data-theme=dark] .connection.offline{color:#f1c979}
+html[data-theme=dark] .status.muted{background:#2b3548;color:#b6c2d6}
+html[data-theme=dark] .level{background:#263959;color:#a8c5fa}
+html[data-theme=dark] .bars{background:repeating-linear-gradient(to top,#293951 0,#293951 1px,transparent 1px,transparent 34%)}
+html[data-theme=dark] .hbar-track{background:#2b3b55}
+html[data-theme=dark] .modal-backdrop{background:#030814b8}
+html[data-theme=dark] .flash{background:#2b456b;color:#f4f7fd;box-shadow:0 12px 35px #0008}
+html[data-theme=dark] .flash.error{background:#6a3442}
+html[data-theme=dark] .version-banner{background:#203554;border-color:#3d608f}
+html[data-theme=dark] :is(.onboarding p,.tabbar button,.breadcrumb,.icon-button,.mobile-menu){color:#a6b7cf}

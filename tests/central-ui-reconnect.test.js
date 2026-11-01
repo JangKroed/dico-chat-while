@@ -61,3 +61,8 @@ test('a failed event stream closes before recovery and ignores stale callbacks',
     const manual=subscribe(()=>{},()=>reconnects++);manual();instances[1].onerror();assert.equal(reconnects,1);
   }finally{if(previous===undefined)delete globalThis.EventSource;else globalThis.EventSource=previous}
 });
+
+test('an update reconnect preserves unsaved settings instead of reloading them away',()=>{
+  assert.equal(versionReloadDecision('0.4.6','0.4.7',true,'/settings',true),'banner');
+  assert.equal(versionReloadDecision('0.4.6','0.4.7',true,'/settings',false),'reload');
+});

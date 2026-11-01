@@ -18,6 +18,7 @@ test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·�
       const transport={connected:true,request:async message=>manager.bridge(message,hello.instanceId)};
       let executor;
       const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async v=>{stored=structuredClone(v.dicoCentral);}}},tabs:{get:async()=>({id:tabId,url:`https://discord.com/channels/${guildId}/${channelId}`}),sendMessage:async(id,m)=>{
+        if(m.type==='DICO_DRAFT_INSPECT')return{ok:true,draftText:'',draftMatches:false,unsupported:false,attachmentOrReply:false};
         if(m.type==='DICO_INSPECT')return {ok:true,draftMatches:true,cooldownMs:0,cooldownKnown:true};
         const allowed=await executor.canSend({id:m.delivery.id,phase:m.type==='DICO_PREPARE'?'prepare':'commit'},id);
         assert.equal(allowed,true,'현재 중앙 상태에서도 허가돼야 함');

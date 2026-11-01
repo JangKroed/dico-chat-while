@@ -305,6 +305,24 @@
     }
     return { ok: true, ...(target.coordinated?{coordinationVersion:1}:{}), ...slowmode(found[0]) };
   }
+  function inspectManagedDraft(target,delivery) {
+    if(!target?.managed||!target.coordinated||!matchesTarget(target))return{ok:false,code:'TARGET_MISMATCH',error:'관리 대상 채널에서만 초안을 확인할 수 있습니다.'};
+    if(!coordinatedAccountMatches(target))return{ok:false,code:'ACCOUNT_UNVERIFIED',error:'현재 로그인 계정을 확인할 수 없습니다.'};
+    const found=editors();
+    if(found.length!==1)return{ok:false,code:found.length?'EDITOR_AMBIGUOUS':'EDITOR_LOADING',error:'초안을 확인할 입력창이 하나여야 합니다.'};
+    const editor=found[0],content=editorContent(editor),form=editor.closest('form')||editor.parentElement;
+    return{ok:true,draftText:content.text,draftMatches:composerMatches(editor,delivery?.text??target.expectedText),unsupported:content.unsupported===true,attachmentOrReply:Boolean(form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]'))};
+  }
+  function inspectForDelivery(target,delivery) {
+    // Only an authenticated managed prepare can carry a locally backed-up CAS
+    // token. Ordinary inspect, legacy sends and commit never permit replacement.
+    if(delivery.phase!=='prepare'||!target.managed||!target.coordinated||typeof delivery.replaceExpectedDraft!=='string')return inspect(target);
+    const found=editors();
+    if(found.length!==1)return inspect(target);
+    const editor=found[0],content=editorContent(editor);
+    if(content.text!==delivery.replaceExpectedDraft&&!composerMatches(editor,delivery.text))return{ok:false,code:'DRAFT_MISMATCH',error:'보관 이후 초안이 변경되었습니다. 현재 초안을 보존하고 중지합니다.'};
+    return inspect({...target,messages:[...(target.messages||[]),delivery.replaceExpectedDraft]});
+  }
   const CONTENT_VERSION = '0.3.0';
   let composing = false;
   const compositionStart=()=>{composing=true},compositionEnd=()=>{composing=false};
@@ -562,6 +580,34 @@
     }
     return fail();
   }
+  async function waitForCommitCooldown(target,delivery,editor,trace,state) {
+    const maxWaitMs=21630000,mono=()=>globalThis.performance?.now() ?? Date.now();
+    for(;;){
+      const current=inspect(target),found=editors();
+      if(!current.ok)return{status:'blocked',code:current.code,error:current.error};
+      if(found.length!==1||found[0]!==editor||!editor.isConnected||composing||!composerMatches(editor,delivery.text))return{status:'blocked',code:'DRAFT_MISMATCH',error:'대기 중 입력창이나 준비한 문구가 변경되었습니다. 초안을 보존하고 중지합니다.'};
+      if(!current.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',draftPrepared:true,error:'Discord의 남은 대기 시간을 확인하지 못했습니다. 초안을 보존하고 중지합니다.'};
+      const now=Date.now(),monoNow=mono();
+      const elapsed=state.startedAt===undefined?0:now-state.startedAt,monoElapsed=state.monoStarted===undefined?0:monoNow-state.monoStarted;
+      if(elapsed<0||monoElapsed<0||elapsed>=maxWaitMs||monoElapsed>=maxWaitMs||Math.abs(elapsed-monoElapsed)>1000)return{status:'deferred',code:'COOLDOWN_WAIT_TIMEOUT',retryAfterMs:current.cooldownMs,draftPrepared:true,error:'Discord 대기 확인 시간이 만료되었습니다. 현재 초안과 차례를 보존합니다.'};
+      if(current.cooldownMs<=0){
+        if(state.waiting){
+          const progress=await chrome.runtime.sendMessage({type:'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',elapsedMs:elapsed,cooldownMs:0,maxWaitMs,enterAttempted:false});
+          if(progress?.allowed!==true)return{status:'blocked',code:'PRE_ENTER_WAIT_CANCELLED',error:'대기 해제 확인 중 발송이 중지되었습니다. 초안을 보존합니다.'};
+          state.waiting=false;
+        }
+        return null;
+      }
+      state.waiting=true;
+      state.startedAt??=now;state.monoStarted??=monoNow;
+      if(state.lastTraceAt===undefined||elapsed-state.lastTraceAt>=5000){state.lastTraceAt=elapsed;trace('slowmode-wait',{cooldownMs:current.cooldownMs,elapsedMs:elapsed,maxWaitMs});}
+      // This keeps the existing attempt alive and checks cancellation. It does
+      // not authorize Enter; strict authorization is requested after waiting.
+      const progress=await chrome.runtime.sendMessage({type:'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',elapsedMs:elapsed,cooldownMs:current.cooldownMs,maxWaitMs,enterAttempted:false});
+      if(progress?.allowed!==true)return{status:'blocked',code:'PRE_ENTER_WAIT_CANCELLED',error:'대기 중 발송이 중지되었거나 현재 시도의 연결이 만료되었습니다. 초안을 보존합니다.'};
+      await new Promise(resolve=>setTimeout(resolve,500));
+    }
+  }
   async function deliver(target, delivery) {
     const evidence={phase:delivery?.phase==='prepare'?'prepare':delivery?.phase==='commit'?'commit':'send',stage:'inspect',enterAttempted:false};
     const result=await performDelivery(target,delivery,evidence);
@@ -590,37 +636,45 @@
         }
         if (['multiple-matches','next-already-posted','foreign-draft'].includes(previous.reason)) return {status:'uncertain',error:'이전 전송 이후 게시 기록과 초안의 순서를 확정할 수 없습니다. 중복 방지를 위해 확인이 필요합니다.'};
       }
-      let result = inspect(target);
+      let result = inspectForDelivery(target,delivery);
       if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       if(delivery.phase!=='prepare'&&!result.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',error:'Discord의 남은 대기 시간을 읽지 못했습니다. 초안을 보존하고 중지합니다.'};
-      if (delivery.phase!=='prepare' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
+      if (delivery.phase!=='prepare' && delivery.phase!=='commit' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
       // Distinguish a blocked worker/permission reply from slow editor preparation.
       evidence.stage='authorize';
       trace('authorization-request');
       const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase });
       trace('authorization-response',{authorized:authorization?.allowed===true});
       if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
-      result = inspect(target);
+      result = inspectForDelivery(target,delivery);
       if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       let editor = editors()[0];
       originalEditor = editor;
-      if(delivery.phase!=='prepare') seenDeliveries.add(delivery.id);
-      if (seenDeliveries.size > 100) seenDeliveries.delete(seenDeliveries.values().next().value);
       if (delivery.phase==='commit') {
         if (!Number.isFinite(delivery.scheduledAt) || Date.now()<delivery.scheduledAt) return {status:'blocked',error:'아직 전송 예약 시각이 아닙니다.'};
         if (!composerMatches(editor,delivery.text)) return {status:'blocked',error:'준비한 문구가 변경되었습니다. 입력창을 보존하고 중지합니다.'};
         editor.focus();
         const selection=window.getSelection(), range=document.createRange();
         range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
-        evidence.stage='stable';
-        if(!await stableEditor(target,delivery.text,editor,500,trace,true)) return {status:'blocked',code:'COMMIT_EDITOR_UNSTABLE',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
-        evidence.stage='authorize';
-        const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
-        const finalAuthorization=await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'});
-        const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
-        const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-authorizationMonoStarted;
-        const staleAuthorization=delivery.strictAuthorization && (!Number.isFinite(finalAuthorization?.authorizedAt) || authorizationElapsed<0 || authorizationElapsed>2000 || authorizationMonoElapsed<0 || authorizationMonoElapsed>2000 || Math.abs(authorizationElapsed-authorizationMonoElapsed)>1000 || authorizationNow-finalAuthorization.authorizedAt<0 || authorizationNow-finalAuthorization.authorizedAt>2000);
-        if (!finalAuthorization?.allowed || staleAuthorization) return {status:'blocked',error:'전송 준비 후 중지 또는 지연된 승인 응답을 확인했습니다.'};
+        const cooldownWait={};
+        for(;;){
+          evidence.stage='stable';
+          const waiting=await waitForCommitCooldown(target,delivery,editor,trace,cooldownWait);
+          if(waiting)return waiting;
+          evidence.stage='stable';
+          if(!await stableEditor(target,delivery.text,editor,500,trace,true)) return {status:'blocked',code:'COMMIT_EDITOR_UNSTABLE',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
+          evidence.stage='authorize';
+          const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
+          const finalAuthorization=await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'});
+          const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
+          const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-authorizationMonoStarted;
+          const staleAuthorization=delivery.strictAuthorization && (!Number.isFinite(finalAuthorization?.authorizedAt) || authorizationElapsed<0 || authorizationElapsed>2000 || authorizationMonoElapsed<0 || authorizationMonoElapsed>2000 || Math.abs(authorizationElapsed-authorizationMonoElapsed)>1000 || authorizationNow-finalAuthorization.authorizedAt<0 || authorizationNow-finalAuthorization.authorizedAt>2000);
+          if (!finalAuthorization?.allowed || staleAuthorization) return {status:'blocked',error:'전송 준비 후 중지 또는 지연된 승인 응답을 확인했습니다.'};
+          const finalCooldown=slowmode(editor);
+          if(!finalCooldown.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',draftPrepared:true,error:'최종 승인 후 대기 시간을 확인하지 못했습니다. 초안을 보존합니다.'};
+          if(finalCooldown.cooldownMs>0)continue;
+          break;
+        }
         trace('prepared-verified');
       } else {
         evidence.stage='prepare';
@@ -633,13 +687,15 @@
         // Let Slate observe focus/selection before delivering a paste event.
         // Native DOM insertion can leave visible text outside Slate's model.
         await new Promise(resolve => setTimeout(resolve, 100));
-        result = inspect(target);
+        result = inspectForDelivery(target,delivery);
         if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
         if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
           return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
         }
         const live = editors()[0];
         if (live !== editor) return {status:'blocked',error:'입력창이 교체되었습니다. 다음 시작 때 다시 확인해 주세요.'};
+        result=inspectForDelivery(target,delivery);
+        if(!result.ok)return{status:'blocked',...(result.code?{code:result.code}:{}),error:result.error};
         const reuseDraft = composerMatches(editor,delivery.text);
         trace(reuseDraft ? 'draft-reused' : 'draft-replaced');
         if (reuseDraft) {
@@ -647,6 +703,11 @@
           range.selectNodeContents(editor);
           range.collapse(false);
           selection.removeAllRanges(); selection.addRange(range);
+        } else {
+          // Authorization may yield while the user moves the cursor. After the
+          // final CAS check, select the current whole draft without another await.
+          const range=document.createRange();range.selectNodeContents(editor);
+          selection.removeAllRanges();selection.addRange(range);
         }
         const clipboardData = new DataTransfer();
         clipboardData.setData('text/plain', delivery.text);
@@ -697,6 +758,9 @@
       trace('before-enter');
       const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
       const keyup = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+      // The latch records an actual submission attempt, never mere waiting.
+      seenDeliveries.add(delivery.id);
+      if(seenDeliveries.size>100)seenDeliveries.delete(seenDeliveries.values().next().value);
       evidence.stage='enter';evidence.enterAttempted=true;
       editor.dispatchEvent(keydown);
       editor.dispatchEvent(keyup);
@@ -726,6 +790,7 @@
       respond(result); return false;
     }
     if (message?.type === 'DICO_CHANNEL_LIMIT') { detectSlowmodeSetting(message.target).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
+    if(message?.type==='DICO_DRAFT_INSPECT'){respond(inspectManagedDraft(message.target,message.delivery));return false;}
     if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>{const result=inspect(message.target),found=editors();const draftMatches=result.ok===true&&found.length===1&&typeof message.target?.expectedText==='string'&&composerMatches(found[0],message.target.expectedText);respond({...result,draftMatches,diagnostics:{...traceSnapshot(message.target,message.target.expectedText || ''),contentVersion:CONTENT_VERSION}});}); return true; }
     if (message?.type === 'DICO_PREPARE') { deliver(message.target,{...message.delivery,phase:'prepare'}).then(respond); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }

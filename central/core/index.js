@@ -4,6 +4,7 @@ import { CentralError, requireValue as ensure, text, body, duration, tags, expec
 export { CentralError } from './validation.js';
 
 const ACTIVE = new Set(['preparing','permitted','unknown']);
+const MAX_PRE_ENTER_WAIT_MS=21_630_000;
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
@@ -495,10 +496,31 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,commands:commands(i.id)};
       }
       const i=ensureSession(message,instanceId);
+      if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&ACTIVE.has(a.status))};
+      if(message.type==='CONNECTION_PROGRESS'){
+        ensure(['account','channels','configuration','blocked'].includes(message.stage)&&Number.isInteger(message.total)&&message.total>=0&&message.total<=100&&Number.isInteger(message.completed)&&message.completed>=0&&message.completed<=message.total,'VALIDATION','Invalid connection progress.');
+        const allowedReasons=new Set(['LEGACY_UNRESOLVED','ACCOUNT_UNVERIFIED','ATTEMPT_UNRESOLVED','TARGET_MISMATCH','CHANNEL_NOT_READY','CONTENT_UNAVAILABLE']);
+        i.connectionProgress={stage:message.stage,total:message.total,completed:message.completed,at:now(),...(allowedReasons.has(message.reasonCode)?{reasonCode:message.reasonCode}:{})};
+        event('connection.progress',{instanceId:i.id,...i.connectionProgress});return{ok:true};
+      }
+      if(message.type==='DELIVERY_WAIT'){
+        if(clockGap()){suspendForClockGap();lastWall=now();lastMono=monotonicNow();return{allowed:false};}
+        const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
+        if(!a||a.status!=='permitted'||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return{allowed:false};
+        const g=get('groups',a.groupId),c=get('channels',a.bindingId);
+        if(state.service.status!=='ready'||g.status!=='running'||g.controlIntent||g.activeAttemptId!==a.id||g.runId!==a.runId||c.configVersion!==a.configVersion||c.tabId!==a.tabId||now()-a.permittedAt>MAX_PRE_ENTER_WAIT_MS)return{allowed:false};
+        try{eligibleChannel(c);}catch{return{allowed:false};}
+        const waiting=message.cooldownMs>0,changed=Boolean(a.preEnterWaiting)!==waiting;
+        a.preEnterWaiting=waiting;a.preEnterWaitObservedAt=now();
+        if(!waiting)a.enterReadyAt=now();
+        g.waitReason=waiting?'discord_cooldown':'awaiting_result';
+        if(changed)event('delivery.pre_enter_wait',{attemptId:a.id,groupId:g.id,instanceId:i.id,waiting,cooldownMs:message.cooldownMs});
+        return{allowed:true};
+      }
       if(message.type==='AUTHORIZE_ENTER'){
         if(clockGap()){suspendForClockGap();lastWall=now();lastMono=monotonicNow();return{allowed:false};}
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
-        if(!a||a.status!=='permitted'||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion)return{allowed:false};
+        if(!a||a.status!=='permitted'||a.preEnterWaiting||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion)return{allowed:false};
         const g=state.groups.find(g=>g.id===a.groupId),c=state.channels.find(c=>c.id===a.bindingId);
         if(state.service.status!=='ready'||!g||g.status!=='running'||g.controlIntent||g.runId!==a.runId||g.activeAttemptId!==a.id||!c||c.configVersion!==a.configVersion||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||c.tabId!==a.tabId)return{allowed:false};
         try{eligibleChannel(c);}catch{return{allowed:false};}
@@ -614,7 +636,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         eligibleChannel(c);ensure(message.accountId===a.accountId&&message.channelId===a.channelId&&message.configVersion===a.configVersion&&c.configVersion===a.configVersion&&message.draftClear===true,'PREPARATION_MISMATCH','Account, channel, draft or configuration did not match.',409);
         if(a.earlyPrepare){
           ensure(Number.isSafeInteger(message.cooldownMs)&&message.cooldownMs>=0&&message.cooldownMs<=31_536_000_000,'VALIDATION','A fresh Discord cooldown observation is required.');
-          ensure(now()-a.createdAt<=120000,'PREPARATION_EXPIRED','Input preparation expired. Stop and inspect the preserved draft.',409);
+          ensure(now()-a.createdAt<=MAX_PRE_ENTER_WAIT_MS,'PREPARATION_EXPIRED','Input preparation expired. Stop and inspect the preserved draft.',409);
           a.preparedObservedAt=now();
           const wait=Math.max(0,Math.max(g.nextMono||0,c.nextMono||0)-monotonicNow(),message.cooldownMs);
           if(wait>0){g.waitReason=message.cooldownMs>0?'discord_cooldown':'scheduled_input_ready';return{ok:true,permitIssued:false,retryAfterMs:Math.min(1000,Math.max(100,wait))};}
@@ -637,14 +659,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.executionBlocked===true)a.executionBlocked=true;
         if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
         if(message.outcome==='unknown'){
-          const allowedReasons=new Set(['draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED']);
+          const allowedReasons=new Set(['draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
         if(message.outcome==='confirmed')ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
         else {
           ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must confirm the old attempt is blocked.',409);
-          if(['deferred','COOLDOWN_UNVERIFIED'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent){g.status='needs_review';g.waitReason='discord_cooldown';}}
+          if(['deferred','blocked','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED'].includes(message.reasonCode))a.reasonCode=message.reasonCode;
+          if(['deferred','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent){g.status='needs_review';g.waitReason='discord_cooldown';}}
         }
         return{ok:true,attempt:publicAttempt(finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs}))};
       }
@@ -682,7 +705,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         problem.status='resolved';problem.resolvedAt=now();event('incident.resolved',{incidentId:problem.id,instanceId:i.id,reasonCode:'connection_recovered'});
       }
     }
-    for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status)&&(a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>120000||wall-(a.preparedObservedAt||a.createdAt)>30000:wall-(a.permittedAt||a.createdAt)>30000)))markUnknown(a,'result_timeout');
+    for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status))){
+      const stale=a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preparedObservedAt||a.createdAt)>30000:a.preEnterWaiting?wall-a.permittedAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preEnterWaitObservedAt||a.permittedAt)>30000:wall-(a.enterReadyAt||a.permittedAt||a.createdAt)>30000;
+      if(stale)markUnknown(a,'result_timeout');
+    }
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
     if(state.service.status!=='ready')return{ok:true};
     for(const g of state.groups.filter(g=>g.status==='running'&&!g.activeAttemptId&&!g.controlIntent)){
@@ -720,7 +746,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     return{...clone(dto),nextEligibleAt};
   }
-  function publicAttempt(a){const{sessionId,body,readyMono,preparedObservedAt,permitId,...dto}=a;return clone(dto);}
+  function publicAttempt(a){const{sessionId,body,readyMono,preparedObservedAt,preEnterWaitObservedAt,permitId,...dto}=a;return clone(dto);}
   function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}
   function analytics({from=0,to=Number.MAX_SAFE_INTEGER,groupId,instanceId,accountId,channelId}={}){
     const matches=a=>!a.pruned&&(!groupId||a.groupId===groupId)&&(!instanceId||a.instanceId===instanceId)&&(!accountId||a.accountId===accountId)&&(!channelId||a.channelId===channelId);

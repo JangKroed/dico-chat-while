@@ -13,6 +13,8 @@ export function unknownDeliveryCause(reason?:string) {
     PREPARE_EDITOR_UNSTABLE:'입력 준비 중 문구나 입력창의 안정 상태를 확인하지 못했습니다. 남은 초안을 보존하고 실제 게시 여부를 별도로 확인해야 합니다.',
     CONTENT_EXCEPTION_AFTER_ENTER:'Enter 이벤트 요청 이후 처리 중 예외가 기록되어 게시 결과를 확인하지 못했습니다. Enter 요청 기록만으로 실제 게시를 확정할 수 없습니다.',
     CONTENT_EXCEPTION_BEFORE_ENTER:'Enter 이벤트 요청 전 확인 단계에서 입력창 처리 예외가 기록됐습니다. 이 기록만으로 실제 미발송을 확정하지 말고 게시 내역을 확인하세요.',
+    COOLDOWN_WAIT_TIMEOUT:'Discord 제한 해제 대기가 지원 시간을 넘겨 초안을 보존하고 중단했습니다.',
+    PRE_ENTER_WAIT_CANCELLED:'실제 발송 전 대기 중 중지 또는 연결·설정 변화를 확인했습니다.',
     COOLDOWN_UNVERIFIED:'Discord 화면의 실제 남은 대기 시간을 확인하지 못했습니다. 제한이 해제됐다고 판단하지 않고 초안과 실행 상태를 보존했습니다.',
     PREPARE_WAIT_TIMEOUT:'입력 준비 대기가 만료되어 현재 상태를 다시 확인해야 합니다. 남은 초안과 실제 게시 내역을 확인하기 전에는 다시 보내지 마세요.',
     TARGET_MISMATCH:'전송용 탭의 실제 채널이 설정한 대상과 일치하지 않았습니다. 대상 채널과 실제 게시 내역을 확인하세요.',
