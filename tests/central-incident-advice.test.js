@@ -58,3 +58,16 @@ test('direct incident metadata still resolves target and browser after old comma
   const advice=incidentAdvice({id:'incident',code:'command_rejected',instanceId:'browser',targetId:'target',commandType:'OPEN_CHANNEL',rejectionCode:'OPEN_CHANNEL_FAILED'},snapshot());
   assert.equal(advice.page,'channels');assert.deepEqual(advice.affected,['브라우저: 업무 Brave','채널: #모집방']);
 });
+test('unknown-delivery advice uses retained-draft cause and the configured account alias',()=>{
+  const s=snapshot();s.accounts=[{id:'account',instanceId:'browser',accountId:'123',name:'내 모집 계정'}];s.attempts=[{id:'attempt',status:'unknown',reasonCode:'draft-retained',accountId:'123',instanceId:'browser'}];
+  const advice=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
+  assert.match(advice.cause,/초안이 남았다는 사실만으로 미발송으로 판단할 수 없습니다/);
+  assert.ok(advice.affected.includes('계정: 내 모집 계정'));
+});
+test('cooldown and prepare timeout rejections explain recovery without declaring safe resend',()=>{
+  const cooldown=incidentAdvice({id:'cooldown',code:'command_rejected',rejectionCode:'COOLDOWN_UNVERIFIED'},snapshot());
+  assert.equal(cooldown.knownReason,true);assert.equal(cooldown.page,'channels');assert.match(cooldown.cause,/실제 제한 해제를 판단하지 않습니다/);
+  const timeout=incidentAdvice({id:'timeout',code:'command_rejected',rejectionCode:'PREPARE_WAIT_TIMEOUT'},snapshot());
+  assert.equal(timeout.knownReason,true);assert.equal(timeout.page,'groups');assert.match(timeout.cause,/대기.*시간 변화/);
+  for(const advice of [cooldown,timeout])assert.ok(advice.steps.some(step=>step.includes('다시 보내지 마세요')));
+});

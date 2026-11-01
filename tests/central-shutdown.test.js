@@ -8,7 +8,7 @@ test('종료 표식을 저장하지 못해도 HTTP 서비스와 허가 엔진은
     import {tmpdir} from 'node:os';import {join} from 'node:path';
     import {startCentralRuntime} from './central/runtime/main.mjs';
     const directory=await mkdtemp(join(tmpdir(),'dico-close-failure-'));
-    const runtime=await startCentralRuntime({directory});
+    const runtime=await startCentralRuntime({directory,port:0});
     await mkdir(join(directory,'shutdown.json'));
     let closeError=false,closed=false;
     try{await runtime.close();}catch{closeError=true;}

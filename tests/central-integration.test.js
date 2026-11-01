@@ -18,6 +18,7 @@ test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·�
       const transport={connected:true,request:async message=>manager.bridge(message,hello.instanceId)};
       let executor;
       const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async v=>{stored=structuredClone(v.dicoCentral);}}},tabs:{get:async()=>({id:tabId,url:`https://discord.com/channels/${guildId}/${channelId}`}),sendMessage:async(id,m)=>{
+        if(m.type==='DICO_INSPECT')return {ok:true,draftMatches:true,cooldownMs:0,cooldownKnown:true};
         const allowed=await executor.canSend({id:m.delivery.id,phase:m.type==='DICO_PREPARE'?'prepare':'commit'},id);
         assert.equal(allowed,true,'현재 중앙 상태에서도 허가돼야 함');
         if(m.type==='DICO_PREPARE')return {status:'prepared'};
@@ -58,7 +59,7 @@ test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·�
 test('실제 loopback 세션·UI·SQLite 단일 실행과 정상 종료 표식을 검증한다',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'dico-live-runtime-'));let runtime;
   t.after(async()=>{await runtime?.close();await rm(directory,{recursive:true,force:true});});
-  runtime=await startCentralRuntime({directory});
+  runtime=await startCentralRuntime({directory,port:0});
   assert.equal((await fetch(runtime.url+'/api/snapshot')).status,401);
   assert.equal((await fetch(runtime.url)).status,200);
   await assert.rejects(()=>acquireLock(directory));

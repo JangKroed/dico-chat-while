@@ -1,5 +1,17 @@
 const fresh=()=>({version:1,instanceId:null,sessionId:null,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},lastError:null});
-export function createCentralExecutor({chrome,transport,openChannel,now=Date.now,monotonicNow=()=>performance.now()}) {
+const deliveryCodes=new Set(['TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED']);
+const deliveryStatuses=new Set(['uncertain','draft-retained','blocked','deferred','confirmed','failed','no_response','reconcile_inconclusive','executor_result']);
+const safeReason=code=>deliveryCodes.has(code)||deliveryStatuses.has(code)?code:undefined;
+function deliveryEvidence(value) {
+  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
+  const evidence={};
+  if(['prepare','commit','send'].includes(value.phase))evidence.phase=value.phase;
+  if(['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage))evidence.stage=value.stage;
+  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'])if(typeof value[key]==='boolean')evidence[key]=value[key];
+  return Object.keys(evidence).length?evidence:undefined;
+}
+const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
+export function createCentralExecutor({chrome,transport,openChannel,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
@@ -29,8 +41,27 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
     }catch{return false;}
   }
   async function report(a) {
-    await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:a.result?.reasonCode || 'executor_result'});
+    const evidence=deliveryEvidence(a.result?.deliveryEvidence);
+    await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
+  }
+  async function awaitPrepared(a) {
+    const started=now(),monoStarted=monotonicNow();
+    const stopped=()=>!transport.connected||state.emergencyStopped||a.sessionId!==state.sessionId||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId)||state.stoppedGroups[a.groupId]||volatileStops.has(a.groupId);
+    for(;;){
+      if(stopped())return;
+      const elapsed=now()-started,monoElapsed=monotonicNow()-monoStarted;
+      if(elapsed<0||monoElapsed<0||elapsed>120000||monoElapsed>120000||Math.abs(elapsed-monoElapsed)>2000)throw Object.assign(Error('입력 준비 대기가 만료되었습니다. 남은 초안과 채널 상태를 확인하세요.'),{code:'PREPARE_WAIT_TIMEOUT'});
+      if(state.bindings[a.bindingId]?.configVersion!==a.configVersion||!await tabMatches(a))throw Object.assign(Error('대기 중 채널 또는 구성이 변경되었습니다.'),{code:'CONFIG_MISMATCH'});
+      let seen;try{seen=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_INSPECT',target:target(a)});}catch{throw Object.assign(Error('대기 중 Discord 탭의 연결을 확인하지 못했습니다.'),{code:'CONTENT_UNAVAILABLE'});}
+      if(stopped())return;
+      if(seen?.ok!==true)throw Object.assign(Error('대기 중 계정과 채널 상태를 확인하지 못했습니다.'),{code:deliveryCodes.has(seen?.code)?seen.code:'PREPARE_REJECTED'});
+      if(seen.draftMatches!==true)throw Object.assign(Error('준비한 초안이 변경되었습니다. 남은 초안을 확인하세요.'),{code:'DRAFT_MISMATCH'});
+      if(seen.cooldownKnown!==true||!Number.isSafeInteger(seen.cooldownMs)||seen.cooldownMs<0||seen.cooldownMs>21600000)throw Object.assign(Error('Discord의 남은 대기 시간을 확인하지 못했습니다.'),{code:'COOLDOWN_UNVERIFIED'});
+      const response=await request({type:'PREPARED',attemptId:a.attemptId,configVersion:a.configVersion,accountId:a.accountId,channelId:a.channelId,draftClear:true,cooldownMs:seen.cooldownMs});
+      if(response?.permitIssued!==false||!Number.isFinite(response.retryAfterMs)||response.retryAfterMs<=0)return;
+      await wait(Math.min(1000,Math.max(500,response.retryAfterMs)));
+    }
   }
   async function perform(c) {
     const p=c.payload || {};
@@ -61,7 +92,7 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
         a.phase='prepared';await save();
       }
       if(volatileStops.has(a.groupId) || state.stoppedGroups[a.groupId])throw Error('중지 요청으로 준비를 취소했습니다.');
-      await request({type:'PREPARED',attemptId:a.attemptId,configVersion:a.configVersion,accountId:a.accountId,channelId:a.channelId,draftClear:true});await ack(c,'applied');
+      await awaitPrepared(a);await ack(c,'applied');
     } else if(c.type==='COMMIT_PERMIT') {
       const a=state.attempts[p.attemptId];
       if(!a || !matches(a,p) || a.runId!==p.runId || state.stoppedRuns[p.runId] || volatileStoppedRuns.has(p.runId) || state.emergencyStopped || a.sessionId!==state.sessionId || !p.permitId)throw Error('발송 허가가 준비한 문구와 일치하지 않거나 중지된 실행입니다.');
@@ -72,10 +103,10 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
         let result;
         try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVER',target:target(a),delivery:delivery(a)});}catch{result={status:'uncertain'};}
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')) {
-          a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationMs:result.timing?.confirmationMs};
+          a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationMs:result.timing?.confirmationMs,...diagnostic(result)};
         } else if(result?.status==='blocked' || result?.status==='deferred') {
-          a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true,reasonCode:result.status};
-        } else {a.phase='unknown';a.result={outcome:'unknown',reasonCode:result?.status || 'no_response'};}
+          a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true,...diagnostic(result)};
+        } else {a.phase='unknown';a.result={outcome:'unknown',...diagnostic(result)};}
         await save();await report(a);await ack(c,'applied');
       }
     } else if(c.type==='CONTROL') {
@@ -93,6 +124,7 @@ export function createCentralExecutor({chrome,transport,openChannel,now=Date.now
         const a=prior || {...p,startedAt:now(),phase:'unknown'};
         let result;try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_RECONCILE',target:target(a),delivery:delivery(a)});}catch{}
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId};state.attempts[p.attemptId]=a;await save();await report(a);}
+        else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});
         await ack(c,'applied');
       }

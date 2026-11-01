@@ -1,4 +1,6 @@
 import type { Incident, Snapshot } from './api'
+import {accountLabel} from './account-label.ts'
+import {unknownDeliveryCause} from './delivery-evidence.ts'
 
 type AdvicePage='connections'|'channels'|'history'|'groups'|'settings'
 export type IncidentAdvice={title:string;cause:string;steps:string[];page:AdvicePage;actionLabel:string;knownReason:boolean;affected:string[];commandType?:string;rejectionCode?:string}
@@ -24,6 +26,8 @@ const remedies:Record<string,Remedy>={
   TARGET_MISMATCH:{title:'전송용 Discord 탭의 채널이 바뀌었습니다',cause:'전송용 탭의 실제 채널이 설정한 대상과 일치하지 않습니다.',steps:['해당 브라우저에서 전송용 Discord 탭의 URL과 로그인 계정을 확인하세요.','채널 설정에서 대상 채널을 다시 연결하고 검증 결과를 기다리세요.','미확인 시도가 있으면 실행 기록에서 실제 게시 내역을 먼저 확인하세요.'],page:'channels',actionLabel:'대상 채널 확인'},
   ATTACHMENT_OR_REPLY:{title:'Discord 입력창의 첨부·답장 상태를 정리하세요',cause:'입력창에서 첨부파일 또는 답장 상태가 감지되어 요청이 거절됐습니다.',steps:['해당 Discord 탭에서 첨부파일·답장·작성 중인 초안을 확인하세요.','필요한 내용을 따로 보관한 뒤 직접 첨부·답장 상태를 정리하세요.','채널 설정의 대상과 메시지 적용 상태를 확인하세요.'],page:'channels',actionLabel:'채널·메시지 확인'}
 }
+remedies.COOLDOWN_UNVERIFIED={title:'Discord 실제 남은 대기 시간을 확인해야 합니다',cause:'Discord 화면의 남은 대기 시간을 신뢰할 수 있게 읽지 못해 입력 준비 요청을 중단했습니다. 설정된 슬로우 모드만으로 실제 제한 해제를 판단하지 않습니다.',steps:['해당 브라우저의 전송용 Discord 탭에서 서버 채널·입력창과 남은 대기 표시를 확인하세요.','Discord의 대기 제한이 실제로 해제되는지 확인하세요. 계속 읽히지 않으면 필요한 초안을 보관한 뒤 Discord 탭을 새로고침하고 계정·채널을 다시 검증하세요.','관리 프로그램과 확장이 같은 최신 상태인지 확인하세요.','미확인 시도는 전체 중지·적용 확인 후 실제 Discord 게시 내역을 확인하세요. 확인되지 않은 시도를 다시 보내지 마세요.'],page:'channels',actionLabel:'채널·대기 상태 확인'}
+remedies.PREPARE_WAIT_TIMEOUT={title:'입력 준비 대기가 만료됐습니다',cause:'입력 준비 대기가 허용된 범위를 넘었거나 시간 변화가 감지되어 중단됐습니다. 남은 초안과 실행 결과를 다시 확인해야 합니다.',steps:['그룹의 현재 차례와 전송용 Discord 탭의 로그인 계정·채널·대기 표시를 확인하세요.','필요한 초안을 보관하세요. 화면 로딩이나 대기 표시가 멈춰 있으면 Discord 탭을 새로고침하고 채널을 다시 검증하세요.','그룹을 중지하고 모든 확장의 확인 응답을 기다리세요. 미확인 시도는 실제 Discord 게시 내역으로 확인한 뒤 실행 기록에서 처리하세요.','게시 여부와 적용 상태가 확인되기 전에는 같은 문구를 다시 보내지 마세요.'],page:'groups',actionLabel:'그룹·준비 상태 확인'}
 remedies.OPEN_CHANNEL_UNSUPPORTED=remedies.EXTENSION_UPDATE_REQUIRED
 
 export function isIncidentOpen(i:Incident) {return !i.resolvedAt&&!['resolved','closed'].includes(String(i.status||''))}
@@ -40,16 +44,17 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
   const guildId=text(i.guildId)||text(payload?.guildId)||binding?.guildId||group?.guildId,channelId=text(i.channelId)||text(payload?.channelId)||binding?.channelId||group?.channelId
   const targetId=text(i.targetId)||text(payload?.targetId)
   const target=s.targets?.find(t=>t.id===targetId||Boolean(guildId&&channelId&&t.guildId===guildId&&t.channelId===channelId))
-  const affected=[...(instance?['브라우저: '+instance.name]:instanceId?['브라우저: '+instanceId]:[]),...(groups.length?groups.map(g=>'그룹: '+g.name):groupId?['그룹: '+groupId]:[]),...(target?['채널: #'+target.name]:binding?['채널: #'+binding.name]:channelId?['채널 ID: '+channelId]:[])]
+  const accountId=text(i.accountId)||text(payload?.accountId)||binding?.accountId||attempt?.accountId
+  const affected=[...(instance?['브라우저: '+instance.name]:instanceId?['브라우저: '+instanceId]:[]),...(accountId?['계정: '+accountLabel(s,{accountId,instanceId})]:[]),...(groups.length?groups.map(g=>'그룹: '+g.name):groupId?['그룹: '+groupId]:[]),...(target?['채널: #'+target.name]:binding?['채널: #'+binding.name]:channelId?['채널 ID: '+channelId]:[])]
   const commandType=text(i.commandType)||text(command?.type),rejectionCode=text(i.rejectionCode)||text(command?.rejectionCode)
   let remedy:Remedy,knownReason=false
   if(i.code==='command_rejected'){
     const known=rejectionCode?remedies[rejectionCode]:undefined
-    if(known){remedy=known;knownReason=true}
+    if(known){remedy={...known};knownReason=true;if(rejectionCode==='COOLDOWN_UNVERIFIED'&&binding&&typeof binding.slowmodeObservedAt==='number')remedy.cause+=` 마지막으로 감지한 슬로우 모드는 ${Math.ceil(binding.slowmodeMs/1000)}초이며, 현재 남은 대기 시간을 확인했다는 뜻은 아닙니다.`}
     else if(commandType==='CONTROL')remedy={title:'중지·일시정지 적용을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 제어 명령이 적용되지 않았으므로 중지 완료로 판단할 수 없습니다.',steps:controlSteps,page:'groups',actionLabel:'그룹·중지 상태 확인'}
     else remedy={title:'확장 요청을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 현재 기록만으로 초안·계정·버전 등의 원인을 단정할 수 없습니다.',steps:['아래 대상 브라우저와 확장 상태를 확인하세요.','진행 중·미확인 시도가 있으면 전체 중지를 요청하고 실제 Discord 게시 내역을 확인하세요. 중지만으로 미발송 여부를 판단하지 마세요.','관리 프로그램과 모든 확장을 업데이트하고 필요한 초안을 보관한 뒤 Discord를 새로고침하세요. 같은 문제가 반복되면 새로 기록된 거절 사유를 확인하세요.'],page:attempt?.status==='unknown'?'history':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'channels':'connections',actionLabel:attempt?.status==='unknown'?'미확인 실행 기록 확인':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'채널·적용 상태 확인':'계정·브라우저 확인'}
   }else if(i.code==='delivery_unknown'){
-    remedy={title:'실제 Discord 게시 여부를 확인해야 합니다',cause:'발송 시도의 실제 게시 여부가 확정되지 않아 자동 진행이 멈췄습니다.',steps:['전체 중지를 요청하고 확장의 실행 차단 확인을 기다리세요.','해당 계정·채널의 실제 Discord 게시 내역을 확인하세요. 중지와 실행 차단은 과거 미발송의 증거가 아닙니다.','실행 기록에서 게시된 메시지 ID를 입력하거나 실제 미발송을 확인한 경우에만 결과를 확정하세요. 확인되지 않은 시도를 다시 보내지 마세요.'],page:'history',actionLabel:'미확인 실행 기록 확인'};knownReason=true
+    remedy={title:'실제 Discord 게시 여부를 확인해야 합니다',cause:unknownDeliveryCause(attempt?.reasonCode||text(i.reasonCode)),steps:['전체 중지를 요청하고 확장의 실행 차단 확인을 기다리세요.','해당 계정·채널의 실제 Discord 게시 내역을 확인하세요. 중지와 실행 차단은 과거 미발송의 증거가 아닙니다.','실행 기록에서 게시된 메시지 ID를 입력하거나 실제 미발송을 확인한 경우에만 결과를 확정하세요. 확인되지 않은 시도를 다시 보내지 마세요.'],page:'history',actionLabel:'미확인 실행 기록 확인'};knownReason=true
   }else if(i.code==='connection_lost'){
     remedy={title:'브라우저 연결이 끊겼습니다',cause:'중앙 관리 프로그램이 해당 브라우저의 연결을 유지하지 못했습니다.',steps:['해당 브라우저와 DICO 확장이 실행 중인지 확인하고 관리 프로그램에 다시 연결하세요.','계정 등록과 채널 검증 상태를 확인하세요.','진행 중·미확인 발송은 실제 Discord 게시 내역을 확인한 뒤 실행 기록에서 처리하세요.'],page:'connections',actionLabel:'브라우저 연결 확인'};knownReason=true
   }else if(i.code==='account_mismatch'){

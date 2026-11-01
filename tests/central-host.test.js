@@ -101,7 +101,7 @@ test('native host returns correlated result and delivers HELLO commands', async 
 
 test('native stdio reaches the real loopback service and closes its session', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dico-host-live-'));
-  const runtime = await startCentralRuntime({ directory: dir });
+  const runtime = await startCentralRuntime({ directory: dir, port:0 });
   try {
     const input = new PassThrough(), output = new PassThrough();
     const packets = readPackets(output);

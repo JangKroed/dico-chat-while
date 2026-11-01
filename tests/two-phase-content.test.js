@@ -4,20 +4,22 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0}={}) {
+function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,throwAfterEnter=false,prepareDelay=0,lateCooldown=null}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  const nodes=[],events=[],traces=[];
- const form={querySelector:()=>null,querySelectorAll:()=>cooldown?[{textContent:cooldown,getClientRects:()=>[1]}]:[]};
+ const form={querySelector:()=>null,querySelectorAll:()=>cooldown?(Array.isArray(cooldown)?cooldown:[cooldown]).map(textContent=>({textContent,getClientRects:()=>[1]})):[]};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=editor;this.focusNode=editor;this.isCollapsed=range.collapsed}};
  const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>form,contains:n=>n===editor,focus(){document.activeElement=editor},dispatchEvent(event){
   events.push({type:event.type,at:clock});
-  if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;}
+  if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;if(prepareDelay)nextDelay=prepareDelay;}
   if(event.type==='keydown'){
+   if(ignoreEnter)return true;
    assert.equal(editor.innerText.trim(),convertAliases?delivery.text.replaceAll(emojiName,emojiValue):delivery.text);event.defaultPrevented=true;editor.innerText='';
-   nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:'A',closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
+   nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:renderMessage(delivery.text),closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
   }
+  if(event.type==='keyup'&&throwAfterEnter)throw Error('Synthetic post-Enter DOM failure');
  }};
  const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:sel=>sel.includes('panels')?{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
  const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
@@ -40,11 +42,11 @@ function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiN
   }});
   editor.nodeType=1;editor.tagName='DIV';
  }
- const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)};
+ const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)&&!confirmation};
  const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2)clock+=authorizationLag;return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
@@ -203,4 +205,73 @@ test('지연 중 초안 변경·계속되는 검사 지연은 자동 전송으�
   assert.equal((await r.request('DICO_DELIVER')).status,'blocked');
   assert.equal(r.events.some(e=>e.type==='keydown'),false);
  }
+});
+
+test('중앙 전용 창 준비 중 한 번 지연되면 새 안정 구간만 확인하고 Enter 없이 준비한다',async()=>{
+ const r=rig({managed:true,prepareDelay:7900});
+ const result=await r.request('DICO_PREPARE');assert.equal(result.status,'prepared');
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+ assert.ok(r.traces.some(t=>t.stage==='stability-timer-delayed'));
+ assert.equal(result.deliveryEvidence.phase,'prepare');assert.equal(result.deliveryEvidence.enterAttempted,false);
+});
+
+test('두 번째 순환의 긴 Markdown·이모지는 실제 작성자와 새 메시지 증거로 확인한다',async()=>{
+ const message='### 한글 공지 :moneybag:\n- __상담 문구__ **1600** | 반타임 :moneybag:**800**\n- 추가 설명 '.repeat(5).trim();
+ const render=text=>text.replaceAll(':moneybag:','💰').replace(/^### /gm,'').replace(/^- /gm,'').replaceAll('__','').replaceAll('**','');
+ const r=rig({managed:true,structured:true,message,emojiName:':moneybag:',emojiValue:'💰',convertAliases:true,confirmation:true,renderMessage:render,loggedUser:'123456789012345678'});r.target.coordinated=true;
+ for(let turn=0;turn<2;turn++){
+  Object.assign(r.delivery,{id:'long-cycle-'+turn,startedAt:r.now(),scheduledAt:r.now()+3000});
+  assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(Math.max(0,r.delivery.scheduledAt-r.now()));
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+  assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(result.deliveryEvidence.matchingMessage,true);
+ }
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.equal(r.events.filter(e=>e.type==='paste').length,2);
+});
+
+test('Enter가 무시되어 긴 초안이 남으면 증거만 반환하고 Enter를 다시 누르지 않는다',async()=>{
+ const message='### 제목 💰\n- __설명__ **1600** '.repeat(8).trim();
+ const r=rig({managed:true,message,ignoreEnter:true});await r.request('DICO_PREPARE');r.tick(3000);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'draft-retained');assert.equal(result.code,'DELIVERY_DRAFT_RETAINED');
+ assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(result.deliveryEvidence.composerRetained,true);assert.equal(result.deliveryEvidence.newMessage,false);
+ assert.equal(r.editor.innerText,message);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ assert.equal((await r.request('DICO_DELIVER')).status,'uncertain');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ assert.equal(JSON.stringify(result.deliveryEvidence).includes('1600'),false);
+});
+
+test('Enter 시도 이후 DOM 예외는 미발송으로 단정하지 않고 중복 요청도 차단한다',async()=>{
+ const r=rig({managed:true,throwAfterEnter:true});await r.request('DICO_PREPARE');r.tick(3000);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');assert.equal(result.code,'CONTENT_EXCEPTION_AFTER_ENTER');assert.equal(result.deliveryEvidence.enterAttempted,true);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.equal((await r.request('DICO_DELIVER')).status,'uncertain');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+test('미리 준비된 초안 검사는 빈 입력창과 다른 문구를 준비 완료로 인정하지 않는다',async()=>{
+ const r=rig({managed:true,structured:true,message:'공지 :moneybag: 1600',emojiName:':moneybag:',emojiValue:'💰',convertAliases:true});
+ const empty=await r.request('DICO_INSPECT');assert.equal(empty.ok,true);assert.equal(empty.draftMatches,false);
+ await r.request('DICO_PREPARE');let result=await r.request('DICO_INSPECT');assert.equal(result.ok,true);assert.equal(result.draftMatches,true);assert.equal(result.cooldownMs,0);
+ r.cooldown('00:05');result=await r.request('DICO_INSPECT');assert.equal(result.draftMatches,true);assert.equal(result.cooldownMs,5000);
+ r.editor.innerText='공지 💰 1601';result=await r.request('DICO_INSPECT');assert.equal(result.draftMatches,false);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+
+test('중앙 준비의 지연 복구도 변경된 초안이나 지나친 지연을 건너뛰지 않는다',async()=>{
+ for(const fault of ['text_mismatch','composing']){
+  const r=rig({managed:true,prepareDelay:7900,fault});const result=await r.request('DICO_PREPARE');
+  assert.equal(result.status,'blocked');assert.equal(result.code,'PREPARE_EDITOR_UNSTABLE');assert.equal(result.deliveryEvidence.enterAttempted,false);assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+ }
+ const r=rig({managed:true,prepareDelay:20000});const result=await r.request('DICO_PREPARE');assert.equal(result.status,'blocked');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+
+test('보이는 실제 쿨다운을 읽지 못하면 0초로 오인하지 않고 입력과 차례를 보존한다',async()=>{
+ for(const value of ['잠시 기다려 주세요','00:99',[''],['00:01','해석 불가']]){
+  const r=rig({managed:true});await r.request('DICO_PREPARE');r.cooldown(value);r.tick(3000);
+  const seen=await r.request('DICO_INSPECT');assert.equal(seen.ok,true);assert.equal(seen.draftMatches,true);assert.equal(seen.cooldownKnown,false);
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'deferred');assert.equal(result.code,'COOLDOWN_UNVERIFIED');assert.equal(result.deliveryEvidence.enterAttempted,false);
+  assert.equal(r.editor.innerText,'A');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+ }
+});
+
+test('최종 승인 후 생긴 해석 불가 쿨다운도 Enter 직전에 차단한다',async()=>{
+ const r=rig({managed:true,lateCooldown:'대기 중'});await r.request('DICO_PREPARE');r.tick(3000);
+ assert.equal((await r.request('DICO_INSPECT')).cooldownKnown,true);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'deferred');assert.equal(result.code,'COOLDOWN_UNVERIFIED');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
 });

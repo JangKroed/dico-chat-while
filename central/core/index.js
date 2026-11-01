@@ -7,6 +7,12 @@ const ACTIVE = new Set(['preparing','permitted','unknown']);
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const clone = value => structuredClone(value);
+function deliveryEvidence(value){
+  if(!value||typeof value!=='object'||!['prepare','commit','send'].includes(value.phase)||!['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage)||typeof value.enterAttempted!=='boolean')return undefined;
+  const result={phase:value.phase,stage:value.stage,enterAttempted:value.enterAttempted};
+  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'])if(typeof value[key]==='boolean')result[key]=value[key];
+  return result;
+}
 const minimumInterval = c => (c.slowmodeMs||0)+3000;
 const effectiveInterval = c => Math.max(c.intervalMs,minimumInterval(c));
 const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
@@ -538,7 +544,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           }
         }
         for(const g of state.groups.filter(g=>g.status==='running'))for(const bindingId of g.members){const c=get('channels',bindingId);if(c.instanceId===i.id&&!c.verified){g.waitReason='account_unverified';incident('account_mismatch',{groupId:g.id,instanceId:i.id});}}
-        event('instance.observed',{instanceId:i.id,channelCount:message.channels.length});return{ok:true,channels:state.channels.filter(c=>c.instanceId===i.id).map(publicChannel),commands:commands(i.id)};
+        event('instance.observed',{instanceId:i.id,channelCount:message.channels.length});return{ok:true,channels:state.channels.filter(c=>c.instanceId===i.id).map(c=>publicChannel(c)),commands:commands(i.id)};
       }
       if(message.type==='ACK'){
         const c=get('commands',message.commandId);ensure(c.instanceId===i.id&&c.sessionId===i.sessionId,'STALE_COMMAND','Command belongs to a different instance or session.',409);
@@ -572,6 +578,13 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const g=get('groups',a.groupId),c=get('channels',a.bindingId);
         ensure(state.service.status==='ready'&&g.status==='running'&&!g.controlIntent&&a.runId===g.runId,'EXECUTION_STOPPED','New commit permits are blocked.',409);
         eligibleChannel(c);ensure(message.accountId===a.accountId&&message.channelId===a.channelId&&message.configVersion===a.configVersion&&c.configVersion===a.configVersion&&message.draftClear===true,'PREPARATION_MISMATCH','Account, channel, draft or configuration did not match.',409);
+        if(a.earlyPrepare){
+          ensure(Number.isSafeInteger(message.cooldownMs)&&message.cooldownMs>=0&&message.cooldownMs<=31_536_000_000,'VALIDATION','A fresh Discord cooldown observation is required.');
+          ensure(now()-a.createdAt<=120000,'PREPARATION_EXPIRED','Input preparation expired. Stop and inspect the preserved draft.',409);
+          a.preparedObservedAt=now();
+          const wait=Math.max(0,Math.max(g.nextMono||0,c.nextMono||0)-monotonicNow(),message.cooldownMs);
+          if(wait>0){g.waitReason=message.cooldownMs>0?'discord_cooldown':'scheduled_input_ready';return{ok:true,permitIssued:false,retryAfterMs:Math.min(1000,Math.max(100,wait))};}
+        }
         if(monotonicNow()<Math.max(g.nextMono||0,c.nextMono||0)){
           // Existing executors understand CONTROL and treat a thrown PREPARED
           // response as uncertain. Withhold the permit and wait for blocking proof.
@@ -588,9 +601,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(['confirmed','not_sent','unknown'].includes(message.outcome),'VALIDATION','Invalid delivery outcome.');
         if(TERMINAL.has(a.status)){ensure(a.status===message.outcome,'RESULT_CONFLICT','Final outcome cannot be overwritten.',409);return{ok:true,attempt:publicAttempt(a)};}
         if(message.executionBlocked===true)a.executionBlocked=true;
-        if(message.outcome==='unknown'){markUnknown(a,'result_unknown');return{ok:true};}
+        if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
+        if(message.outcome==='unknown'){
+          const allowedReasons=new Set(['draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED']);
+          const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
+          if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
+        }
         if(message.outcome==='confirmed')ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
-        else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must confirm the old attempt is blocked.',409);
+        else {
+          ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must confirm the old attempt is blocked.',409);
+          if(['deferred','COOLDOWN_UNVERIFIED'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent){g.status='needs_review';g.waitReason='discord_cooldown';}}
+        }
         return{ok:true,attempt:publicAttempt(finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs}))};
       }
       if(message.type==='EMERGENCY_STOP'){
@@ -627,16 +648,16 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         problem.status='resolved';problem.resolvedAt=now();event('incident.resolved',{incidentId:problem.id,instanceId:i.id,reasonCode:'connection_recovered'});
       }
     }
-    for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status)&&wall-(a.permittedAt||a.createdAt)>30000))markUnknown(a,'result_timeout');
+    for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status)&&(a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>120000||wall-(a.preparedObservedAt||a.createdAt)>30000:wall-(a.permittedAt||a.createdAt)>30000)))markUnknown(a,'result_timeout');
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
     if(state.service.status!=='ready')return{ok:true};
     for(const g of state.groups.filter(g=>g.status==='running'&&!g.activeAttemptId&&!g.controlIntent)){
       const c=get('channels',g.members[g.cursor]);
       try{eligibleChannel(c);}catch(error){g.waitReason=error.code.toLowerCase();g.nextEligibleAt=null;continue;}
-      const due=Math.max(g.nextMono||0,c.nextMono||0);
-      if(mono<due){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
+      const due=Math.max(g.nextMono||0,c.nextMono||0),earlyPrepare=get('instances',c.instanceId).capabilities?.includes('early-prepare-v1')===true;
+      if(mono<due-(earlyPrepare?5000:0)){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
       const item=c.playlist[c.playlistIndex%c.playlist.length],m=get('messages',item.messageId),revision=m.revisions.find(r=>r.id===item.revisionId);
-      const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,executionBlocked:false};
+      const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false};
       state.attempts.push(a);g.activeAttemptId=a.id;g.waitReason='preparing';g.nextEligibleAt=null;command('PREPARE',c.instanceId,attemptPayload(a));event('delivery.preparing',{attemptId:a.id,groupId:g.id,instanceId:c.instanceId,accountId:c.accountId,channelId:c.channelId});
     }
     return{ok:true};
@@ -644,9 +665,28 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function commands(instanceId,{pendingOnly=true}={}){const i=get('instances',instanceId);return clone(state.commands.filter(c=>c.instanceId===instanceId&&c.sessionId===i.sessionId&&(!pendingOnly||['queued','received'].includes(c.status))));}
   function publicAccount(a){const{sessionId,...dto}=a;const connected=currentAccount(a);return{...clone(dto),verified:connected,connected};}
   function publicInstance(i){const{sessionId,lastSeenMono,stableSinceMono,...dto}=i;return clone(dto);}
-  function publicChannel(c){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),minimumIntervalMs:minimumInterval(c),effectiveIntervalMs:effectiveInterval(c)};}
-  function publicGroup(g){const{nextMono,...dto}=g;return clone(dto);}
-  function publicAttempt(a){const{sessionId,body,readyMono,permitId,...dto}=a;return clone(dto);}
+  function deadlineClock(){
+    const wall=now(),mono=monotonicNow(),elapsed=mono-lastMono;
+    return{wall,mono,safe:Number.isFinite(wall)&&Number.isFinite(mono)&&elapsed>=0&&elapsed<=15000&&Math.abs((wall-lastWall)-elapsed)<=2000};
+  }
+  function channelNextEligibleAt(c,clock){
+    if(!clock.safe||storageFailure||state.service.status!=='ready'||state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))return null;
+    try{eligibleChannel(c);}catch{return null;}
+    const instance=state.instances.find(i=>i.id===c.instanceId);
+    if(clock.wall<instance.lastSeenAt||c.nextMono!==undefined&&!Number.isFinite(c.nextMono))return null;
+    return clock.wall+Math.max(0,(c.nextMono??clock.mono)-clock.mono);
+  }
+  function publicChannel(c,clock=deadlineClock()){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),minimumIntervalMs:minimumInterval(c),effectiveIntervalMs:effectiveInterval(c),nextEligibleAt:channelNextEligibleAt(c,clock)};}
+  function publicGroup(g,clock=deadlineClock()){
+    const{nextMono,...dto}=g;let nextEligibleAt=null;
+    if(g.status==='running'&&!g.activeAttemptId&&!g.controlIntent){
+      const channel=state.channels.find(c=>c.id===g.members[g.cursor]);
+      const channelAt=channel?channelNextEligibleAt(channel,clock):null;
+      if(channelAt!==null&&(nextMono===undefined||Number.isFinite(nextMono)))nextEligibleAt=Math.max(channelAt,clock.wall+Math.max(0,(nextMono??clock.mono)-clock.mono));
+    }
+    return{...clone(dto),nextEligibleAt};
+  }
+  function publicAttempt(a){const{sessionId,body,readyMono,preparedObservedAt,permitId,...dto}=a;return clone(dto);}
   function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}
   function analytics({from=0,to=Number.MAX_SAFE_INTEGER,groupId,instanceId,accountId,channelId}={}){
     const matches=a=>!a.pruned&&(!groupId||a.groupId===groupId)&&(!instanceId||a.instanceId===instanceId)&&(!accountId||a.accountId===accountId)&&(!channelId||a.channelId===channelId);
@@ -665,7 +705,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return{from,to,partialRecords:!!state.prunedBefore&&from<state.prunedBefore,retainedFrom:state.prunedBefore||null,waitReasons,connectionTimeline,generatedAt:now(),lastEventId:state.lastEventId,total:attempts.length,confirmed:confirmed.length,outcomes,confirmedBuckets:[...buckets.values()].sort((a,b)=>a.at-b.at),confirmation:{samples:timings.length,p50:percentile(.5),p95:percentile(.95),insufficientSamples:timings.length<20},confirmationRate:outcomes.confirmed+outcomes.not_sent?outcomes.confirmed/(outcomes.confirmed+outcomes.not_sent):null,excludedFromRate:outcomes.cancelled+outcomes.unknown+outcomes.in_progress,timeline:attempts.slice(-200).map(publicAttempt)};
   }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
-  function snapshot(){return{configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(publicChannel),groups:state.groups.map(publicGroup),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
+  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
     state.service={status:'resume_required',reasonCode:'service_restart',startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}

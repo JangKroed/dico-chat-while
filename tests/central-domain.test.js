@@ -11,8 +11,8 @@ function fixture(options = {}) {
   const manager = createCentralManager({ now: () => time, monotonicNow: () => mono, ...options });
   const sessions = [];
   const advance = (ms) => { time += ms; mono += ms; };
-  const connect = (accountId = 'a', channelId = 'channel') => {
-    const hello = manager.bridge({ type: 'HELLO', protocolVersion: 1, name: accountId, capabilities: ['central-v1'] });
+  const connect = (accountId = 'a', channelId = 'channel', capabilities = ['central-v1']) => {
+    const hello = manager.bridge({ type: 'HELLO', protocolVersion: 1, name: accountId, capabilities });
     sessions.push(hello);
     manager.bridge({ type: 'OBSERVATION', sessionId: hello.sessionId, legacyFrozen: true, legacyPending: false,
       channels: [{ accountId, guildId: 'guild', channelId, name: 'Channel', tabId: sessions.length, verified: true }] }, hello.instanceId);
@@ -942,4 +942,86 @@ test('increased slowmode after permit is rechecked immediately before Enter with
   assert.equal(authorization.allowed,false);assert.equal(f.manager.snapshot().attempts.find(a=>a.id===second.id).status,'permitted');
   f.result(c,second,'not_sent',{executionBlocked:true});let s=f.manager.snapshot();assert.equal(s.channels[0].playlistIndex,1);assert.equal(s.groups[0].cursor,0);assert.equal(s.attempts.length,2);
   const config=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:config.id,status:'applied'},c.instanceId);f.manager.tick();s=f.manager.snapshot();assert.equal(s.groups[0].waitReason,'account_interval');assert.equal(s.attempts.length,2);f.manager.close();
+});
+
+test('unknown result keeps bounded executor reason and ignores inconclusive rereports',()=>{
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'unknown',{reasonCode:'draft-retained'});
+  assert.equal(f.manager.snapshot().attempts[0].reasonCode,'draft-retained');
+  f.result(c,a,'unknown',{reasonCode:'reconcile_inconclusive'});
+  assert.equal(f.manager.snapshot().attempts[0].reasonCode,'draft-retained');
+  assert.equal(f.manager.snapshot().groups[0].status,'needs_review');
+  f.manager.close();
+});
+
+test('unknown executor reason never stores arbitrary content',()=>{
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'unknown',{reasonCode:'private-message-text'});
+  assert.equal(f.manager.snapshot().attempts[0].reasonCode,'result_unknown');
+  assert.equal(JSON.stringify(f.manager.snapshot()).includes('private-message-text'),false);
+  f.manager.close();
+});
+
+test('delivery evidence stores only fixed stage and booleans without changing uncertain outcome',()=>{
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'unknown',{reasonCode:'draft-retained',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,composerRetained:true,newMessage:false,body:'private evidence body',error:'private error'}});
+  const saved=f.manager.snapshot().attempts[0];
+  assert.deepEqual(saved.deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true,composerRetained:true,newMessage:false});
+  assert.equal(saved.status,'unknown');
+  f.result(c,a,'unknown',{reasonCode:'reconcile_inconclusive',deliveryEvidence:{phase:'commit',stage:'inspect',enterAttempted:false}});
+  assert.deepEqual(f.manager.snapshot().attempts[0].deliveryEvidence,saved.deliveryEvidence);
+  assert.equal(JSON.stringify(f.manager.snapshot()).includes('private evidence body'),false);
+  f.manager.close();
+});
+
+test('new executors prepare five seconds early but permit only after due and live cooldown clears',()=>{
+  const f=fixture(),c=f.connect('A','channel',['central-v1','early-prepare-v1']);f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const first=f.manager.snapshot().attempts[0];f.manager.bridge({type:'PREPARED',sessionId:c.sessionId,attemptId:first.id,accountId:'A',channelId:'channel',configVersion:first.configVersion,draftClear:true,cooldownMs:0},c.instanceId);f.result(c,first);
+  f.advance(1000);f.manager.tick();
+  const second=f.manager.snapshot().attempts.find(a=>a.status==='preparing');assert.ok(second);
+  const ready=cooldownMs=>f.manager.bridge({type:'PREPARED',sessionId:c.sessionId,attemptId:second.id,accountId:'A',channelId:'channel',configVersion:second.configVersion,draftClear:true,cooldownMs},c.instanceId);
+  assert.equal(ready(0).permitIssued,false);assert.equal(f.manager.snapshot().groups[0].status,'running');
+  f.advance(2000);assert.equal(ready(2000).permitIssued,false);
+  assert.equal(f.manager.commands(c.instanceId).some(cmd=>cmd.type==='COMMIT_PERMIT'&&cmd.payload.attemptId===second.id),false);
+  const permitted=ready(0);assert.ok(permitted.permitId);assert.equal(f.manager.snapshot().groups[0].cursor,0);
+  f.manager.close();
+});
+
+test('early preparation rejects missing cooldown evidence and stop fences waiting permit',()=>{
+  const f=fixture(),c=f.connect('A','channel',['early-prepare-v1']);f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts[0];
+  assert.throws(()=>f.prepared(c,a),{code:'VALIDATION'});
+  const p={type:'PREPARED',sessionId:c.sessionId,attemptId:a.id,accountId:'A',channelId:'channel',configVersion:a.configVersion,draftClear:true,cooldownMs:7000};
+  assert.equal(f.manager.bridge(p,c.instanceId).permitIssued,false);
+  f.advance(1000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+  f.manager.execute('group.stop',{id:g.id});
+  assert.throws(()=>f.manager.bridge({...p,cooldownMs:0},c.instanceId),{code:'EXECUTION_STOPPED'});
+  assert.equal(f.manager.commands(c.instanceId).some(cmd=>cmd.type==='COMMIT_PERMIT'),false);
+  f.manager.close();
+});
+
+test('late live cooldown blocks without consuming account turn or playlist',()=>{
+  for(const reasonCode of ['deferred','COOLDOWN_UNVERIFIED']){
+    const f=fixture(),c=f.connect();f.apply(c,[f.message('One'),f.message('Two')]);const g=f.group([c]);f.start(g);
+    const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+    f.result(c,a,'not_sent',{executionBlocked:true,reasonCode});
+    const snapshot=f.manager.snapshot();assert.equal(snapshot.groups[0].status,'paused');assert.equal(snapshot.groups[0].cursor,0);assert.equal(snapshot.channels[0].playlistIndex,0);
+    f.advance(1000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);f.manager.close();
+  }
+});
+
+test('sixty-three-second interval begins preparation exactly five seconds ahead and never Enter early',()=>{
+  const f=fixture(),c=f.connect('A','channel',['early-prepare-v1']);
+  f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:c.channel.version,intervalMs:63000});f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const report=a=>f.manager.bridge({type:'PREPARED',sessionId:c.sessionId,attemptId:a.id,accountId:'A',channelId:'channel',configVersion:a.configVersion,draftClear:true,cooldownMs:0},c.instanceId);
+  const first=f.manager.snapshot().attempts[0];report(first);f.result(c,first);
+  const step=ms=>{f.advance(ms);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();};
+  for(let n=0;n<5;n++)step(10000);step(7999);
+  assert.equal(f.manager.snapshot().attempts.length,1);step(1);
+  const second=f.manager.snapshot().attempts.find(a=>a.status==='preparing');assert.ok(second);
+  for(let n=0;n<5;n++){assert.equal(report(second).permitIssued,false);step(1000);}
+  assert.ok(report(second).permitId);assert.equal(f.manager.snapshot().attempts.length,2);f.manager.close();
 });

@@ -1,14 +1,15 @@
 export type Timestamp = string|number
 export type Message = { id:string; name:string; body:string; tags:string[]; archived:boolean; version:number; revisionId:string; createdAt:Timestamp; updatedAt:Timestamp; revisions:{id:string;version:number;body:string;at:Timestamp}[] }
-export type Channel = { id:string; instanceId:string; accountId:string; guildId:string; channelId:string; name:string; verified:boolean; tabId?:number; version:number; configVersion:number; appliedVersion:number; playlist:{messageId:string;revisionId:string}[]; playlistIndex:number; intervalMs:number;intervalMode?:'auto'|'custom';minimumIntervalMs?:number;customIntervalMs?:number;pendingIntervalSync?:boolean; slowmodeMs:number;slowmodeObservedAt?:number|null;effectiveIntervalMs?:number }
+export type Channel = { id:string; instanceId:string; accountId:string; guildId:string; channelId:string; name:string; verified:boolean; tabId?:number; version:number; configVersion:number; appliedVersion:number; playlist:{messageId:string;revisionId:string}[]; playlistIndex:number; intervalMs:number;intervalMode?:'auto'|'custom';minimumIntervalMs?:number;customIntervalMs?:number;pendingIntervalSync?:boolean;nextEligibleAt?:Timestamp|null; slowmodeMs:number;slowmodeObservedAt?:number|null;effectiveIntervalMs?:number }
 export type Account = {id:string;instanceId:string;accountId:string;name:string;version:number;verified:boolean;connected?:boolean;lastVerifiedAt?:Timestamp}
 export type Target = {id:string;guildId:string;channelId:string;name:string;url?:string;version?:number}
-export type Group = { id:string; name:string; guildId:string; channelId:string; members:string[]; intervalMs:number; version:number; status:'stopped'|'running'|'paused'|'needs_review'|'resume_required'|'stop_pending'|'pause_pending'; cursor:number; activeAttemptId?:string; waitReason?:string; nextEligibleAt?:Timestamp }
+export type Group = { id:string; name:string; guildId:string; channelId:string; members:string[]; intervalMs:number; version:number; status:'stopped'|'running'|'paused'|'needs_review'|'resume_required'|'stop_pending'|'pause_pending'; cursor:number; activeAttemptId?:string; waitReason?:string; nextEligibleAt?:Timestamp|null }
 export type Instance = {id:string;name:string;browser?:string;status?:string;connected?:boolean;lastSeenAt?:Timestamp;version?:number;accountId?:string;extensionVersion?:string;[key:string]:unknown}
-export type Attempt = {id:string;groupId?:string;bindingId?:string;channelId?:string;accountId?:string;messageId?:string;messageIdRef?:string;messageName?:string;revisionId?:string;status?:string;state?:string;createdAt?:Timestamp;permittedAt?:Timestamp;finalizedAt?:Timestamp;attemptedAt?:Timestamp;confirmedAt?:Timestamp;postedAt?:Timestamp;executionBlocked?:boolean;manual?:boolean;reasonCode?:string;uncertain?:boolean;[key:string]:unknown}
+export type DeliveryEvidence = {phase?:'prepare'|'commit'|'send';stage?:'inspect'|'authorize'|'prepare'|'stable'|'enter'|'observe';enterAttempted?:boolean;composerRetained?:boolean;newMessage?:boolean;matchingMessage?:boolean;sendingSeen?:boolean;failedSeen?:boolean;authorMismatch?:boolean;authorUnknown?:boolean;timeMismatch?:boolean}
+export type Attempt = {id:string;groupId?:string;bindingId?:string;channelId?:string;accountId?:string;messageId?:string;messageIdRef?:string;messageName?:string;revisionId?:string;status?:string;state?:string;createdAt?:Timestamp;permittedAt?:Timestamp;finalizedAt?:Timestamp;attemptedAt?:Timestamp;confirmedAt?:Timestamp;postedAt?:Timestamp;executionBlocked?:boolean;manual?:boolean;reasonCode?:string;deliveryEvidence?:DeliveryEvidence;uncertain?:boolean;[key:string]:unknown}
 export type Incident = {id:string;code?:string;title?:string;message?:string;description?:string;level?:string;severity?:string;status?:string;read?:boolean;readAt?:Timestamp;resolvedAt?:Timestamp;createdAt?:Timestamp;updatedAt?:Timestamp;lastSeenAt?:Timestamp;groupId?:string;attemptId?:string;[key:string]:unknown}
 export type EventRecord = {id?:string;eventId?:number;type?:string;level?:string;message?:string;description?:string;at?:Timestamp;receivedAt?:Timestamp;createdAt?:Timestamp;reasonCode?:string;groupId?:string;attemptId?:string;[key:string]:unknown}
-export type Snapshot = {configurationToken?:string;schemaVersion:number;stateVersion:number;service?:Record<string,unknown>;settings?:Record<string,unknown>;messages:Message[];instances:Instance[];accounts?:Account[];targets?:Target[];channels:Channel[];groups:Group[];attempts:Attempt[];commands?:Record<string,unknown>[];incidents:Incident[];events:EventRecord[];analytics?:Record<string,unknown>}
+export type Snapshot = {serverNow?:number;configurationToken?:string;schemaVersion:number;stateVersion:number;service?:Record<string,unknown>;settings?:Record<string,unknown>;messages:Message[];instances:Instance[];accounts?:Account[];targets?:Target[];channels:Channel[];groups:Group[];attempts:Attempt[];commands?:Record<string,unknown>[];incidents:Incident[];events:EventRecord[];analytics?:Record<string,unknown>}
 
 export type SetupStatus = {checkedAt:number;checks:{id:string;label:string;status:'ok'|'warning'|'error';detail:string;nextStep?:string}[];ready:boolean}
 export type UpdateStatus = {phase:'idle'|'preparing'|'ready'|'applying'|'completed'|'failed';message:string;startedAt?:Timestamp;updatedAt?:Timestamp;version?:string}
@@ -50,31 +51,44 @@ async function request<T>(path:string, init:RequestInit={}):Promise<T> {
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
-export async function establishSession():Promise<void> {
+export async function establishSession(signal?:AbortSignal):Promise<{appVersion?:string}> {
   const fragment = new URLSearchParams(location.hash.replace(/^#/,''))
   const bootstrap = fragment.get('bootstrap')
-  if (bootstrap) {
-    history.replaceState(null,'',location.pathname + location.search)
-    const session = await request<{csrfToken:string}>('/api/session',{method:'POST',body:JSON.stringify({token:bootstrap})})
-    csrfToken = session.csrfToken
-  } else {
-    const session = await request<{csrfToken:string}>('/api/session')
-    csrfToken = session.csrfToken
+  type Session={csrfToken:string;appVersion?:string}
+  const accept=(session:Session)=>{
+    csrfToken=session.csrfToken
+    if(bootstrap)history.replaceState(null,'',location.pathname+location.search)
+    return {appVersion:session.appVersion}
+  }
+  if(!bootstrap)return accept(await request<Session>('/api/session',{signal}))
+  try {return accept(await request<Session>('/api/session',{method:'POST',body:JSON.stringify({token:bootstrap}),signal}))}
+  catch(postError){
+    // The exchange may have consumed the token and set its cookie even if the
+    // response was lost. Recover that session before requesting a new bootstrap.
+    try {return accept(await request<Session>('/api/session',{signal}))}
+    catch(cookieError){
+      if(postError instanceof ApiError&&postError.status===401&&cookieError instanceof ApiError&&cookieError.status===401)throw cookieError
+      throw postError
+    }
   }
 }
 export const getSetupStatus = () => request<SetupStatus>('/api/setup-status')
 export const getUpdateStatus = (signal?:AbortSignal) => request<UpdateStatus>('/api/updates',{signal})
 export const startUpdate = (signal?:AbortSignal) => request<UpdateStatus>('/api/updates',{method:'POST',body:'{}',signal})
-export const getSnapshot = () => request<Snapshot>('/api/snapshot')
+export const getSnapshot = (signal?:AbortSignal) => request<Snapshot>('/api/snapshot',{signal:signal??AbortSignal.timeout(10000)})
 export const command = (action:string,payload:Record<string,unknown>) => request<unknown>('/api/command',{method:'POST',body:JSON.stringify({action,payload})})
 export const getAnalytics = (from:number,to:number) => request<Record<string,unknown>>(`/api/analytics?from=${from}&to=${to}`)
 export const testNotification = () => request<{ok:boolean;result:{status:string}}>('/api/notification-test',{method:'POST',body:'{}'})
 export function subscribe(onMessage:(data:unknown)=>void,onDisconnect:()=>void):()=>void {
   const source = new EventSource('/api/events',{withCredentials:true})
-  const listener = (event:MessageEvent) => { try { onMessage(JSON.parse(event.data)) } catch { /* malformed event, recover with snapshot */ } }
+  let active=true
+  const close=()=>{if(!active)return;active=false;source.close()}
+  const listener = (event:MessageEvent) => { if(!active)return;try { onMessage(JSON.parse(event.data)) } catch { /* malformed event, recover with snapshot */ } }
   source.addEventListener('snapshot',listener)
   source.addEventListener('event',listener)
   source.onmessage = listener
-  source.onerror = onDisconnect
-  return () => source.close()
+  // The app owns reconnect backoff and session recovery. Native EventSource
+  // retries would otherwise race a second subscription after server restart.
+  source.onerror = () => {if(!active)return;close();onDisconnect()}
+  return close
 }

@@ -177,8 +177,9 @@ async function waitForStopped(job){
   }
   throw Error('Runtime did not stop');
 }
+export function restartArguments(job){return[join(job.app,'central/runtime/main.mjs'),'--data-dir',job.directory];}
 async function restartApplication(job){
-  const child=spawn(job.node,[join(job.app,'central/runtime/main.mjs'),'--data-dir',job.directory,'--open'],{cwd:job.app,detached:true,stdio:'ignore',windowsHide:true});
+  const child=spawn(job.node,restartArguments(job),{cwd:job.app,detached:true,stdio:'ignore',windowsHide:true});
   await new Promise((accept,reject)=>{child.once('spawn',accept);child.once('error',reject);});child.unref();
   for(let count=0;count<80;count++){
     const descriptor=await readJSON(join(job.directory,'runtime.json')).catch(()=>undefined);

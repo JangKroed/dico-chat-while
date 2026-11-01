@@ -46,7 +46,7 @@ async function screenshot(name) {
   await writeFile(resolve(screenshots,name),Buffer.from(data,'base64'));
 }
 try {
-  runtime=await startCentralRuntime({directory:data});
+  runtime=await startCentralRuntime({directory:data,port:0});
   child=spawn(chrome,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check','--disable-extensions','--disable-gpu','--window-size=1440,900','about:blank'],{stdio:['ignore','pipe','pipe']});
   let browserStderr='';
   child.stderr.on('data',chunk=>{browserStderr+=String(chunk).slice(0,1500)});

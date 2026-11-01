@@ -5,11 +5,18 @@ import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,diagnosticEvents} from '../diagnostics.js';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
 const target={guildId:'123',channelId:'456',ownUserId:'123456789012345678'};
-async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false, alreadyPosted=false,skipConfirmation=false) {
+async function deliver(ignoreEnter=false, draft='', cooldownText='', cooldownAfterPaste=false, alreadyPosted=false,skipConfirmation=false,settingText='') {
  const traces=[], nodes=[];let listener, check;
  let pasted=false;
- const countdown={textContent:cooldownText,getClientRects:()=>[1]};
- const form={querySelector:()=>null,querySelectorAll:()=>cooldownText && (!cooldownAfterPaste || pasted)?[countdown]:[]};
+ const element=(className,textContent)=>({className,textContent,getClientRects:()=>[1],matches(selector){
+  return selector.split(',').some(part=>{const match=part.trim().match(/^\[class\*="([^"]+)"\]$/);assert.ok(match,`Unsupported fixture selector: ${part}`);return className.includes(match[1]);});
+ }});
+ const countdown=element('slowModeCooldown_test',cooldownText),setting=element('slowModeIcon_test',settingText);
+ // Settings help and the live countdown are different DOM elements. Honor the
+ // product selector so a settings label cannot masquerade as a cooldown node.
+ const form={querySelector:()=>null,querySelectorAll:selector=>[
+  ...(cooldownText && (!cooldownAfterPaste || pasted)?[countdown]:[]),...(settingText?[setting]:[])
+ ].filter(node=>node.matches(selector))};
  const editor={innerText:draft,isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>null,closest:()=>form,contains:n=>n===editor,
   focus:()=>{document.activeElement=editor;},dispatchEvent:event=>{
    if(event.type==='paste'){pasted=true;editor.innerText=event.clipboardData.text;event.defaultPrevented=true;}
@@ -94,7 +101,14 @@ test('붙여넣기 후 슬로우 모드가 나타나면 Enter 없이 초안 보�
 });
 test('슬로우 모드 00:00은 정상 전송하며 설정 안내 문구를 남은 시간으로 오인하지 않는다',async()=>{
  assert.equal((await deliver(false,'','00:00')).result.status,'confirmed');
- assert.equal((await deliver(false,'','Slowmode is enabled. 2 minutes')).result.status,'confirmed');
+ assert.equal((await deliver(false,'','',false,false,false,'Slowmode is enabled. 2 minutes')).result.status,'confirmed');
+ assert.equal((await deliver(false,'','00:00',false,false,false,'Slowmode is enabled. 2 minutes')).result.status,'confirmed');
+});
+test('실제 쿨다운 요소의 해석 불가 문구는 설정 안내처럼 무시하지 않는다',async()=>{
+ const {result,traces}=await deliver(false,'','Slowmode is enabled. 2 minutes');
+ assert.equal(result.status,'deferred');assert.equal(result.code,'COOLDOWN_UNVERIFIED');
+ assert.equal(result.deliveryEvidence.enterAttempted,false);
+ assert.equal(traces.some(trace=>trace.stage==='before-paste'||trace.stage==='enter-dispatched'),false);
 });
 
 test('이전 확인 이후 이미 게시한 예정 문구는 초안이 있어도 붙여넣기·Enter 없이 순서만 처리한다',async()=>{

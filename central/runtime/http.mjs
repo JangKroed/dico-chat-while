@@ -2,6 +2,7 @@ import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {readFile,realpath} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
 import {safeToUpdate} from './updater.mjs';
+import {normalizeSessions,UI_SESSION_TTL} from './ui-state.mjs';
 
 const secret=()=>randomBytes(32).toString('hex');
 const equal=(a,b)=>typeof a==='string' && typeof b==='string' && Buffer.byteLength(a)===Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -15,17 +16,18 @@ async function body(req) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,now=Date.now}) {
+export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,initialSessions=[],saveSessions=async()=>{},now=Date.now}) {
   if (typeof bridgeToken!=='string' || bridgeToken.length<32)throw Error('Private bridge credential required');
-  const sessions=new Map(),bootstraps=new Map(),streams=new Set();
+  const sessions=new Map(normalizeSessions(initialSessions,now()).map(({id,...session})=>[id,session])),bootstraps=new Map(),streams=new Set();let closed=false;
   const currentOrigin=()=>new URL(origin);
-  const prune=()=>{for (const [k,v] of bootstraps)if(v<now())bootstraps.delete(k);for (const [k,v] of sessions)if(v.expires<now())sessions.delete(k);};
+  const prune=()=>{for (const [k,v] of bootstraps)if(v<=now())bootstraps.delete(k);for (const [k,v] of sessions)if(v.expires<=now())sessions.delete(k);};
+  const persistSessions=async()=>{prune();const records=normalizeSessions([...sessions].map(([id,session])=>({id,...session})),now());const retained=new Set(records.map(session=>session.id));for(const id of sessions.keys())if(!retained.has(id))sessions.delete(id);await saveSessions(records);};
   const issueBootstrap=()=>{prune();const token=secret();bootstraps.set(token,now()+30000);return token;};
   const uiSession=req=>{
     prune();const id=(req.headers.cookie || '').split(';').map(x=>x.trim()).find(x=>x.startsWith('dico_session='))?.slice(13);
     const session=id && sessions.get(id);
     if (!session)throw fail(401,'관리 프로그램에서 중앙 페이지를 다시 열어 주세요.');
-    session.expires=now()+12*60*60*1000;return session;
+    return session;
   };
   const checkMutation=(req,session)=>{
     if (req.headers.origin!==origin || !equal(req.headers['x-dico-csrf'],session.csrfToken))throw fail(403,'요청 출처 또는 세션을 확인하세요.');
@@ -35,6 +37,7 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     try {
+      if(closed)throw fail(503,'관리 프로그램을 다시 시작하고 있습니다. 잠시 기다려 주세요.');
       if (req.headers.host!==currentOrigin().host || (req.headers.origin && req.headers.origin!==origin))throw fail(403,'허용되지 않은 요청 출처입니다.');
       const rawPath=(req.url || '/').split('?')[0];
       if (decodeURIComponent(rawPath).split('/').some(s=>s==='..' || s==='.') || rawPath.includes('\\'))throw fail(404,'경로를 찾을 수 없습니다.');
@@ -69,13 +72,14 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         if (req.headers.origin!==origin)throw fail(403,'요청 출처를 확인하세요.');
         const {token}=await body(req);prune();
         if (typeof token!=='string' || !bootstraps.has(token))throw fail(401,'페이지 연결이 만료됐습니다. 관리 프로그램에서 다시 열어 주세요.');
-        bootstraps.delete(token);const id=secret(),session={csrfToken:secret(),expires:now()+12*60*60*1000};sessions.set(id,session);
+        bootstraps.delete(token);const id=secret(),issuedAt=now(),session={csrfToken:secret(),issuedAt,expires:issuedAt+UI_SESSION_TTL};sessions.set(id,session);
+        try{await persistSessions();}catch(error){sessions.delete(id);throw error;}
         res.setHeader('Set-Cookie',`dico_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
-        return json(res,200,{csrfToken:session.csrfToken});
+        return json(res,200,{csrfToken:session.csrfToken,...(appVersion?{appVersion}:{})});
       }
       if (path.startsWith('/api/')) {
         const session=uiSession(req);
-        if (path==='/api/session' && req.method==='GET')return json(res,200,{csrfToken:session.csrfToken});
+        if (path==='/api/session' && req.method==='GET')return json(res,200,{csrfToken:session.csrfToken,...(appVersion?{appVersion}:{})});
         if (path==='/api/setup-status' && req.method==='GET') {
           if (!setupStatus)throw fail(503,'설치 진단 기능이 준비되지 않았습니다.');
           return json(res,200,await setupStatus());
@@ -131,5 +135,5 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       json(res,status,{ok:false,error:{code:error.code || 'REQUEST_FAILED',message}});
     }
   };
-  return {handler,issueBootstrap,setOrigin:value=>{const u=new URL(value);if(u.hostname!=='127.0.0.1' || u.protocol!=='http:')throw Error('Loopback origin required');origin=u.origin;},close:()=>{for(const res of streams)res.end();streams.clear();sessions.clear();bootstraps.clear();}};
+  return {handler,issueBootstrap,setOrigin:value=>{const u=new URL(value);if(u.hostname!=='127.0.0.1' || u.protocol!=='http:')throw Error('Loopback origin required');origin=u.origin;},close:async()=>{if(closed)return;closed=true;try{await persistSessions();}finally{for(const res of streams)res.end();streams.clear();sessions.clear();bootstraps.clear();}}};
 }

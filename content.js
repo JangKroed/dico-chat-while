@@ -244,14 +244,14 @@
     const form = editor?.closest('form') || editor?.parentElement;
     const nodes = [...(form?.querySelectorAll?.('[class*="slowModeCooldown"], [class*="slowmodeCooldown"]') || [])]
       .filter(node => node.getClientRects().length > 0);
-    let seconds = 0;
+    let seconds = 0,cooldownKnown=true;
     for (const node of nodes) {
       const text = (node.textContent || '').trim();
       const match = text.match(/^(?:(\d{1,2}):)?(\d{1,3}):(\d{2})$/);
-      if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) continue;
+      if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) {cooldownKnown=false;continue;}
       seconds = Math.max(seconds, Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     }
-    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0, cooldownMs:Math.min(seconds,21600)*1000};
+    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0,cooldownKnown, cooldownMs:Math.min(seconds,21600)*1000};
   }
   let cooldownProbeCancel = null;
   function observeCooldown(target, delivery, enterAt, enterMono) {
@@ -382,7 +382,10 @@
       if (finished) return;
       finished = true;
       report(evidence);
-      observer?.disconnect(); clearTimeout(timer); clearInterval(poll); resolve(value);
+      const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
+      const deliveryEvidence=Object.fromEntries(fields.map(key=>[key,evidence[key]===true]));
+      if(typeof value.deliveryEvidence?.composerRetained==='boolean')deliveryEvidence.composerRetained=value.deliveryEvidence.composerRetained;
+      observer?.disconnect(); clearTimeout(timer); clearInterval(poll); resolve({...value,deliveryEvidence});
     };
     const currentEditor = () => editor.isConnected ? editor : editors()[0];
     const check = () => {
@@ -448,7 +451,7 @@
       const liveEditor = currentEditor();
       const retained = liveEditor && composerMatches(liveEditor,text);
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
-      finish({status:retryDraft ? 'draft-retained' : 'uncertain',error:liveEditor && normalize(editorText(liveEditor))
+      finish({status:retryDraft ? 'draft-retained' : 'uncertain',code:retryDraft?'DELIVERY_DRAFT_RETAINED':'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{composerRetained:Boolean(retained)},error:liveEditor && normalize(editorText(liveEditor))
         ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
         : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
     }, submissionOnly ? 3000 : 25000);
@@ -560,6 +563,13 @@
     return fail();
   }
   async function deliver(target, delivery) {
+    const evidence={phase:delivery?.phase==='prepare'?'prepare':delivery?.phase==='commit'?'commit':'send',stage:'inspect',enterAttempted:false};
+    const result=await performDelivery(target,delivery,evidence);
+    // Final-response metadata survives even when optional tracing is unavailable.
+    // Never include message text, DOM, URLs or raw exceptions in this object.
+    return {...result,deliveryEvidence:{...evidence,...result.deliveryEvidence}};
+  }
+  async function performDelivery(target, delivery, evidence) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
     busy = true;
@@ -582,8 +592,10 @@
       }
       let result = inspect(target);
       if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
+      if(delivery.phase!=='prepare'&&!result.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',error:'Discord의 남은 대기 시간을 읽지 못했습니다. 초안을 보존하고 중지합니다.'};
       if (delivery.phase!=='prepare' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
       // Distinguish a blocked worker/permission reply from slow editor preparation.
+      evidence.stage='authorize';
       trace('authorization-request');
       const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase });
       trace('authorization-response',{authorized:authorization?.allowed===true});
@@ -600,7 +612,9 @@
         editor.focus();
         const selection=window.getSelection(), range=document.createRange();
         range.selectNodeContents(editor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
-        if(!await stableEditor(target,delivery.text,editor,500,trace,true)) return {status:'blocked',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
+        evidence.stage='stable';
+        if(!await stableEditor(target,delivery.text,editor,500,trace,true)) return {status:'blocked',code:'COMMIT_EDITOR_UNSTABLE',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
+        evidence.stage='authorize';
         const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
         const finalAuthorization=await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit'});
         const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
@@ -609,6 +623,7 @@
         if (!finalAuthorization?.allowed || staleAuthorization) return {status:'blocked',error:'전송 준비 후 중지 또는 지연된 승인 응답을 확인했습니다.'};
         trace('prepared-verified');
       } else {
+        evidence.stage='prepare';
         editor.focus();
         const selection = window.getSelection();
         const range = document.createRange();
@@ -643,7 +658,8 @@
         // Paste updates the editor model and React may render it asynchronously.
         // Never send Enter in the same task as text insertion.
         if (delivery.phase==='prepare') {
-          if (!await stableEditor(target,delivery.text,editor,1000,trace)) return {status:'blocked',error:
+          evidence.stage='stable';
+          if (!await stableEditor(target,delivery.text,editor,1000,trace,target.managed===true)) return {status:'blocked',code:'PREPARE_EDITOR_UNSTABLE',error:
             editorContent(editor).unsupported ? '입력창에 해석하지 못한 요소가 있습니다. 초안을 보존하고 중지합니다. 진단 로그를 확인해 주세요.' :
             !composerMatches(editor,delivery.text) ? '설정 문구와 입력창 내용이 다릅니다. 이모지 표현을 비교한 뒤에도 불일치하여 초안을 보존하고 중지합니다.' :
             '문구는 일치하지만 커서·포커스·조합 입력 상태가 안정되지 않았습니다. 초안을 보존하고 중지합니다.'};
@@ -670,6 +686,7 @@
       const finalSelection=window.getSelection();
       if (!coordinatedAccountMatches(target) || !matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || !composerMatches(editor,delivery.text)) return {status:'blocked',error:'Enter 직전 계정 또는 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'};
       const cooldown = slowmode(editor);
+      if(!cooldown.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',error:'Enter 직전 Discord의 남은 대기 시간을 확인하지 못했습니다. 초안을 보존하고 중지합니다.'};
       if (cooldown.cooldownMs > 0) {
         trace('slowmode-wait', cooldown);
         return {status:'deferred',retryAfterMs:cooldown.cooldownMs,draftPrepared:true};
@@ -680,9 +697,11 @@
       trace('before-enter');
       const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
       const keyup = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+      evidence.stage='enter';evidence.enterAttempted=true;
       editor.dispatchEvent(keydown);
       editor.dispatchEvent(keyup);
       trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
+      evidence.stage='observe';
       const outcome = await watcher.promise;
       if(outcome.status==='confirmed') {
         const confirmedAt=Date.now(),confirmationMs=(globalThis.performance?.now() ?? confirmedAt)-enterMono;
@@ -694,7 +713,7 @@
     } catch(error) {
       trace('exception',{exception:{name:error?.name,message:error?.message,stack:error?.stack}});
       watcher?.cancel();
-      return { status: entered ? 'uncertain' : 'blocked', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
+      return { status: evidence.enterAttempted || entered ? 'uncertain' : 'blocked',code:evidence.enterAttempted?'CONTENT_EXCEPTION_AFTER_ENTER':'CONTENT_EXCEPTION_BEFORE_ENTER', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
     } finally { busy = false; }
   }
   const messageListener=(message, sender, respond) => {
@@ -707,7 +726,7 @@
       respond(result); return false;
     }
     if (message?.type === 'DICO_CHANNEL_LIMIT') { detectSlowmodeSetting(message.target).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
-    if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>{const result=inspect(message.target);respond({...result,diagnostics:{...traceSnapshot(message.target,message.target.expectedText || ''),contentVersion:CONTENT_VERSION}});}); return true; }
+    if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>{const result=inspect(message.target),found=editors();const draftMatches=result.ok===true&&found.length===1&&typeof message.target?.expectedText==='string'&&composerMatches(found[0],message.target.expectedText);respond({...result,draftMatches,diagnostics:{...traceSnapshot(message.target,message.target.expectedText || ''),contentVersion:CONTENT_VERSION}});}); return true; }
     if (message?.type === 'DICO_PREPARE') { deliver(message.target,{...message.delivery,phase:'prepare'}).then(respond); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;
