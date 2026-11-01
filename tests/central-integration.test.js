@@ -28,7 +28,7 @@ test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·�
     }
     const message=manager.execute('message.create',{name:'검증용 메시지',body:'실제 Discord로 보내지 않는 검증 문구'});
     for(const channel of manager.snapshot().channels) {
-      manager.execute('channel.update',{id:channel.id,expectedVersion:channel.version,intervalMs:0});
+      manager.execute('channel.update',{id:channel.id,expectedVersion:channel.version,intervalMs:3000});
       const current=manager.snapshot().channels.find(c=>c.id===channel.id);
       manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:current.version,items:[{messageId:message.id}]});
     }

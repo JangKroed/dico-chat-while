@@ -56,12 +56,12 @@ test('applied configuration requires applied ACK, with no send from received ACK
 
 test('A B C 100 rotations preserve order and per-account playlist through duplicate reports', () => {
   const f = fixture(), cs = ['A','B','C'].map(a => f.connect(a)); const one = f.message('One'), two = f.message('Two');
-  cs.forEach(c => { f.manager.execute('channel.update', { id:c.channel.id, expectedVersion:1, intervalMs:0 }); f.apply(c, c === cs[0] ? [one, two] : [one]); }); const g = f.group(cs); f.start(g);
+  cs.forEach(c => { f.manager.execute('channel.update', { id:c.channel.id, expectedVersion:1, intervalMs:3000 }); f.apply(c, c === cs[0] ? [one, two] : [one]); }); const g = f.group(cs); f.start(g);
   for (let i = 0; i < 300; i++) {
     const a = f.manager.snapshot().attempts.find(a => a.status === 'preparing'); const c = cs[i % 3];
     assert.equal(a.accountId, ['A','B','C'][i % 3]);
     assert.equal(f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE').payload.body, i % 3 === 0 && Math.floor(i / 3) % 2 ? 'Two' : 'One');
-    f.prepared(c, a); f.prepared(c, a); f.result(c, a); f.result(c, a); f.manager.tick();
+    f.prepared(c, a); f.prepared(c, a); f.result(c, a); f.result(c, a); if(i%3===2){f.advance(3000);for(const peer of cs)f.manager.bridge({type:'HEARTBEAT',sessionId:peer.sessionId},peer.instanceId);} f.manager.tick();
   }
   assert.equal(f.manager.analytics().outcomes.confirmed, 300);
   assert.equal(f.manager.snapshot().groups[0].cursor, 0); f.manager.close();
@@ -195,7 +195,7 @@ test('stop can complete after reconnect replaces superseded control commands', (
 });
 
 test('minimum group interval and account interval both hold even when wall clock moves within tolerance', () => {
-  const f=fixture(),cs=['A','B'].map(a=>f.connect(a));cs.forEach(c=>f.apply(c,[f.message(c.channel.accountId)]));const g=f.group(cs,5000);f.start(g);let a=f.manager.snapshot().attempts[0];f.prepared(cs[0],a);f.result(cs[0],a);
+  const f=fixture(),cs=['A','B'].map(a=>f.connect(a));cs.forEach(c=>{f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:60000});f.apply(c,[f.message(c.channel.accountId)]);});const g=f.group(cs,5000);f.start(g);let a=f.manager.snapshot().attempts[0];f.prepared(cs[0],a);f.result(cs[0],a);
   f.advance(4000);f.jumpWall(1000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
   f.advance(1000);f.manager.tick();a=f.manager.snapshot().attempts.find(a=>a.status==='preparing');assert.equal(a.accountId,'B');f.prepared(cs[1],a);f.result(cs[1],a);
   f.advance(5000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,2);assert.equal(f.manager.snapshot().groups[0].waitReason,'account_interval');f.manager.close();
@@ -207,9 +207,10 @@ test('commit permission fails closed after event-loop stall even before periodic
 });
 
 test('increased observed slowmode extends account wait after a confirmed post', () => {
-  const f=fixture(),c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:0});f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a);
+  const f=fixture(),c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:3000});f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a);
   f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',name:'Channel',tabId:1,verified:true,slowmodeMs:60000}]},c.instanceId);
-  f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);f.manager.close();
+  const synced=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:synced.id,status:'applied'},c.instanceId);
+  f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().groups[0].waitReason,'account_interval');f.manager.close();
 });
 
 test('reconciled uncertain result leaves no permit or lock owned by the paused group', () => {
@@ -218,7 +219,7 @@ test('reconciled uncertain result leaves no permit or lock owned by the paused g
 });
 
 test('retention removes completed detail but preserves unknown attempts, pending commands and replay tombstones', () => {
-  const f=fixture(),c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:0});f.apply(c,[f.message()]);f.start(f.group([c]));const done=f.manager.snapshot().attempts[0];f.prepared(c,done);f.result(c,done);f.manager.tick();const pending=f.manager.snapshot().attempts.find(a=>a.status==='preparing');f.prepared(c,pending);f.result(c,pending,'unknown');
+  const f=fixture(),c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:3000});f.apply(c,[f.message()]);f.start(f.group([c]));const done=f.manager.snapshot().attempts[0];f.prepared(c,done);f.result(c,done);f.advance(3000);f.manager.tick();const pending=f.manager.snapshot().attempts.find(a=>a.status==='preparing');f.prepared(c,pending);f.result(c,pending,'unknown');
   f.advance(91*86400000);f.manager.execute('maintenance.prune');
   assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().attempts[0].id,pending.id);assert.ok(f.manager.commands(c.instanceId).some(cmd=>cmd.type==='COMMIT_PERMIT'));
   assert.doesNotThrow(()=>f.result(c,done));assert.equal(f.manager.analytics().partialRecords,true);assert.ok(f.manager.events({attemptId:pending.id}).length>0);f.manager.close();
@@ -277,10 +278,10 @@ test('unexpected HELLO session replacement fences idle execution even without pr
 });
 
 test('each explicit run has a stable command identity and resuming creates a different identity', () => {
-  const f=fixture(),c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:0});f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];
+  const f=fixture(),c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:3000});f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];
   const prepare=f.manager.commands(c.instanceId).find(c=>c.type==='PREPARE');assert.ok(prepare.payload.runId);assert.equal(prepare.payload.runId,f.manager.snapshot().groups[0].runId);f.prepared(c,a);
   const permit=f.manager.commands(c.instanceId).find(c=>c.type==='COMMIT_PERMIT');assert.equal(permit.payload.runId,prepare.payload.runId);f.manager.execute('group.pause',{id:g.id});const control=f.manager.commands(c.instanceId).find(c=>c.type==='CONTROL');assert.equal(control.payload.runId,prepare.payload.runId);
-  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'applied'},c.instanceId);f.result(c,a);f.manager.execute('group.resume',{id:g.id});f.manager.tick();const second=f.manager.commands(c.instanceId).find(c=>c.type==='PREPARE');assert.notEqual(second.payload.runId,prepare.payload.runId);f.manager.close();
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'applied'},c.instanceId);f.result(c,a);f.advance(3000);f.manager.execute('group.resume',{id:g.id});f.manager.tick();const second=f.manager.commands(c.instanceId).find(c=>c.type==='PREPARE');assert.notEqual(second.payload.runId,prepare.payload.runId);f.manager.close();
 });
 
 test('last-moment Enter authorization is exact and a clock gap revokes pending permit delivery', () => {
@@ -372,11 +373,12 @@ test('초기화는 미확인 시도를 지우지 않고 완료 기록은 유지�
 
 test('읽은 슬로우 모드에 여유 3초를 자동 적용하고 읽기 누락 시 이전 제한을 유지한다',()=>{
  const f=fixture();try{
- const c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:0});f.apply(c,[f.message()]);const g=f.group([c]);
+ const c=f.connect();f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:1,intervalMs:3000});f.apply(c,[f.message()]);const g=f.group([c]);
  const observed={accountId:c.channel.accountId,guildId:'guild',channelId:'channel',name:'Channel',tabId:1,verified:true};
  const report=extra=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{...observed,...extra}]},c.instanceId);
  report({slowmodeMs:60000});assert.equal(f.manager.snapshot().channels[0].effectiveIntervalMs,63000);
  report({});assert.equal(f.manager.snapshot().channels[0].slowmodeMs,60000);
+ const synced=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:synced.id,status:'applied'},c.instanceId);
  f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a);
  for(let n=0;n<6;n++){f.advance(10000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();}
  assert.equal(f.manager.snapshot().attempts.length,1);
@@ -785,4 +787,159 @@ test('incident recheck uses retained terminal tombstones but never invents resul
     assert.equal(result.resolved,1);assert.equal(result.remaining,3);assert.deepEqual(result.blocked.map(i=>i.id),['missing','untyped','unrelated']);assert.ok(result.blocked.every(i=>i.reasonCode==='EVIDENCE_REQUIRED'));
     assert.equal(reopened.manager.snapshot().incidents.find(i=>i.id==='retained').resolutionReason,'terminal_attempt');reopened.manager.close();
   } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+function rejectedChannelOpen(f) {
+  const connection=independentAccount(f),target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/333'});
+  const command=f.manager.execute('channel.connect',{accountId:connection.account.id,targetId:target.id}).command;
+  const reject=()=>f.manager.bridge({type:'ACK',sessionId:connection.sessionId,commandId:command.id,status:'rejected',rejectionCode:'TARGET_MISMATCH'},connection.instanceId);
+  reject();const problem=f.manager.snapshot().incidents.find(i=>i.commandId===command.id);
+  const observe=(fields={},owner=connection)=>f.manager.bridge({type:'OBSERVATION',sessionId:owner.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:42,verified:true,...fields}]},owner.instanceId);
+  return{connection,target,command,problem,reject,observe};
+}
+
+test('incident recheck resolves rejected OPEN_CHANNEL only after the exact execution binding is reverified', () => {
+  const f=fixture(),opened=rejectedChannelOpen(f);f.advance(1);
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:opened.connection.sessionId,accountId:'111',verified:true},opened.connection.instanceId);
+  const registeredOnly=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(registeredOnly.resolved,0);assert.equal(registeredOnly.blocked[0].reasonCode,'CONNECTION_UNVERIFIED');assert.equal(registeredOnly.blocked[0].page,'channels');
+  opened.observe();const before=f.manager.snapshot(),result=f.manager.execute('incident.recheck',{id:opened.problem.id}),after=f.manager.snapshot();
+  assert.deepEqual(result,{resolved:1,remaining:0,blocked:[]});assert.equal(after.incidents.find(i=>i.id===opened.problem.id).resolutionReason,'connection_reverified');
+  for(const list of ['attempts','commands','groups','channels'])assert.deepEqual(after[list],before[list]);
+  assert.equal(f.manager.events().findLast(e=>e.type==='incident.resolved').reasonCode,'connection_reverified');f.manager.close();
+});
+
+test('OPEN_CHANNEL recheck does not accept another account, guild, channel or browser as connection proof', () => {
+  for(const mismatch of [{accountId:'222'},{guildId:'999'},{channelId:'444'},{otherBrowser:true}]){
+    const f=fixture(),opened=rejectedChannelOpen(f);f.advance(1);
+    if(mismatch.otherBrowser){const other=independentAccount(f);opened.observe({},other);}else opened.observe(mismatch);
+    const result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_UNVERIFIED');assert.equal(result.blocked[0].page,'channels');f.manager.close();
+  }
+});
+
+test('OPEN_CHANNEL recheck rejects stale heartbeat and verification older than the latest rejection', () => {
+  const f=fixture(),opened=rejectedChannelOpen(f);opened.observe();f.advance(1);opened.reject();
+  let result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_STALE');
+  opened.observe();f.advance(16000);result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_STALE');
+  f.manager.bridge({type:'HEARTBEAT',sessionId:opened.connection.sessionId},opened.connection.instanceId);
+  assert.equal(f.manager.execute('incident.recheck',{id:opened.problem.id}).resolved,1);f.manager.close();
+});
+
+test('OPEN_CHANNEL recheck rejects a replaced browser session and a false channel verification', () => {
+  for(const scenario of ['session','unverified']){
+    const f=fixture(),opened=rejectedChannelOpen(f);opened.observe();
+    if(scenario==='session'){
+      const fresh=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:opened.connection.instanceId,capabilities:['open-channel-v1']});
+      f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:fresh.sessionId,accountId:'111',verified:true},fresh.instanceId);
+    }else opened.observe({verified:false});
+    const result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].page,'channels');f.manager.close();
+  }
+});
+
+test('OPEN_CHANNEL recheck does not guess missing command routing from a healthy channel', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-open-alert-')),databasePath=join(dir,'state.sqlite');
+  try{
+    const f=fixture({databasePath}),opened=rejectedChannelOpen(f);opened.observe();f.manager.close();
+    const store=new CentralStore(databasePath),state=store.read();delete state.commands.find(c=>c.id===opened.command.id).payload;state.stateVersion++;store.commit(state,[]);store.close();
+    const reopened=fixture({databasePath}),fresh=reopened.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:opened.connection.instanceId,capabilities:['open-channel-v1']});
+    reopened.manager.bridge({type:'OBSERVATION',sessionId:fresh.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:42,verified:true}]},fresh.instanceId);
+    const result=reopened.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_UNVERIFIED');assert.equal(result.blocked[0].page,'channels');reopened.manager.close();
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('new account-channel bindings default to detected slowmode plus three seconds in automatic mode', () => {
+  const f=fixture(),c=f.connect();let channel=f.manager.snapshot().channels[0];
+  assert.equal(channel.intervalMode,'auto');assert.equal(channel.intervalMs,3000);assert.equal(channel.minimumIntervalMs,3000);assert.equal(channel.slowmodeObservedAt,undefined);
+  const observe=value=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:1,verified:true,...(value===undefined?{}:{slowmodeMs:value})}]},c.instanceId);
+  observe(60000);channel=f.manager.snapshot().channels[0];assert.equal(channel.intervalMs,63000);assert.equal(channel.minimumIntervalMs,63000);assert.equal(channel.effectiveIntervalMs,63000);assert.ok(channel.slowmodeObservedAt);
+  observe(undefined);assert.equal(f.manager.snapshot().channels[0].intervalMs,63000);
+  observe(120000);assert.equal(f.manager.snapshot().channels[0].intervalMs,123000);
+  observe(0);assert.equal(f.manager.snapshot().channels[0].intervalMs,3000);f.manager.close();
+});
+
+test('custom account-channel intervals enforce the detected floor and preserve intent as slowmode changes', () => {
+  const f=fixture(),c=f.connect();
+  const observe=slowmodeMs=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:1,verified:true,slowmodeMs}]},c.instanceId);
+  observe(60000);const update=payload=>f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:f.manager.snapshot().channels[0].version,...payload});
+  assert.throws(()=>update({intervalMs:60000}),{code:'INTERVAL_BELOW_SLOWMODE'});
+  let channel=update({intervalMode:'custom',intervalMs:90000});assert.equal(channel.intervalMode,'custom');assert.equal(channel.customIntervalMs,90000);assert.equal(channel.intervalMs,90000);
+  observe(120000);channel=f.manager.snapshot().channels[0];assert.equal(channel.intervalMs,123000);assert.equal(channel.customIntervalMs,90000);
+  observe(60000);assert.equal(f.manager.snapshot().channels[0].intervalMs,90000);
+  channel=update({intervalMode:'auto'});assert.equal(channel.intervalMs,63000);assert.equal(channel.customIntervalMs,undefined);
+  assert.throws(()=>update({intervalMode:'anything'}),{code:'VALIDATION'});f.manager.close();
+});
+
+test('actual interval changes synchronize configuration without resetting playlist position', () => {
+  const f=fixture(),c=f.connect();f.apply(c,[f.message('First'),f.message('Second')]);
+  const before=f.manager.snapshot().channels[0],changed=f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:before.version,intervalMode:'custom',intervalMs:90000});
+  assert.equal(changed.configVersion,before.configVersion+1);assert.equal(changed.appliedVersion,0);assert.equal(changed.playlistIndex,before.playlistIndex);
+  const config=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');assert.equal(config.payload.intervalMs,90000);assert.deepEqual(config.payload.items.map(item=>item.messageId),before.playlist.map(item=>item.messageId));
+  const count=f.manager.snapshot().commands.length;const same=f.manager.execute('channel.update',{id:c.channel.id,expectedVersion:changed.version,intervalMode:'custom',intervalMs:90000});assert.equal(same.configVersion,changed.configVersion);assert.equal(f.manager.snapshot().commands.length,count);f.manager.close();
+});
+
+test('slowmode changes defer configuration until the current attempt finishes without invalidating its permit', () => {
+  const f=fixture(),c=f.connect();f.apply(c,[f.message('First'),f.message('Second')]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0],version=f.manager.snapshot().channels[0].configVersion;
+  f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:1,verified:true,slowmodeMs:60000}]},c.instanceId);
+  let channel=f.manager.snapshot().channels[0];assert.equal(channel.intervalMs,63000);assert.equal(channel.pendingIntervalSync,true);assert.equal(channel.configVersion,version);assert.equal(f.manager.commands(c.instanceId).some(cmd=>cmd.type==='CONFIG_SYNC'),false);
+  f.prepared(c,a);f.result(c,a);channel=f.manager.snapshot().channels[0];assert.equal(channel.pendingIntervalSync,undefined);assert.equal(channel.configVersion,version+1);assert.equal(channel.playlistIndex,1);
+  assert.equal(f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC').payload.intervalMs,63000);
+  f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().groups[0].waitReason,'config_pending');f.manager.close();
+});
+
+test('an unknown attempt keeps interval synchronization pending until a terminal result is proven', () => {
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a,'unknown');
+  f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:1,verified:true,slowmodeMs:120000}]},c.instanceId);
+  assert.equal(f.manager.snapshot().attempts[0].status,'unknown');assert.equal(f.manager.snapshot().channels[0].pendingIntervalSync,true);assert.equal(f.manager.commands(c.instanceId).some(cmd=>cmd.type==='CONFIG_SYNC'),false);
+  f.result(c,a,'confirmed');assert.equal(f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC').payload.intervalMs,123000);f.manager.close();
+});
+
+test('older stored intervals migrate to automatic floor or retain a higher custom preference', () => {
+  const dir=mkdtempSync(join(tmpdir(),'dico-interval-migration-')),databasePath=join(dir,'state.sqlite');
+  try{
+    const f=fixture({databasePath});f.connect('A');f.connect('B');f.manager.close();
+    const store=new CentralStore(databasePath),state=store.read();state.channels.forEach((c,index)=>{delete c.intervalMode;delete c.customIntervalMs;c.slowmodeMs=60000;c.slowmodeObservedAt=1;c.intervalMs=index?90000:60000;});state.stateVersion++;store.commit(state,[]);store.close();
+    const reopened=fixture({databasePath}),channels=reopened.manager.snapshot().channels;
+    assert.equal(channels[0].intervalMode,'auto');assert.equal(channels[0].intervalMs,63000);assert.equal(channels[1].intervalMode,'custom');assert.equal(channels[1].intervalMs,90000);assert.equal(channels[1].customIntervalMs,90000);reopened.manager.close();
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('custom and detected interval changes preserve nonzero playlist and group cursors', () => {
+  const f=fixture(),cs=[f.connect('A'),f.connect('B')],messages=[f.message('First'),f.message('Second')];cs.forEach(c=>f.apply(c,messages));const g=f.group(cs);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(cs[0],a);f.result(cs[0],a);
+  f.manager.execute('group.pause',{id:g.id});for(const c of cs){const control=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'applied'},c.instanceId);}
+  const initial=f.manager.snapshot(),c=initial.channels.find(c=>c.id===cs[0].channel.id);assert.equal(c.playlistIndex,1);assert.equal(initial.groups[0].cursor,1);
+  f.manager.execute('channel.update',{id:c.id,expectedVersion:c.version,intervalMode:'custom',intervalMs:90000});
+  f.manager.bridge({type:'OBSERVATION',sessionId:cs[0].sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'A',guildId:'guild',channelId:'channel',tabId:1,verified:true,slowmodeMs:120000}]},cs[0].instanceId);
+  const after=f.manager.snapshot(),channel=after.channels.find(x=>x.id===c.id);assert.equal(channel.intervalMs,123000);assert.equal(channel.playlistIndex,1);assert.deepEqual(channel.playlist,c.playlist);assert.equal(after.groups[0].cursor,1);f.manager.close();
+});
+
+test('backup preserves automatic mode and a custom preference raised by the safety floor', () => {
+  const f=fixture(),cs=[f.connect('A'),f.connect('B')];
+  f.manager.execute('channel.update',{id:cs[1].channel.id,expectedVersion:1,intervalMode:'custom',intervalMs:90000});
+  for(const c of cs)f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:c.channel.tabId,verified:true,slowmodeMs:120000}]},c.instanceId);
+  const backup=f.manager.exportBackup();f.manager.importBackup(backup);const channels=f.manager.snapshot().channels;
+  assert.equal(channels[0].intervalMode,'auto');assert.equal(channels[0].intervalMs,123000);assert.equal(channels[1].intervalMode,'custom');assert.equal(channels[1].customIntervalMs,90000);assert.equal(channels[1].intervalMs,123000);assert.equal(channels[1].minimumIntervalMs,123000);assert.ok(channels[1].slowmodeObservedAt);f.manager.close();
+});
+
+function secondIntervalAttempt(f) {
+  const c=f.connect();f.apply(c,[f.message('First'),f.message('Second')]);const g=f.group([c],1000);f.start(g);const first=f.manager.snapshot().attempts[0];f.prepared(c,first);f.result(c,first);f.advance(3000);f.manager.tick();
+  const second=f.manager.snapshot().attempts.find(a=>a.status==='preparing');
+  const increase=()=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:1,verified:true,slowmodeMs:60000}]},c.instanceId);
+  return{c,g,second,increase};
+}
+
+test('increased slowmode before PREPARED withholds the permit and cancels only after executor blocking proof', () => {
+  const f=fixture(),{c,g,second,increase}=secondIntervalAttempt(f);increase();const reply=f.prepared(c,second);
+  assert.equal(reply.permitIssued,false);assert.equal(reply.reasonCode,'INTERVAL_NOT_ELAPSED');let s=f.manager.snapshot();assert.equal(s.attempts.find(a=>a.id===second.id).status,'preparing');assert.equal(s.groups[0].status,'pause_pending');assert.equal(s.channels[0].playlistIndex,1);
+  assert.equal(f.manager.commands(c.instanceId).some(cmd=>cmd.type==='COMMIT_PERMIT'&&cmd.payload.attemptId===second.id),false);
+  const control=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL'&&cmd.payload.groupId===g.id);
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'received'},c.instanceId);assert.equal(f.manager.snapshot().attempts.find(a=>a.id===second.id).status,'preparing');
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'applied',executionBlocked:true,attemptId:second.id},c.instanceId);
+  s=f.manager.snapshot();assert.equal(s.attempts.find(a=>a.id===second.id).status,'cancelled');assert.equal(s.groups[0].status,'paused');assert.equal(s.groups[0].cursor,0);assert.equal(s.channels[0].playlistIndex,1);assert.equal(f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC').payload.intervalMs,63000);f.manager.close();
+});
+
+test('increased slowmode after permit is rechecked immediately before Enter without inventing an unsent result', () => {
+  const f=fixture(),{c,second,increase}=secondIntervalAttempt(f);f.prepared(c,second);increase();
+  const authorization=f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:second.id,runId:second.runId,configVersion:second.configVersion},c.instanceId);
+  assert.equal(authorization.allowed,false);assert.equal(f.manager.snapshot().attempts.find(a=>a.id===second.id).status,'permitted');
+  f.result(c,second,'not_sent',{executionBlocked:true});let s=f.manager.snapshot();assert.equal(s.channels[0].playlistIndex,1);assert.equal(s.groups[0].cursor,0);assert.equal(s.attempts.length,2);
+  const config=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:config.id,status:'applied'},c.instanceId);f.manager.tick();s=f.manager.snapshot();assert.equal(s.groups[0].waitReason,'account_interval');assert.equal(s.attempts.length,2);f.manager.close();
 });

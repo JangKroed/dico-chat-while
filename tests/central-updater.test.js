@@ -97,7 +97,7 @@ async function workerFixture(t){
     steps.push(step.id);assert.equal(env.HOME,undefined);assert.equal(env.USERPROFILE,undefined);assert.equal(env.SECRET_TOKEN,undefined);
     if(step.id==='source'){
       const checkout=join(workDirectory,'checkout');for(const dir of ['central/extension','central/runtime','central/ui/dist'])await mkdir(join(checkout,dir),{recursive:true});
-      await writeFile(join(checkout,'central/marker'),'new');await writeFile(join(checkout,'central/package.json'),JSON.stringify({engines:{node:'>=24.13.0'}}));await writeFile(join(checkout,'central/extension/manifest.json'),JSON.stringify({key:'fixed-identity',version:'0.4.2'}));await writeFile(join(checkout,'central/runtime/main.mjs'),'// runtime');await writeFile(join(checkout,'central/ui/dist/index.html'),'new ui');
+      await writeFile(join(checkout,'central/marker'),'new');await writeFile(join(checkout,'central/package.json'),JSON.stringify({version:'0.4.3',engines:{node:'>=24.13.0'}}));await writeFile(join(checkout,'central/extension/manifest.json'),JSON.stringify({key:'fixed-identity',version:'0.4.2'}));await writeFile(join(checkout,'central/runtime/main.mjs'),'// runtime');await writeFile(join(checkout,'central/ui/dist/index.html'),'new ui');
     }
   };
   return{job,jobPath,run,steps,readStatus:async()=>JSON.parse(await readFile(join(directory,'updates/status.json'),'utf8'))};
@@ -107,7 +107,7 @@ test('isolated worker builds before approval, preserves binaries and publishes n
   const {runUpdateWorker}=await import('../central/runtime/updater.mjs'),f=await workerFixture(t);let approved=0,stopped=0,restarted=0;
   await runUpdateWorker(f.jobPath,{run:f.run,fetchRequest:async(url,options)=>{approved++;assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),'old');assert.deepEqual(f.steps,['source','dependencies','build','check']);assert.equal(JSON.parse(options.body).jobToken,f.job.jobToken);return{ok:true};},waitStopped:async()=>{stopped++;},restart:async()=>{restarted++;assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),'new');}});
   assert.deepEqual([approved,stopped,restarted],[1,1,1]);assert.equal(await readFile(join(f.job.app,'runtime/node'),'utf8'),'bundled-runtime');assert.equal(await readFile(join(f.job.app,'launcher.exe'),'utf8'),'bundled-launcher');
-  const status=await f.readStatus();assert.equal(status.phase,'completed');assert.equal(status.version,'0.4.2');assert.equal(JSON.stringify(status).includes(f.job.jobToken),false);assert.equal(JSON.stringify(status).includes(f.job.descriptor.bridgeToken),false);
+  const status=await f.readStatus();assert.equal(status.phase,'completed');assert.equal(status.version,'0.4.3');assert.equal(JSON.stringify(status).includes(f.job.jobToken),false);assert.equal(JSON.stringify(status).includes(f.job.descriptor.bridgeToken),false);
 });
 
 test('failed build or final busy denial never shuts down or modifies the installed app',async t=>{
@@ -168,4 +168,12 @@ test('a locked runtime refuses startup before loading replaceable application mo
     const output=execFileSync(process.execPath,['--input-type=module','-e',source],{encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:5000});
     assert.match(output,/이미 관리 프로그램이 실행 중/);assert.equal(output.includes('APP_LOGIC_WAS_LOADED'),false);
   }finally{await unlock();}
+});
+
+test('completed updates report installed app version even when an older worker reported extension version',async t=>{
+  const directory=await temp(t);await mkdir(join(directory,'app/central'),{recursive:true});await mkdir(join(directory,'updates'));
+  await writeFile(join(directory,'app/central/package.json'),JSON.stringify({version:'0.4.3'}));
+  await writeFile(join(directory,'updates/status.json'),JSON.stringify({phase:'completed',version:'0.4.2'}));
+  const controller=createUpdateController({directory,manager:{snapshot:()=>idle()},shutdown:async()=>{}});
+  assert.equal((await controller.status()).version,'0.4.3');
 });

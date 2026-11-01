@@ -111,3 +111,11 @@ Snapshots expose `accounts` (internal id, instanceId, Discord accountId, name, v
 GET `/api/updates`는 인증된 UI 세션에 `{phase,message,startedAt?,updatedAt?,version?}`를 반환한다. POST `/api/updates` `{}`는 Origin·CSRF를 검사하고 격리 준비를 시작하여 202와 같은 상태 객체를 반환한다. 사설 POST `/api/bridge/update/apply`는 네이티브 Bearer와 현재 작업의 jobToken, 준비 상태와 최신 실행 유휴 상태를 검증한다. 브라우저가 다운로드 URL·명령·설치 경로를 지정할 수 없다.
 
 네이티브 전용 EXTENSION_STATUS는 설치된 확장의 실제 해시와 중앙의 reloadSafe를 반환한다. 브라우저 메시지에 자격증명·로컬 경로를 노출하지 않는다. 동일 빌드에는 reload가 필요하지 않으며 다른 폴더로 로드된 확장의 재시작 루프를 제한한다.
+
+### 계정·채널 주기 (0.4.3)
+
+Channel DTO: `intervalMode: auto|custom`, `minimumIntervalMs`, 실제 `intervalMs`, 선택 `customIntervalMs`, `pendingIntervalSync`. 자동 주기는 마지막 관측 슬로우 모드+3000ms이다. 관측 없음은 0초 확인과 다르며 UI에서 감지 대기로 표시한다.
+
+`channel.update`의 `intervalMode: auto`는 자동으로 전환한다. custom은 `intervalMs`를 입력하며 현재 minimumIntervalMs 미만이면 서버가 거부한다. 오래된 클라이언트가 intervalMs만 보내면 직접 설정 의도로 처리한다. 느려진 제한에 따라 실제 주기를 올려도 원래 customIntervalMs는 보존한다. 진행·미확인 시도가 있으면 구성 동기화를 결과 확정 이후로 미룬다.
+
+`incident.recheck`는 OPEN_CHANNEL 명령의 전체 라우팅 ID와 현재 verified 세션, 최신 heartbeat, 마지막 거절 이후 관측 증거를 확인하면 `connection_reverified`로 과거 알림을 해결한다. 연결 복구를 발송 결과 확정으로 사용하지 않는다.

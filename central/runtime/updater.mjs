@@ -83,6 +83,11 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
       value={...value,phase:'failed',message:'failed',updatedAt:Date.now()};await writeUpdateJSON(statusFile,value);
       await release(owner.jobToken);if(activeJob?.jobToken===owner.jobToken)activeJob=undefined;
     }
+    // Earlier workers reported extension versions for manager-only updates.
+    if(value?.phase==='completed'){
+      const installed=await readJSON(join(directory,'app/central/package.json')).catch(()=>undefined);
+      if(installed?.version)value={...value,version:installed.version};
+    }
     return publicUpdateStatus(value);
   };
   async function release(jobToken){const owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(owner?.jobToken===jobToken)await rm(lock,{recursive:true,force:true});}
@@ -196,7 +201,7 @@ export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,wa
     for(const step of updateBuildPlan({...job,node:job.workerNode,checkout})) {stage=step.id;await report('preparing',stage);await run(step,env);}
     const current=await readJSON(join(job.app,'extension/manifest.json')),next=await readJSON(join(checkout,'central/extension/manifest.json'));
     if(!current?.key||next?.key!==current.key)throw Error('Extension identity changed');
-    const pkg=await readJSON(join(checkout,'central/package.json'));version=next.version;previousVersion=current.version;
+    const pkg=await readJSON(join(checkout,'central/package.json'));version=pkg?.version||next.version;previousVersion=(await readJSON(join(job.app,'central/package.json')))?.version||current.version;
     const minimum=/^>=(\d+\.\d+\.\d+)$/.exec(pkg?.engines?.node||'');
     if(!minimum||!supportedUpdateNode(process.versions.node)||minimum[1].split('.').some((part,index,parts)=>{const currentParts=process.versions.node.split('.').map(Number);return parts.slice(0,index).every((p,n)=>Number(p)===currentParts[n])&&Number(part)>currentParts[index];}))throw Error('Manual runtime upgrade required');
     await access(join(checkout,'central/ui/dist/index.html'));await access(join(checkout,'central/runtime/main.mjs'));
