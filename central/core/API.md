@@ -160,3 +160,11 @@ Managed channel pages share one dedicated window per browser profile. New channe
 Authenticated UI clients can POST `/api/remote-access-link` with the existing CSRF token. It issues a separate single-use bootstrap URL valid for 120 seconds; it never returns the native bridge credential. The runtime still binds to loopback and validates the exact Host/Origin. SSH forwarding must use the same port on both PCs. This grants the same workspace's full controller session and does not add remote Discord executors.
 
 Stored records follow retentionDays, not a count limit. Summary snapshots remain bounded for live updates. Authenticated paged history/log routes expose older retained records; a page-size limit does not limit the total number of retained records. Active/unresolved attempts are included even when older than the live summary window.
+
+## Direct LAN controllers (0.4.22)
+
+The primary runtime/native bridge stays on its existing `127.0.0.1` origin. A separate optional listener binds one discovered RFC1918/CGNAT IPv4 interface and a persisted independent port. `lan-access.json` lives in the private data directory, outside replaced application files. Startup defaults to disabled. An unavailable IP can follow a changed private address on the same saved interface, never another interface. Network configuration failure does not enable a public/wildcard listener.
+
+Local authenticated UI endpoints are `GET /api/lan-access`, `POST /api/lan-access {enabled,address?,port?}`, and `POST /api/lan-access/pair {}`. Mutations require the existing local CSRF token. Pairing returns `{code,expiresAt,url}`; the 48-bit code is single-use, expires after two minutes, and has a bounded attempt count.
+
+`GET /api/access-mode` exposes only `{mode:'local'|'lan'}` before login. LAN `POST /api/session {pairingCode}` creates a separate `dico_lan_session` HttpOnly/SameSite cookie plus CSRF token. LAN sessions are memory-only and reset when the listener stops or the program restarts. SSE revalidates sessions on pushes and heartbeats, including idle expiry. LAN requests to native bridge, LAN configuration, and the legacy SSH link issuer are rejected. A direct LAN controller otherwise controls the current owner's workspace; it does not register a remote Discord executor.

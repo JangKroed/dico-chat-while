@@ -23,12 +23,12 @@ export async function acquireLock(dir) {
 }
 export async function startCentralRuntime({directory=dataDirectory(),port,uiDirectory=resolve(dirname(fileURLToPath(import.meta.url)),'../ui/dist')}={}) {
   await mkdir(directory,{recursive:true,mode:0o700});if(process.platform!=='win32')await chmod(directory,0o700);const unlock=await acquireLock(directory);
-  let manager,server,app,timer,unsubscribe,updates,closing=false;
+  let manager,server,app,timer,unsubscribe,updates,lanAccess,closing=false;
   try {
     // The updater holds this same OS lock while replacing application trees.
     // Load replaceable modules only after startup owns the lock.
-    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController},{selectRuntimePort,createSessionStore}]=await Promise.all([
-      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs')
+    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController},{selectRuntimePort,createSessionStore},{createLanAccess}]=await Promise.all([
+      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs'),import('./lan-access.mjs')
     ]);
     const selectedPort=await selectRuntimePort({directory,port});
     const packageInfo=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')),appVersion=packageInfo.version;
@@ -38,6 +38,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
       if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();let shutdownError;
       if(!forUpdate)try{manager.execute('service.stopAll',{});}catch(error){shutdownError=error;}
       try{await atomicJSON(resolve(directory,'shutdown.json'),{intent:forUpdate?'update':'user',at:Date.now()});}catch(error){shutdownError??=error;}
+      try{await lanAccess?.close();}catch(error){shutdownError??=error;}
       try{await app.close();}catch(error){shutdownError??=error;}
       try{await new Promise(r=>server.close(r));}
       finally{
@@ -52,15 +53,16 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     server=http.createServer((req,res)=>{if(app)return void app.handler(req,res);res.writeHead(503,{'Cache-Control':'no-store'});res.end('관리 프로그램을 시작하고 있습니다.');});server.requestTimeout=15000;server.headersTimeout=10000;
     await new Promise((accept,reject)=>{server.once('error',error=>reject(error.code==='EADDRINUSE'?Object.assign(Error(`중앙 관리 주소의 ${selectedPort} 포트를 다른 프로그램이 사용하고 있습니다. 해당 프로그램을 종료한 뒤 다시 실행하세요. 주소를 임의로 변경하지 않았습니다.`),{code:'PORT_IN_USE'}):error));server.listen(selectedPort,'127.0.0.1',accept);});
     const url=`http://127.0.0.1:${server.address().port}`,sessionStore=await createSessionStore({directory,origin:url});
-    app=createCentralApplication({manager,origin:url,bridgeToken,uiDirectory,notificationDispatcher:dispatcher,updates,appVersion,initialSessions:sessionStore.sessions,saveSessions:sessionStore.save,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
+    lanAccess=await createLanAccess({directory,defaultPort:server.address().port<65535?server.address().port+1:43128,createApplication:options=>createCentralApplication({manager,uiDirectory,notificationDispatcher:dispatcher,updates,appVersion,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()}),...options})});
+    app=createCentralApplication({manager,origin:url,bridgeToken,lanAccess,uiDirectory,notificationDispatcher:dispatcher,updates,appVersion,initialSessions:sessionStore.sessions,saveSessions:sessionStore.save,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
     const descriptor={protocolVersion:1,url,pid:process.pid,bridgeToken};
     await atomicJSON(resolve(directory,'runtime.json'),descriptor);updates.setRuntimeDescriptor(descriptor);
     await unlink(resolve(directory,'shutdown.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
     const report=()=>void dispatcher.process(manager.snapshot()).catch(()=>{});
-    unsubscribe=manager.subscribe(report);
+    unsubscribe=manager.subscribe(event=>{report();if(event.type==='settings.reset')void lanAccess.reset().catch(()=>{});});
     timer=setInterval(()=>{try{manager.tick();report();}catch{report();}},1000);timer.unref();
-    return {url,manager,app,updates,close:closeRuntime};
-  } catch(error) {clearInterval(timer);unsubscribe?.();await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
+    return {url,manager,app,updates,lanAccess,close:closeRuntime};
+  } catch(error) {clearInterval(timer);unsubscribe?.();await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
 }
 function openBrowser(url) {
   const command=process.platform==='darwin'?'/usr/bin/open':process.platform==='win32'?'rundll32.exe':'xdg-open';

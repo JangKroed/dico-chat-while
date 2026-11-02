@@ -16,17 +16,22 @@ async function body(req) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,initialSessions=[],saveSessions=async()=>{},now=Date.now}) {
-  if (typeof bridgeToken!=='string' || bridgeToken.length<32)throw Error('Private bridge credential required');
-  const sessions=new Map(normalizeSessions(initialSessions,now()).map(({id,...session})=>[id,session])),bootstraps=new Map(),streams=new Set();let closed=false;
+export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
+  if(!['local','lan'].includes(mode))throw Error('Invalid access mode');
+  if (mode==='local'&&(typeof bridgeToken!=='string' || bridgeToken.length<32))throw Error('Private bridge credential required');
+  if(mode==='lan'&&typeof pairingCodes?.consume!=='function')throw Error('LAN pairing provider required');
+  // LAN controllers have a separate, memory-only cookie namespace. Closing
+  // this listener revokes them; local browser/native credentials never apply.
+  const cookieName=mode==='lan'?'dico_lan_session':'dico_session';
+  const sessions=new Map(normalizeSessions(mode==='lan'?[]:initialSessions,now()).map(({id,...session})=>[id,session])),bootstraps=new Map(),streams=new Set();let closed=false,failedPairings=0,pairingWindowStarted=now();
   const currentOrigin=()=>new URL(origin);
   const prune=()=>{for (const [k,v] of bootstraps)if(v<=now())bootstraps.delete(k);for (const [k,v] of sessions)if(v.expires<=now())sessions.delete(k);};
-  const persistSessions=async()=>{prune();const records=normalizeSessions([...sessions].map(([id,session])=>({id,...session})),now());const retained=new Set(records.map(session=>session.id));for(const id of sessions.keys())if(!retained.has(id))sessions.delete(id);await saveSessions(records);};
-  const issueBootstrap=(ttl=30000)=>{prune();const token=secret();bootstraps.set(token,now()+ttl);return token;};
+  const persistSessions=async()=>{prune();const records=normalizeSessions([...sessions].map(([id,session])=>({id,...session})),now());const retained=new Set(records.map(session=>session.id));for(const id of sessions.keys())if(!retained.has(id))sessions.delete(id);if(mode==='local')await saveSessions(records);};
+  const issueBootstrap=(ttl=30000)=>{if(mode!=='local')throw Error('Local bootstrap only');prune();const token=secret();bootstraps.set(token,now()+ttl);return token;};
   const uiSession=req=>{
-    prune();const id=(req.headers.cookie || '').split(';').map(x=>x.trim()).find(x=>x.startsWith('dico_session='))?.slice(13);
+    prune();const id=(req.headers.cookie || '').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
     const session=id && sessions.get(id);
-    if (!session)throw fail(401,'관리 프로그램에서 중앙 페이지를 다시 열어 주세요.');
+    if (!session)throw fail(401,mode==='lan'?'중앙 PC에서 연결 코드를 발급받아 로그인해 주세요.':'관리 프로그램에서 중앙 페이지를 다시 열어 주세요.');
     return session;
   };
   const checkMutation=(req,session)=>{
@@ -42,6 +47,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       const rawPath=(req.url || '/').split('?')[0];
       if (decodeURIComponent(rawPath).split('/').some(s=>s==='..' || s==='.') || rawPath.includes('\\'))throw fail(404,'경로를 찾을 수 없습니다.');
       const url=new URL(req.url,origin),path=url.pathname;
+      if(path==='/api/access-mode'&&req.method==='GET')return json(res,200,{mode});
+      // Check this before credentials or body parsing, even if a caller knows
+      // the native bridge token or holds a valid LAN controller session.
+      if(mode==='lan'&&(path.startsWith('/api/bridge')||path.startsWith('/api/lan-access')||path==='/api/remote-access-link'))throw fail(404,'이 접속에서는 사용할 수 없는 경로입니다.');
       if (path.startsWith('/api/bridge')) {
         // Only the native host reads this credential from the private descriptor.
         if (req.headers.origin || !equal(req.headers.authorization,`Bearer ${bridgeToken}`))throw fail(req.headers.origin?403:401,'브리지 인증이 필요합니다.');
@@ -70,16 +79,29 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       }
       if (path==='/api/session' && req.method==='POST') {
         if (req.headers.origin!==origin)throw fail(403,'요청 출처를 확인하세요.');
-        const {token}=await body(req);prune();
-        if (typeof token!=='string' || !bootstraps.has(token))throw fail(401,'페이지 연결이 만료됐습니다. 관리 프로그램에서 다시 열어 주세요.');
-        bootstraps.delete(token);const id=secret(),issuedAt=now(),session={csrfToken:secret(),issuedAt,expires:issuedAt+UI_SESSION_TTL};sessions.set(id,session);
+        const payload=await body(req);prune();
+        if(closed)throw fail(503,'접속이 종료됐습니다. 중앙 PC에서 접속 상태를 확인해 주세요.');
+        if(mode==='lan'){
+          if(now()-pairingWindowStarted>=120000){pairingWindowStarted=now();failedPairings=0;}
+          if(failedPairings>=10){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((pairingWindowStarted+120000-now())/1000))));throw fail(429,'연결 코드 입력 시도가 많습니다. 최대 2분 뒤 중앙 PC에서 새 코드를 받아 다시 입력해 주세요.');}
+          if(typeof payload.pairingCode!=='string'||payload.pairingCode.length>64||!pairingCodes.consume(payload.pairingCode)){failedPairings++;throw fail(401,'연결 코드가 올바르지 않거나 만료·사용됐습니다. 중앙 PC에서 새 코드를 확인해 주세요.');}
+        }else{
+          const {token}=payload;
+          if (typeof token!=='string' || !bootstraps.has(token))throw fail(401,'페이지 연결이 만료됐습니다. 관리 프로그램에서 다시 열어 주세요.');
+          bootstraps.delete(token);
+        }
+        const id=secret(),issuedAt=now(),session={csrfToken:secret(),issuedAt,expires:issuedAt+UI_SESSION_TTL};sessions.set(id,session);
         try{await persistSessions();}catch(error){sessions.delete(id);throw error;}
-        res.setHeader('Set-Cookie',`dico_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
+        res.setHeader('Set-Cookie',`${cookieName}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
         return json(res,200,{csrfToken:session.csrfToken,...(appVersion?{appVersion}:{})});
       }
       if (path.startsWith('/api/')) {
         const session=uiSession(req);
         if (path==='/api/session' && req.method==='GET')return json(res,200,{csrfToken:session.csrfToken,...(appVersion?{appVersion}:{})});
+        if(path==='/api/lan-access'&&req.method==='GET'){
+          if(!lanAccess)throw fail(404,'내부망 접속 기능이 준비되지 않았습니다.');
+          return json(res,200,await lanAccess.status());
+        }
         if (path==='/api/setup-status' && req.method==='GET') {
           if (!setupStatus)throw fail(503,'설치 진단 기능이 준비되지 않았습니다.');
           return json(res,200,await setupStatus());
@@ -98,15 +120,25 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         if (path==='/api/events' && req.method==='GET') {
           res.setHeader('Content-Type','text/event-stream');res.setHeader('Connection','keep-alive');res.writeHead(200);
           const write=(type,data,id)=>res.write(`${id?`id: ${id}\n`:''}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+          let heartbeat,unsubscribe=()=>{},ended=false;
+          const finish=()=>{if(ended)return;ended=true;clearInterval(heartbeat);unsubscribe();streams.delete(res);};
+          const authorized=()=>{if(ended)return false;try{if(!closed&&uiSession(req)===session)return true;}catch{}finish();res.end();return false;};
+          res.on('close',finish);streams.add(res);
           write('snapshot',manager.snapshot());
-          const unsubscribe=manager.subscribe(event=>{write('event',event,event.eventId);write('snapshot',manager.snapshot());});
-          const heartbeat=setInterval(()=>res.write(': keepalive\n\n'),15000);heartbeat.unref?.();
-          const finish=()=>{clearInterval(heartbeat);unsubscribe();streams.delete(res);};
-          res.on('close',finish);streams.add(res);return;
+          // An open stream does not extend cookie authentication. Check the
+          // live session before every push, and revoke idle expired streams.
+          unsubscribe=manager.subscribe(event=>{if(!authorized())return;write('event',event,event.eventId);write('snapshot',manager.snapshot());});
+          if(ended){unsubscribe();return;}
+          heartbeat=setInterval(()=>{if(authorized())res.write(': keepalive\n\n');},15000);heartbeat.unref?.();return;
         }
         if (req.method==='POST') {
           checkMutation(req,session);const payload=await body(req);
+          if(closed)throw fail(503,'접속이 종료됐습니다. 중앙 PC에서 접속 상태를 확인해 주세요.');
           if(updates?.isApplying())throw fail(503,'업데이트를 적용하고 있습니다. 관리 화면이 다시 열릴 때까지 기다려 주세요.');
+          if(path==='/api/lan-access'||path==='/api/lan-access/pair'){
+            if(!lanAccess)throw fail(404,'내부망 접속 기능이 준비되지 않았습니다.');
+            return json(res,200,await(path==='/api/lan-access'?lanAccess.update(payload):lanAccess.pair()));
+          }
           if(path==='/api/updates'){
             if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
             return json(res,202,await updates.start());
@@ -140,5 +172,5 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       json(res,status,{ok:false,error:{code:error.code || 'REQUEST_FAILED',message}});
     }
   };
-  return {handler,issueBootstrap,setOrigin:value=>{const u=new URL(value);if(u.hostname!=='127.0.0.1' || u.protocol!=='http:')throw Error('Loopback origin required');origin=u.origin;},close:async()=>{if(closed)return;closed=true;try{await persistSessions();}finally{for(const res of streams)res.end();streams.clear();sessions.clear();bootstraps.clear();}}};
+  return {handler,issueBootstrap,setOrigin:value=>{const u=new URL(value);if(mode!=='local'||u.hostname!=='127.0.0.1' || u.protocol!=='http:')throw Error('Loopback origin required');origin=u.origin;},close:async()=>{if(closed)return;closed=true;try{await persistSessions();}finally{for(const res of streams)res.end();streams.clear();sessions.clear();bootstraps.clear();}}};
 }

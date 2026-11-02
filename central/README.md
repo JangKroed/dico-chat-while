@@ -1,6 +1,6 @@
-# DICO 중앙관리 0.4.21 개발판
+# DICO 중앙관리 0.4.22 개발판
 
-새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.21입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
+새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.22입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
 
 ## 0.4.4 변경 사항
 
@@ -181,4 +181,4 @@ node scripts/central-ui-browser-check.mjs
 
 알림은 명령 코드 대신 원인·해결 순서·영향받은 브라우저·관련 화면을 보여줍니다. 과거 기록의 상세 사유가 없으면 미기록으로 안내하며, 읽음과 실제 해결을 구분합니다. 새 UI/계정 등록/채널 열기 기능을 쓰려면 중앙 프로그램과 각 확장을 함께 업데이트해야 합니다.
 
-다른 PC에서 관리 화면을 여는 방법은 [원격 접속 안내](../docs/central-management/REMOTE-ACCESS.md)를 따릅니다. 프로그램의 설정·도움말에도 같은 안내와 일회용 접속 링크 발급 기능이 있습니다.
+다른 PC에서 관리 화면을 여는 방법은 [원격 접속 안내](../docs/central-management/REMOTE-ACCESS.md)를 따릅니다. 프로그램의 설정·도움말에도 같은 안내와 내부망 주소·일회용 연결 코드 발급 기능이 있습니다.

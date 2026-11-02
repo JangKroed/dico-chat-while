@@ -106,3 +106,16 @@ export function subscribe(onMessage:(data:unknown)=>void,onDisconnect:()=>void):
 }
 
 export const createRemoteAccessLink = (signal?:AbortSignal) => request<{url:string;expiresAt:number}>('/api/remote-access-link',{method:'POST',body:'{}',signal})
+
+export type AccessMode='local'|'lan'
+export type LanAccessStatus={enabled:boolean;address:string;port:number;url?:string;addresses:{name:string;address:string}[];httpOnly:true;error?:string}
+export type LanPairing={code:string;expiresAt:number;url:string}
+export const getAccessMode=(signal?:AbortSignal)=>request<{mode:AccessMode}>('/api/access-mode',{signal})
+export const getLanAccess=()=>request<LanAccessStatus>('/api/lan-access')
+export const updateLanAccess=(settings:{enabled:boolean;address?:string;port?:number})=>request<LanAccessStatus>('/api/lan-access',{method:'POST',body:JSON.stringify(settings)})
+export const createLanPairing=()=>request<LanPairing>('/api/lan-access/pair',{method:'POST',body:'{}'})
+export async function establishLanSession(pairingCode:string):Promise<{appVersion?:string}>{
+  const session=await request<{csrfToken:string;appVersion?:string}>('/api/session',{method:'POST',body:JSON.stringify({pairingCode})})
+  csrfToken=session.csrfToken
+  return{appVersion:session.appVersion}
+}

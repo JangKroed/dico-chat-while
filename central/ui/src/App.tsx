@@ -9,6 +9,10 @@ import { createToastTimer } from './toast'
 import { selectEligibleIds } from './bulk-selection'
 import { UpdatePanel } from './UpdatePanel'
 import { RemoteAccessGuide } from './RemoteAccessGuide'
+import {LanAccessPanel} from './LanAccessPanel'
+import {LanLogin} from './LanLogin'
+import {lanLoginRequired} from './lan-access'
+import {getAccessMode,type AccessMode} from './api'
 import { ConnectionProgress } from './ConnectionProgress'
 import { browserDisplayName } from './connection-progress'
 import { waitReasonText } from './countdown'
@@ -51,6 +55,8 @@ function App() {
   const registerNavigationGuard=useCallback((guard:(()=>boolean)|null)=>{navigationGuard.current=guard},[])
   const [snapshot,setSnapshot] = useState<Snapshot>(empty)
   const [auth,setAuth] = useState<'loading'|'ready'|'unauthorized'|'error'>('loading')
+  const [accessMode,setAccessMode]=useState<AccessMode|null>(null)
+  const accessModeRef=useRef<AccessMode|null>(null)
   const [connected,setConnected] = useState(false)
   const [connectionPhase,setConnectionPhase]=useState<'connecting'|'connected'|'reconnecting'|'offline'|'expired'>('connecting')
   const [reconnectKey,setReconnectKey]=useState(0),[retryCount,setRetryCount]=useState(0)
@@ -122,6 +128,9 @@ function App() {
       let nextDelay=15000
       try {
         if(needsSession){
+          const access=await getAccessMode(controller.signal)
+          if(!active||requestEpoch!==epoch){wanted=true;return}
+          accessModeRef.current=access.mode;setAccessMode(access.mode)
           const session=await establishSession(controller.signal)
           if(!active||requestEpoch!==epoch){wanted=true;return}
           if(checkVersion(session.appVersion))return
@@ -135,7 +144,7 @@ function App() {
         if(!active)return
         if(requestEpoch!==epoch){wanted=true;return}
         closeStream();needsSession=true;setConnected(false)
-        if(error instanceof ApiError&&error.status===401){stopped=true;setAuth('unauthorized');setConnectionPhase('expired')}
+        if(error instanceof ApiError&&error.status===401){stopped=true;setAuth('unauthorized');setConnectionPhase('expired');if(accessModeRef.current==='lan'){hasConnected.current=false;setSnapshot(empty);setAnalytics({period:'24h',data:null,receivedAt:0,loading:false,error:false});setNotice(null);setRetryWaitingId(null);setNotifications(false);navigationGuard.current=null;settingsHaveDraft.current=false}}
         else {
           failures++;setRetryCount(failures)
           const delay=reconnectDelay(failures)
@@ -187,6 +196,7 @@ function App() {
   const startReasons = allRunBlockers(snapshot)
   const startBlocked = stale||snapshot.groups.length===0||startReasons.length>0||Boolean(snapshot.service?.status&&!['ready','resume_required','stopped'].includes(String(snapshot.service.status)))
   const actionBusy=busy||auth!=='ready'||!connected
+  if(lanLoginRequired(accessMode,auth))return <LanLogin onAuthenticated={()=>{setAuth('loading');setReconnectKey(key=>key+1)}}/>
   if (auth!=='ready'&&!hasConnected.current) return <div className="gate"><div className="brand-logo">D</div><h1>DICO 중앙 관리</h1><p>{auth==='loading'?(connectionPhase==='reconnecting'?`관리 프로그램에 다시 연결하고 있습니다… (${retryCount} / 8)`:'로컬 관리 프로그램에 연결하고 있습니다…'):auth==='unauthorized'?'연결 세션이 만료됐습니다. DICO 확장의 ‘채널 설정 열기’로 다시 인증해 주세요.':'자동 재연결을 잠시 멈췄습니다. 관리 프로그램이 실행 중인지 확인한 뒤 다시 연결해 주세요.'}</p><button onClick={()=>setReconnectKey(key=>key+1)}>연결 다시 확인</button></div>
   return <ServerClock serverNow={snapshot.serverNow} receivedAt={snapshotReceivedAt} connected={connected&&auth==='ready'}><div className="shell"><DialogAccessibility/>
     <aside id="main-sidebar" ref={sidebarRef} className={`sidebar ${menu?'open':''}`}>
@@ -206,7 +216,7 @@ function App() {
         {page==='groups'&&<Groups s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard}/>}
         {page==='history'&&<History s={snapshot} go={go} run={run} busy={actionBusy} retryNotSent={retryNotSent} retryWaitingId={retryWaitingId}/>}
         {page==='logs'&&<Logs s={snapshot} analytics={analytics.period===period?analytics.data:null} analyticsStatus={analytics.period===period?(analytics.error?'error':analytics.loading?'loading':'ready'):'loading'} analyticsAt={analytics.period===period?analytics.receivedAt:0} retryAnalytics={()=>setAnalyticsRetry(value=>value+1)} period={period} go={go} run={run} busy={actionBusy} refresh={refresh} retryNotSent={retryNotSent} retryWaitingId={retryWaitingId}/>}
-        {page==='settings'&&<Settings draftStatus={settingsHaveDraft} s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard} appVersion={appVersion} notify={async()=>{if(auth!=='ready'||!connected){showNotice('다시 인증하고 관리 프로그램 연결을 확인한 뒤 알림을 요청해 주세요.','error');return}try {const response=await testNotification();showNotice(response.result.status==='requested'?'OS 테스트 알림을 요청했습니다. 표시 여부는 운영체제 설정에 따라 달라질 수 있습니다.':response.result.status==='disabled'?'OS 알림이 꺼져 있습니다. 알림 설정을 켠 뒤 다시 시도해 주세요.':'이 환경에서는 OS 알림을 사용할 수 없습니다. 화면 알림은 계속 표시됩니다.')}catch(e){showNotice(requestErrorMessage(e),'error')}}}/>}
+        {page==='settings'&&<Settings accessMode={accessMode} draftStatus={settingsHaveDraft} s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard} appVersion={appVersion} notify={async()=>{if(auth!=='ready'||!connected){showNotice('다시 인증하고 관리 프로그램 연결을 확인한 뒤 알림을 요청해 주세요.','error');return}try {const response=await testNotification();showNotice(response.result.status==='requested'?'OS 테스트 알림을 요청했습니다. 표시 여부는 운영체제 설정에 따라 달라질 수 있습니다.':response.result.status==='disabled'?'OS 알림이 꺼져 있습니다. 알림 설정을 켠 뒤 다시 시도해 주세요.':'이 환경에서는 OS 알림을 사용할 수 없습니다. 화면 알림은 계속 표시됩니다.')}catch(e){showNotice(requestErrorMessage(e),'error')}}}/>}
       </main>
     </div>
   </div></ServerClock>
@@ -493,7 +503,7 @@ function SetupDiagnostics() {
   </Section>
 }
 
-function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard}:Common&{notify:()=>Promise<void>;appVersion?:string;draftStatus:{current:boolean}}) {
+function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard,accessMode}:Common&{accessMode:AccessMode|null;notify:()=>Promise<void>;appVersion?:string;draftStatus:{current:boolean}}) {
   const [appearance,showAppearance]=useState(getAppearance)
   useEffect(()=>subscribeAppearance(()=>showAppearance(getAppearance())),[])
   const [draft,setDraft]=useState(()=>createSettingsDraft(s.settings))
@@ -528,7 +538,7 @@ function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard}:Co
     if(ok)setImportFile(null)
   }
   return <><Heading eyebrow="PREFERENCES / 도움말" title="설정 · 도움말" description="처음 시작하는 방법과 로컬 작업 공간의 설정을 확인하세요."/>
-    <div className="settings-grid"><div className="settings-main"><UpdatePanel s={s} busy={busy} go={go} appVersion={appVersion}/><SetupDiagnostics/><RemoteAccessGuide busy={busy}/><Section title="시작 가이드" subtitle={`${steps.filter(x=>x.done).length} / ${steps.length}단계 완료 · 실제 저장과 연결 상태 기준`}>
+    <div className="settings-grid"><div className="settings-main"><UpdatePanel s={s} busy={busy} go={go} appVersion={appVersion}/><SetupDiagnostics/><LanAccessPanel mode={accessMode} busy={busy}/>{accessMode==='local'&&<details><summary>고급: SSH 터널로 접속</summary><RemoteAccessGuide busy={busy}/></details>}<Section title="시작 가이드" subtitle={`${steps.filter(x=>x.done).length} / ${steps.length}단계 완료 · 실제 저장과 연결 상태 기준`}>
       <div className="guide-list">{steps.map((step,i)=><div className="guide-step" key={step.title}><span className={step.done?'done':''}>{step.done?'✓':i+1}</span><div><strong>{step.title}</strong><p>{step.description}</p></div><button className="text-action" onClick={()=>go(step.page)}>{step.done?'다시 보기':'설정하기'} →</button></div>)}</div>
       <div className="editor-note">ⓘ 설정을 마쳐도 자동으로 시험 메시지를 보내지 않습니다. 발송은 그룹에서 명시적으로 시작합니다.</div>
     </Section></div><div className="settings-side"><Section title="화면 모드" subtitle="이 브라우저에 자동으로 저장됩니다."><div className="setting-row"><div><strong>테마</strong><p>시스템 설정을 선택하면 운영체제의 화면 모드를 따릅니다.</p></div><select aria-label="화면 모드" value={appearance} onChange={e=>setAppearance(e.target.value as Appearance)}><option value="system">시스템 설정</option><option value="light">라이트</option><option value="dark">다크</option></select></div></Section><Section title="알림" subtitle="OS 알림과 화면의 문제 목록은 별도로 동작합니다.">
