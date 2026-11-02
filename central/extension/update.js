@@ -33,6 +33,10 @@ export function createExtensionUpdater({chrome,executor,transport,loadedBuildId,
       const status=await transport.request({type:'EXTENSION_STATUS'});
       const saved=(await chrome.storage.local.get('dicoUpdateReload')).dicoUpdateReload;
       const decision=extensionReloadDecision({loadedBuildId,status,idle:executor.isIdle,lastRequested:saved?.buildId});
+      // A busy configuration lane is transient. Recheck on the next scheduled
+      // heartbeat instead of losing the entire pre-start reload window to the
+      // ordinary 30-second update backoff. This creates no polling loop.
+      if(decision.action==='defer'){lastCheck=-Infinity;return;}
       if(decision.action==='manual'){onIssue('확장 로드 폴더가 관리 폴더와 다를 수 있습니다. 설정·도움말의 최초 전환 안내를 확인하세요. 같은 버전의 자동 재시작은 반복하지 않습니다.');return;}
       if(decision.action!=='reload'||!executor.beginMaintenance())return;
       try {

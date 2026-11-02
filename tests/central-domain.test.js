@@ -1233,3 +1233,15 @@ test('clock gap keeps the service ready but revokes old permits and never restar
  assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion},c.instanceId).allowed,false);
  f.advance(1000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().groups[0].status,'pause_pending');f.manager.close();
 });
+
+test('HELLO persists the exact validated extension build in the public instance record and clears stale missing evidence',()=>{
+ const f=fixture(),first='a'.repeat(64),second='b'.repeat(64);
+ const connection=f.manager.bridge({type:'HELLO',protocolVersion:1,extensionVersion:'0.4.16',extensionBuildId:first});
+ assert.equal(f.manager.snapshot().instances[0].extensionBuildId,first);
+ f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:connection.instanceId,extensionBuildId:second});
+ assert.equal(f.manager.snapshot().instances[0].extensionBuildId,second);
+ for(const extensionBuildId of ['bad','a'.repeat(65),42,null])assert.throws(()=>f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:connection.instanceId,extensionBuildId}),{code:'VALIDATION'});
+ assert.equal(f.manager.snapshot().instances[0].extensionBuildId,second);
+ f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:connection.instanceId});
+ assert.equal(f.manager.snapshot().instances[0].extensionBuildId,undefined);f.manager.close();
+});

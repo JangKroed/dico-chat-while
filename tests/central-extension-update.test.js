@@ -59,3 +59,30 @@ test('failed persistence never reloads and releases local maintenance',async()=>
  await createExtensionUpdater({chrome:{storage:{local:{get:async()=>({}),set:async()=>{throw Error('disk');}}},runtime:{reload:()=>reloads++}},executor:{isIdle:true,beginMaintenance:()=>true,endMaintenance:()=>{ended=true;}},transport:{request:async()=>({buildId:'b'.repeat(64),reloadSafe:true})},loadedBuildId:'a'.repeat(64)}).check({force:true});
  assert.equal(reloads,0);assert.equal(ended,true);
 });
+
+test('a deferred reload retries on the next heartbeat once local work or the global stop barrier clears',async()=>{
+ const {createExtensionUpdater}=await import('../central/extension/update.js');
+ for(const initiallyBusy of ['local','global']){
+  let now=1000,idle=initiallyBusy!=='local',reloadSafe=initiallyBusy!=='global',reloads=0,checks=0;
+  const updater=createExtensionUpdater({now:()=>now,loadedBuildId:'a'.repeat(64),
+   executor:{get isIdle(){return idle;},beginMaintenance:()=>idle,endMaintenance(){}},
+   chrome:{storage:{local:{get:async()=>({}),set:async()=>{}}},runtime:{reload:()=>reloads++}},
+   transport:{request:async()=>{checks++;return{buildId:'b'.repeat(64),reloadSafe};}}});
+  await updater.check({force:true});assert.equal(reloads,0);
+  now+=5000;idle=true;reloadSafe=true;await updater.check();
+  assert.equal(reloads,1,initiallyBusy);assert.equal(checks,2,initiallyBusy);
+ }
+});
+
+test('unchanged, manual and failed update checks retain the thirty-second backoff',async()=>{
+ const {createExtensionUpdater}=await import('../central/extension/update.js');
+ for(const mode of ['unchanged','manual','transport-error','reload-error']){
+  let now=1000,checks=0,reloads=0;
+  const updater=createExtensionUpdater({now:()=>now,loadedBuildId:'a'.repeat(64),onIssue:()=>{},
+   executor:{isIdle:true,beginMaintenance:()=>true,endMaintenance(){}},
+   chrome:{storage:{local:{get:async()=>mode==='manual'?{dicoUpdateReload:{buildId:'b'.repeat(64)}}:{},set:async()=>{}}},runtime:{reload:()=>{reloads++;throw Error('reload failed');}}},
+   transport:{request:async()=>{checks++;if(mode==='transport-error')throw Error('unavailable');return{buildId:(mode==='unchanged'?'a':'b').repeat(64),reloadSafe:true};}}});
+  await updater.check();now+=5000;await updater.check();assert.equal(checks,1,mode);
+  now+=25000;await updater.check();assert.equal(checks,2,mode);assert.equal(reloads,mode==='reload-error'?2:0);
+ }
+});

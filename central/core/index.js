@@ -562,6 +562,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return transact(()=>{
       if(message.type==='HELLO'){
         ensure(message.protocolVersion===1,'PROTOCOL_MISMATCH','Update the extension to central protocol 1.',409);
+        ensure(message.extensionBuildId===undefined||typeof message.extensionBuildId==='string'&&/^[a-f0-9]{64}$/.test(message.extensionBuildId),'VALIDATION','Invalid extension build identity.');
         const capabilities=message.capabilities??[];ensure(Array.isArray(capabilities)&&capabilities.length<=32&&capabilities.every(value=>typeof value==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)),'VALIDATION','Invalid extension capabilities.');
         let i=state.instances.find(i=>i.id===message.instanceId);
         if(!i){i={id:message.instanceId?text(message.instanceId,'instanceId',100):id(),version:1,name:text(message.name||'Connected browser','name'),browser:typeof message.browser==='string'?message.browser.slice(0,40):'Chromium',extensionVersion:typeof message.extensionVersion==='string'?message.extensionVersion.slice(0,40):'unknown',createdAt:now()};state.instances.push(i);}
@@ -569,7 +570,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const browser=typeof message.browser==='string'&&message.browser.trim()?message.browser.trim().slice(0,40):i.browser;
         const extensionVersion=typeof message.extensionVersion==='string'&&message.extensionVersion.trim()?message.extensionVersion.trim().slice(0,40):i.extensionVersion;
         const name=automaticName?`연결된 ${browser}`:i.name;
-        if(i.browser!==browser||i.extensionVersion!==extensionVersion||i.name!==name){i.browser=browser;i.extensionVersion=extensionVersion;i.name=name;i.version++;}
+        if(i.browser!==browser||i.extensionVersion!==extensionVersion||i.extensionBuildId!==message.extensionBuildId||i.name!==name){i.browser=browser;i.extensionVersion=extensionVersion;i.name=name;i.version++;}
+        if(message.extensionBuildId===undefined)delete i.extensionBuildId;else i.extensionBuildId=message.extensionBuildId;
         i.capabilities=[...new Set(capabilities)];
         if(i.sessionId)blockInstanceGroups(i.id,'session_changed');
         for(const c of state.commands.filter(c=>c.instanceId===i.id&&(!['completed','applied','rejected'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')))c.status='superseded';
