@@ -1,3 +1,4 @@
+import {composerClearedEvidence} from '../extension/delivery-receipt.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { CentralStore } from './store.js';
 import { CentralError, requireValue as ensure, text, body, duration, tags, expected } from './validation.js';
@@ -14,7 +15,8 @@ const clone = value => structuredClone(value);
 function deliveryEvidence(value){
   if(!value||typeof value!=='object'||!['prepare','commit','send'].includes(value.phase)||!['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage)||typeof value.enterAttempted!=='boolean')return undefined;
   const result={phase:value.phase,stage:value.stage,enterAttempted:value.enterAttempted};
-  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused'])if(typeof value[key]==='boolean')result[key]=value[key];
+  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched'])if(typeof value[key]==='boolean')result[key]=value[key];
+  if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)result.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))result.submitMethod=value.submitMethod;
   for(const key of ['retryCount','maxSendRetries'])if(Number.isInteger(value[key])&&value[key]>=0&&value[key]<=5)result[key]=value[key];
   return result;
@@ -30,7 +32,7 @@ const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
   const store = new CentralStore(databasePath), listeners=new Set();
   let state=store.read(), closed=false, storageFailure=null, lastWall=now(), lastMono=monotonicNow();
-  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;state.settings.maxSendRetries??=5;state.intervals??=[];state.accounts??=[];state.targets??=[];for(const c of state.channels)initializeChannelInterval(c);
+  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;state.settings.maxSendRetries??=5;state.intervals??=[];state.accounts??=[];state.targets??=[];state.removals??={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};for(const c of state.channels)initializeChannelInterval(c);
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
   let pending=[];
@@ -108,6 +110,46 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(!state.targets.some(t=>t.guildId===c.guildId&&t.channelId===c.channelId))upsertTarget(c.guildId,c.channelId,{observedName:c.verified?c.observedName:undefined});
     }
   }
+  const removalKey=(...parts)=>JSON.stringify(parts);
+  const targetKey=c=>removalKey(c.guildId,c.channelId);
+  const accountKey=c=>removalKey(c.instanceId,c.accountId);
+  const bindingKey=c=>removalKey(c.instanceId,c.accountId,c.guildId,c.channelId);
+  function rememberRemoval(kind,key){if(!state.removals[kind].includes(key))state.removals[kind].push(key);}
+  function removedScope(c){return state.removals.instances.includes(c.instanceId)||state.removals.targets.includes(targetKey(c))||state.removals.accounts.includes(accountKey(c))||state.removals.bindings.includes(bindingKey(c));}
+  function queuePendingCloses(instanceId){
+    const instance=state.instances.find(i=>i.id===instanceId);if(!instance?.connected)return;
+    for(const request of state.removals.closeRequests.filter(r=>r.instanceId===instanceId)){
+      const prior=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.instanceId===instanceId&&c.sessionId===instance.sessionId&&c.payload.removalId===request.removalId);
+      if(prior&&(['queued','received','applied'].includes(prior.status)||now()-(prior.rejectedAt||prior.createdAt)<30000))continue;
+      if(prior?.status==='rejected'&&(request.retries||0)>=3)continue;
+      if(!prior)request.retries=0;else if(prior.status==='rejected')request.retries=(request.retries||0)+1;
+      const {instanceId:owner,...payload}=request;command('CLOSE_CHANNEL',owner,payload);
+    }
+  }
+  function removeConfiguration(kind,entity){
+    const matches=c=>kind==='instance'?c.instanceId===entity.id:kind==='account'?c.instanceId===entity.instanceId&&c.accountId===entity.accountId:kind==='target'?c.guildId===entity.guildId&&c.channelId===entity.channelId:c.id===entity.id||c.bindingId===entity.id;
+    const channels=state.channels.filter(matches),ids=new Set(channels.map(c=>c.id));
+    const groups=state.groups.filter(g=>g.members.some(member=>ids.has(member)));
+    const blocked=groups.filter(g=>!['stopped','paused'].includes(g.status)||g.activeAttemptId||g.controlIntent);
+    const active=state.attempts.filter(a=>ACTIVE.has(a.status)&&(ids.has(a.bindingId)||matches(a)));
+    ensure(!blocked.length&&!active.length,'REMOVAL_BLOCKED',`삭제 전에 ${[...new Set([...blocked.map(g=>g.name),...active.map(a=>state.groups.find(g=>g.id===a.groupId)?.name||'미확인 발송')])].join(', ')} 그룹을 중지하고 진행 중·미확인 발송 결과를 확인하세요.`,409);
+    for(const a of state.attempts.filter(a=>ids.has(a.bindingId)||matches(a))){
+      const channel=state.channels.find(c=>c.id===a.bindingId),account=state.accounts.find(c=>c.instanceId===a.instanceId&&c.accountId===a.accountId);
+      a.accountName??=account?.name||a.accountId;a.channelName??=channel?.name||state.targets.find(t=>t.guildId===a.guildId&&t.channelId===a.channelId)?.name;
+      a.groupName??=state.groups.find(g=>g.id===a.groupId)?.name;a.instanceName??=state.instances.find(i=>i.id===a.instanceId)?.name;
+    }
+    const closing=[...channels];
+    for(const c of state.commands.filter(c=>c.type==='OPEN_CHANNEL'&&['queued','received','applied'].includes(c.status))){const scope={...c.payload,instanceId:c.instanceId};if(matches(scope)&&!closing.some(x=>bindingKey(x)===bindingKey(scope)))closing.push(scope);}
+    for(const c of closing){rememberRemoval('bindings',bindingKey(c));if(!state.removals.closeRequests.some(r=>bindingKey(r)===bindingKey(c)))state.removals.closeRequests.push({removalId:id(),instanceId:c.instanceId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,...(c.id?{bindingId:c.id}:{}),...(Number.isInteger(c.tabId)?{tabId:c.tabId}:{}),accountName:state.accounts.find(a=>accountKey(a)===accountKey(c))?.name||c.accountId,channelName:c.name||entity.name,createdAt:now()});}
+    for(const g of groups){const previous=g.members,remaining=previous.filter(member=>!ids.has(member));const next=previous.map((_,offset)=>previous[(g.cursor+offset)%previous.length]).find(member=>remaining.includes(member));release(g);g.members=remaining;g.cursor=Math.max(0,remaining.indexOf(next));g.version++;if(!remaining.length)state.groups=state.groups.filter(x=>x.id!==g.id);}
+    for(const c of state.commands)if(c.type!=='CLOSE_CHANNEL'&&(ids.has(c.payload.bindingId)||matches({...c.payload,instanceId:c.instanceId})||groups.some(g=>g.id===c.payload.groupId)))c.status='superseded';
+    state.channels=state.channels.filter(c=>!ids.has(c.id));
+    if(kind==='target'){rememberRemoval('targets',targetKey(entity));state.targets=state.targets.filter(x=>x.id!==entity.id);}
+    if(kind==='account'||kind==='instance'){for(const a of state.accounts.filter(a=>kind==='instance'?a.instanceId===entity.id:a.id===entity.id))rememberRemoval('accounts',accountKey(a));state.accounts=state.accounts.filter(a=>kind==='instance'?a.instanceId!==entity.id:a.id!==entity.id);}
+    if(kind==='instance'){rememberRemoval('instances',entity.id);state.instances=state.instances.filter(i=>i.id!==entity.id);}
+    for(const instanceId of new Set(closing.map(c=>c.instanceId)))queuePendingCloses(instanceId);
+    event(`${kind}.deleted`,{entityId:entity.id,removedBindings:channels.length,pendingTabCloses:closing.length});return{id:entity.id,deleted:true,removedBindings:channels.length,pendingTabCloses:closing.length};
+  }
   function invalidateAccounts(instanceId){for(const a of state.accounts.filter(a=>a.instanceId===instanceId))a.verified=false;}
   function currentAccount(account){const instance=state.instances.find(i=>i.id===account.instanceId);return !!(account.verified&&instance?.connected&&account.sessionId===instance.sessionId&&Number.isFinite(account.lastVerifiedAt)&&now()-account.lastVerifiedAt<=15000&&now()-instance.lastSeenAt<=15000);}
   function recordIntervals(){
@@ -127,7 +169,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const cutoff=now()-state.settings.retentionDays*86400000;let removed=0;
     state.attempts=state.attempts.map(a=>{
       if(!TERMINAL.has(a.status)||a.pruned||a.finalizedAt>=cutoff)return a;
-      removed++;return{id:a.id,status:a.status,instanceId:a.instanceId,createdAt:a.createdAt,finalizedAt:a.finalizedAt,manual:a.manual||false,permitIssued:!!a.permitId,pruned:true};
+      removed++;return{id:a.id,status:a.status,instanceId:a.instanceId,createdAt:a.createdAt,finalizedAt:a.finalizedAt,manual:a.manual||false,permitIssued:!!a.permitId,...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{}),pruned:true};
     });
     state.commands=state.commands.filter(c=>c.createdAt>=cutoff||['queued','received'].includes(c.status)||state.attempts.some(a=>ACTIVE.has(a.status)&&a.id===c.payload.attemptId));
     state.incidents=state.incidents.filter(i=>i.status==='open'||(i.resolvedAt||i.lastSeenAt)>=cutoff);
@@ -204,6 +246,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(current&&Number.isFinite(binding.observedAt)&&binding.observedAt>=rejectedAt&&binding.observedAt<=now())reasonCode='connection_reverified';
           else{block='CONNECTION_STALE';message='거절 이후 현재 브라우저 세션에서 연결을 확인한 기록이 필요합니다. 전송용 Discord 창을 열고 채널 관리에서 다시 연결한 뒤 재확인하세요.';}
         }
+      }else if(i.code==='command_rejected'&&type==='CLOSE_CHANNEL'){
+        if(c?.payload.removalId&&state.commands.some(done=>done.type==='CLOSE_CHANNEL'&&done.payload.removalId===c.payload.removalId&&done.status==='applied'))reasonCode='managed_tab_closed';
+        else{block='CLOSE_PENDING';message='해당 브라우저의 남은 전송 탭을 확인하세요. 브라우저와 확장을 다시 연결하면 닫기를 재시도합니다. 다른 페이지로 이동한 탭은 직접 닫아 주세요.';page='connections';}
       }else if(i.code==='command_rejected'&&type==='MANAGE_WINDOW'){
         const payload=c?.payload,action=payload?.action;
         const label=({reveal:'전송 창 보기',hide:'전송 창 숨기기',consolidate:'전송 창 모으기',separate:'채널별 창 분리'})[action]||'전송 창 관리';
@@ -311,10 +356,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     c.playlist=items;c.playlistIndex=0;c.configVersion++;c.appliedVersion=0;c.version++;c.updatedAt=now();delete c.pendingIntervalSync;delete c.intervalSyncBaseMs;
     queueConfiguration(c);event('channel.playlist_applied',{channelId:c.id,configVersion:c.configVersion});
   }
-  function finish(a,outcome,{messageId,manual=false,confirmationMs}={}){
+  function finish(a,outcome,{messageId,manual=false,confirmationMs,confirmationBasis}={}){
     if(outcome==='confirmed')ensure(a.permitId||a.permitIssued,'PERMIT_REQUIRED','No commit permit was issued for this attempt.',409);
     if(TERMINAL.has(a.status)){ensure(a.status===outcome,'RESULT_CONFLICT','This attempt already has a different final result.',409);return a;}
-    a.status=outcome;a.finalizedAt=now();a.manual=manual;if(messageId)a.messageId=text(messageId,'messageId',200);
+    a.status=outcome;a.finalizedAt=now();a.manual=manual;if(messageId)a.messageId=text(messageId,'messageId',200);if(outcome==='confirmed')a.confirmationBasis=confirmationBasis||'message_observed';
     if(Number.isFinite(confirmationMs)&&confirmationMs>=0)a.confirmationMs=Math.min(confirmationMs,86_400_000);
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
     if(outcome==='confirmed'){
@@ -327,7 +372,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(c.pendingPlaylist){applyPlaylist(c,c.pendingPlaylist);delete c.pendingPlaylist;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
     if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){g.status='paused';release(g);}
     else if(['stopped','paused'].includes(g.status)){g.waitReason=null;release(g);}
-    event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual});return a;
+    event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual,...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{})});return a;
   }
   function failPreparation(a,reasonCode){
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
@@ -381,9 +426,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'message.delete':{const m=get('messages',p.id);expected(m,p);ensure(!state.channels.some(c=>[...c.playlist,...(c.pendingPlaylist||[])].some(i=>i.messageId===m.id))&&!state.attempts.some(a=>a.messageIdRef===m.id&&ACTIVE.has(a.status)),'MESSAGE_IN_USE','This message is referenced. Archive it or remove its channel assignments.',409);state.messages=state.messages.filter(x=>x.id!==m.id);event('message.deleted',{messageId:m.id});return {id:m.id,deleted:true};}
       case 'instance.update':{const i=get('instances',p.id);expected(i,p);i.name=text(p.name,'name');i.nameCustomized=true;i.version++;event('instance.updated',{instanceId:i.id});return publicInstance(i);}
       case 'account.update':{const a=get('accounts',p.id);expected(a,p);a.name=text(p.name,'name');a.nameCustomized=true;a.version++;a.updatedAt=now();event('account.updated',{accountEntityId:a.id,instanceId:a.instanceId});return publicAccount(a);}
+      case 'instance.delete':case 'account.delete':case 'target.delete':case 'channel.delete':{const kind=action.split('.')[0],entity=get({instance:'instances',account:'accounts',target:'targets',channel:'channels'}[kind],p.id);expected(entity,p);return removeConfiguration(kind,entity);}
+      case 'target.update':{const target=get('targets',p.id);expected(target,p);applyChannelName(target,{name:text(p.name,'name')});event('target.updated',{targetId:target.id});return target;}
       case 'target.create':{
         ensure(typeof p.url==='string'&&/^https:\/\/discord\.com\/channels\/\d{1,30}\/\d{1,30}\/?$/.test(p.url),'VALIDATION','Use a Discord server channel URL: https://discord.com/channels/server/channel.');
         const [,guildId,channelId]=/^https:\/\/discord\.com\/channels\/(\d+)\/(\d+)\/?$/.exec(p.url);
+        state.removals.targets=state.removals.targets.filter(key=>key!==removalKey(guildId,channelId));
         const target=upsertTarget(guildId,channelId,p.name===undefined?{}:{name:text(p.name,'name')});
         if(target.namePending)for(const instance of state.instances.filter(i=>i.connected&&now()-i.lastSeenAt<=15000&&i.capabilities?.includes('channel-name-lookup-v1'))){
           if(!state.commands.some(c=>c.type==='LOOKUP_CHANNEL_NAME'&&c.instanceId===instance.id&&c.sessionId===instance.sessionId&&c.payload.targetId===target.id&&['queued','received'].includes(c.status)))command('LOOKUP_CHANNEL_NAME',instance.id,{targetId:target.id,guildId,channelId});
@@ -412,6 +460,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(currentAccount(account),'ACCOUNT_UNVERIFIED','Verify the account in this browser again.',409);
         ensure(/^\d{1,30}$/.test(target.guildId)&&/^\d{1,30}$/.test(target.channelId),'VALIDATION','Only Discord server channels can be connected.');
         ensure(!state.attempts.some(a=>a.instanceId===instance.id&&a.guildId===target.guildId&&a.channelId===target.channelId&&ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','Resolve the current attempt before opening this channel.',409);
+        const connectionKey=removalKey(instance.id,account.accountId,target.guildId,target.channelId);
+        ensure(!state.removals.closeRequests.some(r=>bindingKey(r)===connectionKey),'CLOSE_PENDING','이전 전송 탭을 닫는 중입니다. 해당 브라우저와 확장을 연결한 뒤 닫기 완료 후 다시 연결하세요.',409);
+        state.removals.bindings=state.removals.bindings.filter(key=>key!==connectionKey);
         const channel=state.channels.find(c=>c.instanceId===instance.id&&c.accountId===account.accountId&&c.guildId===target.guildId&&c.channelId===target.channelId&&c.verified&&c.sessionId===instance.sessionId);
         if(channel)return{status:'connected',channel:publicChannel(channel)};
         ensure(instance.capabilities?.includes('open-channel-v1'),'EXTENSION_UPDATE_REQUIRED','채널을 연결하려면 중앙 관리 확장 프로그램을 최신 버전으로 업데이트하고 다시 연결하세요.',409);
@@ -435,7 +486,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(active){c.pendingPlaylist=items;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
       case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??20000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
       case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}
-      case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
+      case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);for(const attempt of state.attempts.filter(a=>a.groupId===g.id))attempt.groupName??=g.name;release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
       case 'group.start':case 'group.resume':return start(get('groups',p.id));
       case 'group.pause':case 'group.stop':{const g=get('groups',p.id);control(g,action.endsWith('stop')?'stop':'pause');return g;}
       case 'service.startAll':{
@@ -450,7 +501,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(typeof p.expectedConfiguration==='string'&&p.expectedConfiguration===configurationToken(),'VERSION_CONFLICT','화면 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.',409);
         ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','진행 중 또는 미확인 발송을 먼저 확인하세요.',409);
         ensure(state.groups.every(g=>g.status==='stopped'&&!g.controlIntent&&!g.activeAttemptId),'GROUP_RUNNING','모든 그룹을 중지하고 중지 적용 완료를 확인하세요.',409);
-        state.resetEpoch++;
+        state.resetEpoch++;state.removals={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};
         const removed={messages:state.messages.length,channels:state.channels.length,groups:state.groups.length,instances:state.instances.length,accounts:state.accounts.length,targets:state.targets.length};
         for(const c of state.commands)if(['queued','received'].includes(c.status))c.status='superseded';
         state.messages=[];state.channels=[];state.groups=[];state.instances=[];state.accounts=[];state.targets=[];state.locks=[];state.legacyImports=[];
@@ -590,6 +641,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     ensure(new Set(targets.map(t=>JSON.stringify([t.guildId,t.channelId]))).size===targets.length,'VALIDATION','Duplicate channel targets in backup.');
     // All restored entities are built and validated before replacing current configuration.
     state.messages=messages;state.instances=instances;state.channels=channels;state.groups=[];state.accounts=accounts;state.targets=targets;
+    for(const [kind,keys] of [['instances',instances.map(i=>i.id)],['accounts',accounts.map(accountKey)],['targets',targets.map(targetKey)],['bindings',channels.map(bindingKey)]])state.removals[kind]=state.removals[kind].filter(key=>!keys.includes(key));
+    state.removals.closeRequests=state.removals.closeRequests.filter(r=>!channels.some(c=>bindingKey(c)===bindingKey(r)));
     for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
     state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;state.settings.maxSendRetries=5;if(backup.settings)updateSettings(backup.settings);
@@ -605,6 +658,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(message.protocolVersion===1,'PROTOCOL_MISMATCH','Update the extension to central protocol 1.',409);
         ensure(message.extensionBuildId===undefined||typeof message.extensionBuildId==='string'&&/^[a-f0-9]{64}$/.test(message.extensionBuildId),'VALIDATION','Invalid extension build identity.');
         const capabilities=message.capabilities??[];ensure(Array.isArray(capabilities)&&capabilities.length<=32&&capabilities.every(value=>typeof value==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)),'VALIDATION','Invalid extension capabilities.');
+        const completedRemovalIds=message.completedRemovalIds??[];
+        ensure(Array.isArray(completedRemovalIds)&&completedRemovalIds.length<=100&&completedRemovalIds.every(value=>typeof value==='string'&&value.length<=100),'VALIDATION','Invalid completed removal IDs.');
+        if(state.removals.instances.includes(message.instanceId)){
+          const completed=state.removals.closeRequests.filter(r=>r.instanceId===message.instanceId&&completedRemovalIds.includes(r.removalId));
+          for(const request of completed){for(const c of state.commands.filter(c=>c.type==='CLOSE_CHANNEL'&&c.instanceId===message.instanceId&&c.payload.removalId===request.removalId)){c.status='applied';c.appliedAt=now();for(const problem of state.incidents.filter(i=>i.status==='open'&&i.commandId===c.id))resolveIncident(problem,{reasonCode:'managed_tab_closed'});}event('channel.closed_after_removal',{instanceId:message.instanceId,removalId:request.removalId});}
+          state.removals.closeRequests=state.removals.closeRequests.filter(r=>!completed.includes(r));
+          if(message.explicitReconnect!==true)return{removed:true,protocolVersion:1,resetEpoch:state.resetEpoch,closeChannels:state.removals.closeRequests.filter(r=>r.instanceId===message.instanceId)};
+          state.removals.instances=state.removals.instances.filter(key=>key!==message.instanceId);
+        }
         let i=state.instances.find(i=>i.id===message.instanceId);
         if(!i){i={id:message.instanceId?text(message.instanceId,'instanceId',100):id(),version:1,name:text(message.name||'Connected browser','name'),browser:typeof message.browser==='string'?message.browser.slice(0,40):'Chromium',extensionVersion:typeof message.extensionVersion==='string'?message.extensionVersion.slice(0,40):'unknown',createdAt:now()};state.instances.push(i);}
         const automaticName=!i.nameCustomized&&['Connected browser','연결된 Chromium',`연결된 ${i.browser}`].includes(i.name);
@@ -620,7 +682,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='session_changed';c.appliedVersion=0;delete c.tabId;}
         for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
         for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
-        event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
+        queuePendingCloses(i.id);event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
       }
       if(message.type==='HEARTBEAT'&&state.resetEpoch>0&&message.resetEpoch!==state.resetEpoch)return{ok:false,resetRequired:true,resetEpoch:state.resetEpoch};
       const i=ensureSession(message,instanceId);
@@ -679,8 +741,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
 
       if(message.type==='HEARTBEAT'){
+        queuePendingCloses(i.id);
         const requested=message.knownAttemptIds??[];ensure(Array.isArray(requested)&&requested.length<=500&&requested.every(value=>typeof value==='string'&&value.length<=100),'VALIDATION','knownAttemptIds must contain at most 500 identifiers.');
-        const ids=new Set(requested),terminalAttempts=state.attempts.filter(a=>a.instanceId===i.id&&ids.has(a.id)&&TERMINAL.has(a.status)).map(a=>({attemptId:a.id,status:a.status,...(a.messageId?{messageId:a.messageId}:{})}));
+        const ids=new Set(requested),terminalAttempts=state.attempts.filter(a=>a.instanceId===i.id&&ids.has(a.id)&&TERMINAL.has(a.status)).map(a=>({attemptId:a.id,status:a.status,...(a.messageId?{messageId:a.messageId}:{}),...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{}),...(a.confirmationBasis==='composer_cleared'?{deliveryEvidence:a.deliveryEvidence}:{})}));
         return{ok:true,commands:commands(i.id),terminalAttempts};
       }
       if(message.type==='DISCONNECT'){
@@ -696,6 +759,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           ensure(typeof message.legacyFrozen==='boolean'&&typeof message.legacyPending==='boolean','VALIDATION','Both legacy execution flags are required.');
           i.legacyFrozen=message.legacyFrozen;i.legacyPending=message.legacyPending;
         }
+        const deletedKey=removalKey(i.id,message.accountId);
+        if(state.removals.accounts.includes(deletedKey)){if(message.explicitRegistration!==true||!message.verified)return{ok:true,account:null,commands:commands(i.id)};state.removals.accounts=state.removals.accounts.filter(key=>key!==deletedKey);}
         const affected=accountId=>message.verified?accountId!==message.accountId:accountId===message.accountId;
         const transientReasons=new Set(['tab_loading','tab_missing','script_unavailable','identity_unverified','content_refresh_required','awaiting_observation']);
         const confirmedMismatch=message.verified===true||!transientReasons.has(message.verificationReason);
@@ -719,6 +784,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const observed of message.channels){
           const accountId=text(observed.accountId,'accountId',100),channelId=text(observed.channelId,'channelId',100),guildId=text(observed.guildId||'@me','guildId',100);
           ensure(Number.isInteger(observed.tabId)&&observed.tabId>=0&&!seenTabs.has(observed.tabId),'VALIDATION','Each observed channel needs its own dedicated tab.');seenTabs.add(observed.tabId);
+          if(removedScope({instanceId:i.id,accountId,guildId,channelId}))continue;
           ensure(!state.attempts.some(a=>a.instanceId===i.id&&a.tabId===observed.tabId&&ACTIVE.has(a.status)&&(a.accountId!==accountId||a.channelId!==channelId||a.guildId!==guildId)),'TAB_BUSY','An unresolved attempt owns this execution tab.',409);
           let c=state.channels.find(c=>c.instanceId===i.id&&c.accountId===accountId&&c.guildId===guildId&&c.channelId===channelId);
           if(!c){const candidates=state.channels.filter(x=>x.legacyPlaceholder&&x.accountId===accountId&&x.guildId===guildId&&x.channelId===channelId);if(candidates.length===1&&i.legacyFrozen&&i.legacyPending===false){c=candidates[0];const previousInstance=c.instanceId;c.instanceId=i.id;c.legacyPlaceholder=false;c.version++;if(!state.channels.some(x=>x.instanceId===previousInstance)){
@@ -761,6 +827,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(['completed','superseded'].includes(c.status)||c.status==='rejected'&&message.status==='rejected'||c.status==='applied'&&message.status==='received')return{ok:true};
         ensure(!(c.status==='rejected'&&message.status!=='rejected'),'COMMAND_REJECTED','Rejected command cannot later be applied.',409);
         c.status=message.status;c[`${message.status}At`]=now();
+        if(message.status==='applied'&&c.type==='CLOSE_CHANNEL'){state.removals.closeRequests=state.removals.closeRequests.filter(r=>r.removalId!==c.payload.removalId);for(const problem of state.incidents.filter(problem=>problem.status==='open'&&state.commands.some(old=>old.id===problem.commandId&&old.payload.removalId===c.payload.removalId)))resolveIncident(problem,{reasonCode:'managed_tab_closed'});}
         if(message.status==='applied'&&c.type==='LOOKUP_CHANNEL_NAME'){
           const target=state.targets.find(t=>t.id===c.payload.targetId&&t.guildId===c.payload.guildId&&t.channelId===c.payload.channelId);
           if(target)applyChannelName(target,{observedName:message.channelName});
@@ -823,13 +890,18 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
-        if(message.outcome==='confirmed')ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
+        if(message.outcome==='confirmed'){
+          ensure(message.confirmationBasis===undefined||['message_observed','composer_cleared'].includes(message.confirmationBasis),'VALIDATION','Invalid delivery confirmation basis.');
+          if(message.confirmationBasis==='composer_cleared'){
+            ensure(a.status==='permitted'&&a.sessionId===i.sessionId&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
+          }else ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
+        }
         else {
           ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must confirm the old attempt is blocked.',409);
           if(['deferred','blocked','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED'].includes(message.reasonCode))a.reasonCode=message.reasonCode;
           if(['deferred','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent){g.status='needs_review';g.waitReason='discord_cooldown';}}
         }
-        return{ok:true,attempt:publicAttempt(finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs}))};
+        return{ok:true,attempt:publicAttempt(finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs,confirmationBasis:message.confirmationBasis}))};
       }
       if(message.type==='EMERGENCY_STOP'){
         for(const g of state.groups.filter(g=>g.members.some(m=>get('channels',m).instanceId===i.id)&&g.status!=='stopped'))control(g,'stop');event('instance.emergency_stop',{instanceId:i.id},'warning');return{ok:true};
@@ -944,7 +1016,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return{from,to,partialRecords:!!state.prunedBefore&&from<state.prunedBefore,retainedFrom:state.prunedBefore||null,waitReasons,connectionTimeline,generatedAt:now(),lastEventId:state.lastEventId,total:attempts.length,confirmed:confirmed.length,outcomes,confirmedBuckets:[...buckets.values()].sort((a,b)=>a.at-b.at),confirmation:{samples:timings.length,p50:percentile(.5),p95:percentile(.95),insufficientSamples:timings.length<20},confirmationRate:outcomes.confirmed+outcomes.not_sent?outcomes.confirmed/(outcomes.confirmed+outcomes.not_sent):null,excludedFromRate:outcomes.cancelled+outcomes.unknown+outcomes.in_progress,timeline:attempts.slice(-200).map(publicAttempt)};
   }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
-  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
+  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
     state.service={status:'ready',reasonCode:null,startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}

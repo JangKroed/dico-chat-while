@@ -74,7 +74,8 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
   let remedy:Remedy,knownReason=false
   if(i.code==='command_rejected'){
     const known=rejectionCode?remedies[rejectionCode]:undefined
-    if(commandType==='MANAGE_WINDOW'&&!known){remedy=windowAdvice(text(payload?.action),rejectionCode);knownReason=['MANAGE_WINDOW_FAILED','WINDOW_NOT_FOUND','TAB_NOT_FOUND','MANAGED_TAB_MISSING','MANAGED_WINDOW_NOT_FOUND'].includes(rejectionCode||'')}
+    if(commandType==='CLOSE_CHANNEL'){remedy={title:'연결 해제한 전송 탭을 닫아야 합니다',cause:'설정에서 연결을 해제했지만 해당 브라우저의 전송 탭 닫기가 완료되지 않았습니다.',steps:['해당 브라우저와 DICO 확장을 켜고 연결 상태를 확인하세요.','아래 계정·채널에 해당하는 남은 전송 탭을 확인하세요. 다른 페이지로 이동한 탭은 자동으로 닫지 않으므로 필요하면 직접 닫아 주세요.','닫기 요청은 제한된 횟수로 재시도됩니다. 계속 실패하면 확장의 관리 프로그램 연결을 눌러 다시 확인하세요.'],page:'connections',actionLabel:'브라우저·남은 전송 탭 확인'};knownReason=true}
+    else if(commandType==='MANAGE_WINDOW'&&!known){remedy=windowAdvice(text(payload?.action),rejectionCode);knownReason=['MANAGE_WINDOW_FAILED','WINDOW_NOT_FOUND','TAB_NOT_FOUND','MANAGED_TAB_MISSING','MANAGED_WINDOW_NOT_FOUND'].includes(rejectionCode||'')}
     else if(known){remedy={...known};knownReason=true;if(rejectionCode==='COOLDOWN_UNVERIFIED'&&binding&&typeof binding.slowmodeObservedAt==='number')remedy.cause+=` 마지막으로 감지한 슬로우 모드는 ${Math.ceil(binding.slowmodeMs/1000)}초이며, 현재 남은 대기 시간을 확인했다는 뜻은 아닙니다.`}
     else if(commandType==='CONTROL')remedy={title:'중지·일시정지 적용을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 제어 명령이 적용되지 않았으므로 중지 완료로 판단할 수 없습니다.',steps:controlSteps,page:'groups',actionLabel:'그룹·중지 상태 확인'}
     else remedy={title:'확장 요청을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 현재 기록만으로 초안·계정·버전 등의 원인을 단정할 수 없습니다.',steps:['아래 대상 브라우저와 확장 상태를 확인하세요.','진행 중·미확인 시도가 있으면 전체 중지를 요청하고 실제 Discord 게시 내역을 확인하세요. 중지만으로 미발송 여부를 판단하지 마세요.','관리 프로그램과 모든 확장을 업데이트하고 필요한 초안을 보관한 뒤 Discord를 새로고침하세요. 같은 문제가 반복되면 새로 기록된 거절 사유를 확인하세요.'],page:attempt?.status==='unknown'?'history':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'channels':'connections',actionLabel:attempt?.status==='unknown'?'미확인 실행 기록 확인':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'채널·적용 상태 확인':'계정·브라우저 확인'}
@@ -99,7 +100,7 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
     remedy={title:i.title||'확인할 문제가 있습니다',cause:i.description||i.message||'서비스에 확인이 필요한 상태가 기록되었습니다. 상세 정보와 대상 상태를 확인하세요.',steps:['관련 브라우저·그룹 상태와 최근 로그를 확인하세요.','미확인 발송은 실제 Discord 게시 내역을 확인하기 전까지 다시 보내지 마세요.'],page:attemptId?'history':'settings',actionLabel:attemptId?'관련 실행 기록 확인':'설치·서비스 상태 확인'}
   }
   if(i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(commandType||'')&&['confirmed','not_sent','cancelled'].includes(attempt?.status||'')){
-    const outcome=attempt?.status==='confirmed'?'게시 확인':attempt?.status==='not_sent'?'미발송':'취소'
+    const outcome=attempt?.status==='confirmed'?(attempt.confirmationBasis==='composer_cleared'?'발송 처리':'게시 확인'):attempt?.status==='not_sent'?'미발송':'취소'
     remedy={...remedy,cause:`${remedy.cause} 관련 시도는 현재 ${outcome}으로 확정되어 있습니다.`,steps:['‘해결 상태 재검사’를 눌러 확정된 시도의 지난 알림을 정리하세요.',...remedy.steps]}
   }
   return {...remedy,knownReason,affected,commandType,rejectionCode}

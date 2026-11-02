@@ -1,4 +1,4 @@
-import type {DeliveryEvidence} from './api'
+import type {Attempt,DeliveryEvidence} from './api'
 
 export function unknownDeliveryCause(reason?:string) {
   const aliases:Record<string,string>={DELIVERY_DRAFT_RETAINED:'draft-retained',DELIVERY_CONFIRMATION_TIMEOUT:'uncertain',CONTENT_UNAVAILABLE:'content_unavailable'}
@@ -38,5 +38,16 @@ export function enterEvidenceText(evidence?:DeliveryEvidence) {
   if(evidence?.enterAttempted===false)return '이 진단에서는 Enter 키 이벤트 요청 시도가 관측되지 않았습니다. 이 값만으로 실제 미발송을 확정할 수는 없습니다.'+method
   return 'Enter 키 이벤트 요청에 관한 진단 기록이 없습니다. 요청 여부나 실제 게시 결과를 추정하지 않습니다.'+method
 }
-export const evidenceStages:Record<string,string>={inspect:'초안·대상 점검',authorize:'전송 허가 재확인',prepare:'입력 준비',stable:'입력창 안정 상태 확인',enter:'Enter 이벤트 요청',observe:'실제 게시 관찰'}
-export const evidenceFlags:{key:keyof DeliveryEvidence;label:string}[]=[{key:'enterDefaultPrevented',label:'Enter 기본 동작 취소'},{key:'keyupDefaultPrevented',label:'Enter 키 해제 기본 동작 취소'},{key:'documentHidden',label:'문서 숨김 상태'},{key:'documentFocused',label:'문서 포커스 상태'},{key:'composerRetained',label:'입력창에 문구 남음'},{key:'newMessage',label:'새 메시지 관측'},{key:'matchingMessage',label:'본문이 일치하는 메시지 관측'},{key:'sendingSeen',label:'전송 중 표시 관측'},{key:'failedSeen',label:'실패 표시 관측'},{key:'authorMismatch',label:'작성자 불일치 관측'},{key:'authorUnknown',label:'작성자 확인 불가'},{key:'timeMismatch',label:'게시 시각 불일치 관측'}]
+export const evidenceStages:Record<string,string>={inspect:'초안·대상 점검',authorize:'전송 허가 재확인',prepare:'입력 준비',stable:'입력창 안정 상태 확인',enter:'Enter 이벤트 요청',observe:'입력창 비움 · 전송 결과 확인'}
+export const evidenceFlags:{key:keyof DeliveryEvidence;label:string}[]=[{key:'enterDefaultPrevented',label:'Enter 기본 동작 취소'},{key:'keyupDefaultPrevented',label:'Enter 키 해제 기본 동작 취소'},{key:'documentHidden',label:'문서 숨김 상태'},{key:'documentFocused',label:'문서 포커스 상태'},{key:'composerRetained',label:'입력창에 문구 남음'},{key:'composerCleared',label:'전송 후 입력창 비움'},{key:'newMessage',label:'새 메시지 관측'},{key:'matchingMessage',label:'본문이 일치하는 메시지 관측'},{key:'sendingSeen',label:'전송 중 표시 관측'},{key:'failedSeen',label:'실패 표시 관측'},{key:'authorMismatch',label:'작성자 불일치 관측'},{key:'authorUnknown',label:'작성자 확인 불가'},{key:'timeMismatch',label:'게시 시각 불일치 관측'}]
+
+export function attemptResultLabel(attempt:Pick<Attempt,'status'|'state'|'confirmationBasis'>):string|undefined {
+  if((attempt.status||attempt.state)!=='confirmed')return undefined
+  return attempt.confirmationBasis==='composer_cleared'?'발송 처리':'게시 확인'
+}
+export function confirmationBasisText(attempt:Pick<Attempt,'status'|'state'|'confirmationBasis'>):string|undefined {
+  if((attempt.status||attempt.state)!=='confirmed')return undefined
+  return attempt.confirmationBasis==='composer_cleared'
+    ?'전송 요청 후 입력창이 비워진 것을 확인해 발송으로 처리하고 다음 차례로 진행했습니다.'
+    :'Discord 메시지를 확인해 게시 결과를 확정했습니다.'
+}

@@ -1,6 +1,6 @@
-# DICO 중앙관리 0.4.19 개발판
+# DICO 중앙관리 0.4.20 개발판
 
-새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.19입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
+새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.20입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
 
 ## 0.4.4 변경 사항
 

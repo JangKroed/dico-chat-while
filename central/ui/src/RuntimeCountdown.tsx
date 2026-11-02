@@ -51,5 +51,5 @@ export function ChannelCountdownCards({s,go,run,busy,renderGroupActions}:{s:Snap
       {ungrouped.length>0&&<section aria-label="그룹 미지정 계정">{groups.length>0&&<div className="runtime-groups"><p>그룹 미지정 계정</p></div>}<div className="runtime-accounts">{ungrouped.map(channel=><RuntimeAccountRow key={channel.id} s={s} channel={channel} bindingId={channel.id} run={run} busy={busy}/>)}</div></section>}
       {!bindings.length&&!groups.length&&<p className="runtime-empty">이 채널에 사용할 계정을 연결하세요.</p>}
     </article>
-  })}</div><p className="countdown-note">계정 대기는 최대 5초 먼저 준비하며, 그룹 최소 간격은 게시 확인 후 온전히 기다립니다. Discord 잔여 제한과 입력 준비 시간이 달라도, 발송 직전 실제 제한 해제를 다시 확인합니다. 적용 주기 = 보정된 기본값 + 직접 추가한 시간입니다.</p></section>
+  })}</div><p className="countdown-note">계정 대기는 최대 5초 먼저 준비하며, 그룹 최소 간격은 발송 처리 후 온전히 기다립니다. Discord 잔여 제한과 입력 준비 시간이 달라도, 발송 직전 실제 제한 해제를 다시 확인합니다. 적용 주기 = 보정된 기본값 + 직접 추가한 시간입니다.</p></section>
 }

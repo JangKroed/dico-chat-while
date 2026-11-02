@@ -210,11 +210,11 @@
     const title=root.querySelector?.('[class*="panelTitleContainer"], [class*="displayName"], [data-display-name]');
     return proof.identitySource==='own-panel-current-user'&&Boolean(proof.accountName)&&clean(title?.textContent)===proof.accountName;
   }
-  async function refreshOwnIdentity(target){
+  async function refreshOwnIdentity(target,force=false){
     if(!target?.coordinated)return;
     const panel=ownPanel(),ids=ownPanelIds(panel);
     if(ids.size>0)return;
-    if(proofMatchesPanel(ownIdentityProof,panel)&&Date.now()-ownIdentityProof.checkedAt<1000)return;
+    if(!force&&proofMatchesPanel(ownIdentityProof,panel)&&Date.now()-ownIdentityProof.checkedAt<1000)return;
     const began=Date.now();let identity;
     try{identity=await chrome.runtime.sendMessage({type:'DICO_ACCOUNT_IDENTITY'});}catch{}
     if(Date.now()-began<0||Date.now()-began>2000)identity=null;
@@ -426,7 +426,7 @@
       return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
-  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false, managed = false) {
+  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false, managed = false, submissionTarget = null) {
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
@@ -463,6 +463,9 @@
         if(matchesRenderedText(text,messageText(old)) && matchesRenderedText(text,messageText(fresh))){replacementNodes.add(fresh);evidence.linkedReplacementCount=(evidence.linkedReplacementCount || 0)+1;}
       }
     };
+    const expectedDraft=Boolean(submissionTarget&&editor.isConnected&&composerMatches(editor,text));
+    let submitted=false,emptySince=null,lastEmptyCheck=null;
+    const mono=()=>globalThis.performance?.now()??Date.now();
     let observer, timer, poll, resolve, latest, deadline=null, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
@@ -473,12 +476,12 @@
       report(evidence);
       const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
       const deliveryEvidence=Object.fromEntries(fields.map(key=>[key,evidence[key]===true]));
-      if(typeof value.deliveryEvidence?.composerRetained==='boolean')deliveryEvidence.composerRetained=value.deliveryEvidence.composerRetained;
+      Object.assign(deliveryEvidence,value.deliveryEvidence||{});
       if(finished){observer?.disconnect();clearInterval(poll);}
       clearTimeout(timer);deadline=null;latest={...value,deliveryEvidence};resolve(latest);
     };
     const currentEditor = () => editor.isConnected ? editor : editors()[0];
-    const check = () => {
+    const check = (freshIdentity=false) => {
       if (finished) return;
       const liveEditor = currentEditor();
       const empty = liveEditor && !normalize(editorText(liveEditor));
@@ -488,12 +491,17 @@
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
+        const row = node.closest('li') || node;
+        // A newly failed local row outranks an empty composer even when emoji
+        // or Markdown rendering prevents text matching.
+        if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
+          evidence.failedSeen = true;detail = 'Discord가 메시지를 전송 실패로 표시했습니다.';continue;
+        }
         if (!matchesRenderedText(text, messageText(node))) {
           if(!evidence.matchingMessage)detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
           continue;
         }
         evidence.matchingMessage = true;
-        const row = node.closest('li') || node;
         const isSending = row.querySelector('[class*="isSending"]') || row.matches('[class*="isSending"]');
         // Optimistic IDs need not be final snowflakes. Observe them even while
         // Slate still displays the submitted draft, then require a final ID.
@@ -504,10 +512,6 @@
           if(sendingAuthor && (!userId || sendingAuthor===userId))localAuthors.add(sendingAuthor);
           detail = '메시지가 아직 전송 중으로 표시됩니다.';
           continue;
-        }
-        if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
-          evidence.failedSeen = true;
-          detail = 'Discord가 메시지를 전송 실패로 표시했습니다.'; continue;
         }
         const id = node.id.match(/^message-content-(\d{17,20})$/)?.[1];
         const created = id ? Number((BigInt(id) >> 22n) + 1420070400000n) : 0;
@@ -529,14 +533,25 @@
         }
         if (!empty) { detail = '입력창이 비워졌는지 확인하지 못했습니다.'; continue; }
         evidence.messageId=id;
-        finish({status:'confirmed',messageId:id}); return;
+        if(!submissionTarget){finish({status:'confirmed',messageId:id,confirmationBasis:'message_observed'});return;}
+      }
+      if(submissionTarget){
+        const found=editors(),sameEditor=editor.isConnected&&found.length===1&&found[0]===editor;
+        const targetMatched=matchesTarget(submissionTarget),accountMatched=coordinatedAccountMatches(submissionTarget);
+        const form=editor.closest?.('form')||editor.parentElement;
+        const valid=expectedDraft&&submitted&&sameEditor&&targetMatched&&accountMatched&&empty&&!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')&&!evidence.failedSeen;
+        const at=mono(),wall=Date.now();
+        if(!valid){emptySince=null;lastEmptyCheck=null;return;}
+        if(lastEmptyCheck&&(at-lastEmptyCheck.at<0||at-lastEmptyCheck.at>1500||Math.abs((wall-lastEmptyCheck.wall)-(at-lastEmptyCheck.at))>1000))emptySince=null;
+        if(emptySince===null)emptySince=at;lastEmptyCheck={at,wall};
+        if(freshIdentity&&at-emptySince>=500)finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor:true,targetMatched:true,accountMatched:true,emptyStableMs:Math.min(30000,Math.floor(at-emptySince))}});
       }
     };
     observer = new MutationObserver(records=>{linkReplacements(records);check();});
     observer.observe(document.querySelector('main') || document.body, {subtree:true,childList:true,characterData:true,attributes:true});
     // Read-only checks: no additional Enter, reload or retransmission.
-    const expire = () => {
-      check();
+    const expire = (freshIdentity=false) => {
+      check(freshIdentity);
       const liveEditor = currentEditor();
       const retained = liveEditor && composerMatches(liveEditor,text);
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
@@ -547,10 +562,11 @@
     const armTimeout=()=>{deadline=Date.now()+(submissionOnly?3000:25000);if(!managed)timer=setTimeout(expire,submissionOnly?3000:25000);};
     armTimeout();
     if(managed){
-      void(async()=>{while(!finished){await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;if(deadline!==null&&Date.now()>=deadline)expire();else check();}})().catch(()=>finish({status:'uncertain',code:'MANAGED_DELAY_UNAVAILABLE',error:'관찰 연결이 끊겨 초안과 발송 기록을 보존합니다.'}));
+      void(async()=>{while(!finished){await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;if(submissionTarget)await refreshOwnIdentity(submissionTarget,true);if(finished)break;if(deadline!==null&&Date.now()>=deadline)expire(true);else check(true);}})().catch(()=>finish({status:'uncertain',code:'MANAGED_DELAY_UNAVAILABLE',error:'관찰 연결이 끊겨 초안과 발송 기록을 보존합니다.'}));
     }else poll=setInterval(check,500);
     return {
       get promise(){return promise;},
+      submitted(){submitted=true;check();},
       snapshot(){
         const liveEditor=currentEditor();
         const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
@@ -864,7 +880,7 @@
           const createdAt=/^\d{17,20}$/.test(outcome.messageId||'')?Number((BigInt(outcome.messageId)>>22n)+1420070400000n):0;
           // A late receipt for an earlier retry has no reliable last-Enter
           // anchor, so it confirms delivery without calibrating its duration.
-          if(createdAt>=enterAt)observeCooldown(target,delivery,enterAt,enterMono);
+          if(createdAt>=enterAt||outcome.confirmationBasis==='composer_cleared'&&retryCount===0)observeCooldown(target,delivery,enterAt,enterMono);
         }
         trace('finished',{result:outcome.status,messageId:outcome.messageId});return afterEnter(outcome);
       };
@@ -889,7 +905,7 @@
         }
         cooldownProbeCancel?.();
         enterAt=Date.now();enterMono=globalThis.performance?.now() ?? enterAt;
-        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries>0,managedTiming(target));
+        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null);
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
         trace('before-enter');
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
@@ -906,7 +922,7 @@
         evidence.enterDefaultPrevented=keydown.defaultPrevented===true;
         evidence.keyupDefaultPrevented=keyup.defaultPrevented===true;
         trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
-        evidence.stage='observe';
+        evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;
         const flags=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
         if(outcome.status!=='draft-retained'||retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||flags.some(key=>outcome.deliveryEvidence?.[key]!==false))return finishOutcome(outcome);

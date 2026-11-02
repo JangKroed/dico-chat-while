@@ -79,7 +79,7 @@ test('연결 중인 확장은 다음 하트비트에서 즉시 HELLO하고 연�
  const manager=createCentralManager();try{
   const r=client(manager);await r.executor.setSession(hello(manager));reset(manager);let reconnects=0;
   const source=readFileSync(new URL('../central/extension/background.js',import.meta.url),'utf8');
-  const fn=source.slice(source.indexOf('async function runHeartbeat()'),source.indexOf('async function connect()'));
+  const fn=source.slice(source.indexOf('async function runHeartbeat()'),source.indexOf('async function connect('));
   const scope={executor:r.executor,connect:async()=>{reconnects++;await r.executor.setSession(hello(manager,{resetEpoch:r.executor.state.resetEpoch}));}};
   runInNewContext(fn+'\nglobalThis.run=runHeartbeat;',scope);await scope.run();
   assert.equal(reconnects,1);assert.equal(r.executor.state.resetEpoch,1);assert.deepEqual(r.saved.dicoCentralTabs,[]);assert.equal(r.saved.dicoCentralAccount,null);

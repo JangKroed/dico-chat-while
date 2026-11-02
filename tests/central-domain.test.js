@@ -255,7 +255,7 @@ test('SQLite write failure rolls back in-memory state, emits no false event and 
 
 test('heartbeat reconciles only requested final attempt IDs owned by the same instance', () => {
   const f=fixture(),c=f.connect(),other=f.connect('Other','different');f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a,'unknown');f.manager.execute('attempt.resolve',{id:a.id,outcome:'confirmed',messageId:'observed-post'});
-  const response=f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId,knownAttemptIds:[a.id]},c.instanceId);assert.deepEqual(response.terminalAttempts,[{attemptId:a.id,status:'confirmed',messageId:'observed-post'}]);assert.equal(JSON.stringify(response.terminalAttempts).includes(c.sessionId),false);
+  const response=f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId,knownAttemptIds:[a.id]},c.instanceId);assert.deepEqual(response.terminalAttempts,[{attemptId:a.id,status:'confirmed',messageId:'observed-post',confirmationBasis:'message_observed'}]);assert.equal(JSON.stringify(response.terminalAttempts).includes(c.sessionId),false);
   const stranger=f.manager.bridge({type:'HEARTBEAT',sessionId:other.sessionId,knownAttemptIds:[a.id]},other.instanceId);assert.deepEqual(stranger.terminalAttempts,[]);f.manager.close();
 });
 
@@ -1244,4 +1244,44 @@ test('HELLO persists the exact validated extension build in the public instance 
  assert.equal(f.manager.snapshot().instances[0].extensionBuildId,second);
  f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:connection.instanceId});
  assert.equal(f.manager.snapshot().instances[0].extensionBuildId,undefined);f.manager.close();
+});
+
+const clearedComposerEvidence=()=>({phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false,emptyStableMs:500});
+test('입력창 비움 증명은 메시지 ID 없이 한 번만 다음 문구로 진행하고 근거를 보존한다',()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message('A'),f.message('B')]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  const receipt={messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:clearedComposerEvidence(),confirmationMs:500};f.result(c,a,'confirmed',receipt);f.result(c,a,'confirmed',receipt);
+  const state=f.manager.snapshot(),saved=state.attempts[0];assert.equal(saved.status,'confirmed');assert.equal(saved.confirmationBasis,'composer_cleared');assert.equal(saved.messageId,undefined);assert.equal(state.channels[0].playlistIndex,1);assert.equal(saved.deliveryEvidence.emptyStableMs,500);
+  assert.equal(f.manager.events({type:'delivery.confirmed'}).length,1);assert.equal(f.manager.events({type:'delivery.confirmed'})[0].confirmationBasis,'composer_cleared');
+  const terminal=f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId,knownAttemptIds:[a.id]},c.instanceId).terminalAttempts[0];assert.equal(terminal.messageId,undefined);assert.equal(terminal.confirmationBasis,'composer_cleared');assert.equal(terminal.deliveryEvidence.composerCleared,true);
+ }finally{f.manager.close();}
+});
+test('미제출·다른 입력창·계정·대상·실패·불충분한 안정 시간은 입력창 비움 성공으로 인정하지 않는다',()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  const invalid=[{enterAttempted:false},{expectedDraftSubmitted:false},{composerCleared:false},{sameEditor:false},{targetMatched:false},{accountMatched:false},{failedSeen:true},{composerRetained:true},{emptyStableMs:499},{emptyStableMs:Infinity},{phase:'prepare'},{stage:'inspect'},{submitMethod:undefined}];
+  for(const patch of invalid)assert.throws(()=>f.result(c,a,'confirmed',{messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:{...clearedComposerEvidence(),...patch}}),{code:'EVIDENCE_REQUIRED'});
+  assert.equal(f.manager.snapshot().attempts[0].status,'permitted');assert.equal(f.manager.snapshot().channels[0].playlistIndex,0);
+ }finally{f.manager.close();}
+});
+test('새 입력창 비움 기준을 과거 unknown 시도나 허가 전 준비 상태에 소급 적용하지 않는다',()=>{
+ for(const unknown of [false,true]){const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];if(unknown){f.prepared(c,a);f.result(c,a,'unknown');}
+  assert.throws(()=>f.result(c,a,'confirmed',{messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:clearedComposerEvidence()}),{code:'EVIDENCE_REQUIRED'});assert.equal(f.manager.snapshot().attempts[0].status,unknown?'unknown':'preparing');
+ }finally{f.manager.close();}}
+});
+
+test('보존기간 정리와 재시작 이후에도 입력창 비움 근거를 유지하며 게시 메시지 ID를 만들지 않는다',()=>{
+ const directory=mkdtempSync(join(tmpdir(),'dico-receipt-retention-')),databasePath=join(directory,'central.sqlite');let manager;
+ try{
+  const f=fixture({databasePath});manager=f.manager;const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const attempt=manager.snapshot().attempts[0];f.prepared(c,attempt);
+  f.result(c,attempt,'confirmed',{messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:clearedComposerEvidence()});
+  assert.equal(JSON.parse(JSON.stringify(manager.analytics())).timeline[0].confirmationBasis,'composer_cleared');
+  const retainedRecord=()=>{const store=new CentralStore(databasePath);try{return store.read().attempts.find(item=>item.id===attempt.id);}finally{store.close();}};
+  f.advance(91*86400000);manager.execute('maintenance.prune');
+  const record=retainedRecord();assert.equal(record.pruned,true);assert.equal(record.confirmationBasis,'composer_cleared');assert.equal(record.messageId,undefined);assert.equal(record.deliveryEvidence,undefined);
+  const receipt=manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId,knownAttemptIds:[attempt.id]},c.instanceId).terminalAttempts[0];assert.equal(receipt.confirmationBasis,'composer_cleared');assert.equal(receipt.messageId,undefined);
+  manager.close();manager=createCentralManager({databasePath,now:()=>1_800_000_000_000+91*86400000,monotonicNow:()=>1000});
+  const restored=retainedRecord();assert.equal(restored.confirmationBasis,'composer_cleared');assert.equal(restored.messageId,undefined);assert.equal(restored.pruned,true);
+ }finally{manager?.close();rmSync(directory,{recursive:true,force:true});}
 });

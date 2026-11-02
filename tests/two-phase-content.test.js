@@ -6,11 +6,11 @@ import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 import {createCentralManager} from '../central/core/index.js';
 import {createCentralExecutor} from '../central/extension/executor.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
+function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,noPostedMessage=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
- const nodes=[],events=[],traces=[],requests=[];let waitHook=null,authorizationHook=null,retryHook=null,runtimeHook=null,tickHook=null;
+ const nodes=[],events=[],traces=[],requests=[];let waitHook=null,authorizationHook=null,retryHook=null,runtimeHook=null,tickHook=null,submitHook=null;let editorPresent=true,replacementEditor=null;
  const form={querySelector:()=>attachment?{}:null,querySelectorAll:()=>{const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=editor;this.focusNode=editor;this.isCollapsed=range.collapsed}};
  const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>unsupported?{}:null,closest:()=>form,contains:n=>n===editor,focus(){document.activeElement=editor},dispatchEvent(event){
@@ -19,7 +19,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
   if(event.type==='keydown'){
    if(ignoreEnter||events.filter(e=>e.type==='keydown').length<=ignoreFirstEnters)return true;
    assert.equal(editor.innerText.trim(),convertAliases?delivery.text.replaceAll(emojiName,emojiValue):delivery.text);event.defaultPrevented=true;editor.innerText='';
-   nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:renderMessage(delivery.text),closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
+   submitHook?.();if(!noPostedMessage)nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:renderMessage(delivery.text),closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
   }
   if(event.type==='keyup'&&throwAfterEnter)throw Error('Synthetic post-Enter DOM failure');
  }};
@@ -28,7 +28,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const ownRoot={getAttribute:()=>null,querySelector:selector=>selector.includes('panelTitleContainer')?{get textContent(){return panelDisplayName;}}:selector.includes('panelSubtextContainer')?{querySelectorAll:()=>panelUsername?[nameNode]:[]}:null,querySelectorAll:selector=>selector==='img'?[{getAttribute:()=>'/embed/avatars/0.png'}]:selector.includes('username')&&panelUsername?[nameNode]:[]};
  const ownPanel={querySelector:()=>ownRoot};
  const identity=()=>({verified:Boolean(loggedUser),accountId:loggedUser,guildId,channelId,username:'hoya',accountName:'호야',identitySource:'own-panel-current-user'});
- const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:sel=>sel.includes('panels')?defaultAvatar?ownPanel:{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
+ const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:editorPresent?[replacementEditor||editor]:[],querySelector:sel=>sel.includes('panels')?defaultAvatar?ownPanel:{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
  const tick=ms=>{if(tickHook){let remaining=ms;while(remaining>0){const step=Math.min(500,remaining);clock+=step;remaining-=step;tickHook();}}else clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
  if(fault==='text_mismatch')editor.innerText='WRONG';
  if(fault==='focus_lost')document.activeElement=null;
@@ -52,12 +52,13 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const target={managed,guildId,channelId,ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)&&!confirmation};
  const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
- runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`},Date:DateMock,
+ const pageLocation={origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`};
+ runInNewContext(source,{document,window:{getSelection:()=>selection},location:pageLocation,Date:DateMock,
  chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{listener(message,{id:'ext'},resolve);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:()=>{replacementEditor={...editor,innerText:'',isConnected:true};editor.isConnected=false;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{listener(message,{id:'ext'},resolve);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
@@ -442,7 +443,7 @@ test('재시도 쿨다운 중 늦은 성공·모호한 게시·중지는 추가 
 
 test('실제 content·실행기·코어가 같은 시도에서 쿨다운 후 재시도하고 성공 시 한 번만 차례를 넘긴다',async t=>{
  const guildId='11111111111111111',channelId='22222222222222222',accountId='123456789012345678',tabId=7;
- const r=rig({guildId,channelId,ignoreFirstEnters:1,loggedUser:accountId});
+ const r=rig({guildId,channelId,ignoreFirstEnters:1,loggedUser:accountId,noPostedMessage:true});
  const manager=createCentralManager({now:r.now,monotonicNow:r.now});t.after(async()=>{r.onTick(null);await r.requestMessage({type:'DICO_CONTENT_DISPOSE'});manager.close();});
  manager.execute('settings.update',{maxSendRetries:1});
  const hello=manager.bridge({type:'HELLO',protocolVersion:1,name:'real content integration'});
@@ -459,7 +460,7 @@ test('실제 content·실행기·코어가 같은 시도에서 쿨다운 후 재
  for(const command of manager.commands(hello.instanceId))await executor.handleCommand(command);
  const group=manager.execute('group.create',{name:'Actual content',members:[channel.id],intervalMs:0});manager.execute('group.start',{id:group.id});manager.tick();
  for(const type of ['PREPARE','COMMIT_PERMIT']){const command=manager.commands(hello.instanceId).find(x=>x.type===type);assert.ok(command);await executor.handleCommand(command);}
- const state=manager.snapshot();assert.equal(state.attempts.length,1);assert.equal(state.attempts[0].status,'confirmed');assert.equal(state.attempts[0].sendRetryCount,1);assert.equal(state.channels[0].playlistIndex,1);
+ const state=manager.snapshot();assert.equal(state.attempts.length,1);assert.equal(state.attempts[0].status,'confirmed');assert.equal(state.attempts[0].confirmationBasis,'composer_cleared');assert.equal(state.attempts[0].messageId,undefined);assert.equal(state.attempts[0].sendRetryCount,1);assert.equal(state.channels[0].playlistIndex,1);
  assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.ok(r.events.filter(e=>e.type==='keydown')[1].at>=until);
 });
 
@@ -541,4 +542,35 @@ test('기본 아바타 검사 요청이 실패해도 모든 비동기 검사 응
   const r=rig({defaultAvatar:true,managed:true});r.target.coordinated=true;r.onRuntime(async m=>{if(m.type==='DICO_ACCOUNT_IDENTITY')throw Error('MAIN unavailable');return{};});
   const result=await r.request(type);assert.ok(result);assert.equal(r.events.length,0);assert.notEqual(result.ok,true);
  }
+});
+
+async function preparedComposerRig(options={}){
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,...options});r.target.coordinated=true;r.delivery.maxSendRetries=0;
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(3000);return r;
+}
+test('중앙 발송은 실제 제출 뒤 같은 입력창이 500ms 비면 게시 메시지 DOM 없이 전송 처리한다',async()=>{
+ const r=await preparedComposerRig({defaultAvatar:true});const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.messageId,undefined);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ for(const field of ['enterAttempted','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched'])assert.equal(result.deliveryEvidence[field],true,field);
+ assert.equal(result.deliveryEvidence.failedSeen,false);assert.ok(result.deliveryEvidence.emptyStableMs>=500);assert.ok(result.timing.confirmationMs>=500);
+});
+test('관리 발송의 원래 입력창 비움이 기준이고 메시지 ID는 실제 관측한 경우에만 함께 기록한다',async()=>{
+ const r=await preparedComposerRig({noPostedMessage:false});const result=await r.request('DICO_DELIVER');assert.equal(result.confirmationBasis,'composer_cleared');assert.match(result.messageId,/^\d{17,20}$/);assert.ok(result.timing.confirmationMs>=500);
+});
+test('처음부터 비어 있는 입력창과 Enter 전 취소는 전송 처리 근거가 아니다',async()=>{
+ for(const mode of ['empty','cancel']){const r=await preparedComposerRig();if(mode==='empty')r.editor.innerText='';else r.stop();const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);}
+});
+test('Enter 뒤 입력창이 없어지거나 교체되거나 채널·계정이 바뀌면 빈 상태로 성공 처리하지 않는다',async()=>{
+ for(const mode of ['missing','replacement','channel','account']){
+  const r=await preparedComposerRig();r.onSubmit(()=>{if(mode==='missing')r.removeEditor();if(mode==='replacement')r.replaceEditor();if(mode==='channel')r.navigate('/channels/123/999');if(mode==='account')r.account('987654321098765432');});
+  const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed',mode);assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ }
+});
+test('명시적 전송 실패 또는 남은 초안은 입력창 비움 성공 기준을 충족하지 않는다',async()=>{
+ const failed=await preparedComposerRig();failed.onSubmit(()=>failed.post({failed:true,text:'다르게 렌더링된 실패 문구'}));const result=await failed.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(result.deliveryEvidence.failedSeen,true);
+ const retained=await preparedComposerRig({ignoreEnter:true});const remaining=await retained.request('DICO_DELIVER');assert.notEqual(remaining.status,'confirmed');assert.equal(retained.editor.innerText,'A');assert.equal(remaining.deliveryEvidence.composerRetained,true);
+});
+test('비워졌다가 초안이 되돌아오면 500ms 안정 시간을 처음부터 다시 측정한다',async()=>{
+ const r=await preparedComposerRig();let began;r.onSubmit(()=>{began=r.now();});r.onTick(()=>{if(began!==undefined)r.editor.innerText=r.now()-began<=500?'A':'';});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.confirmationBasis,'composer_cleared');assert.ok(result.timing.confirmationMs>=1500);
 });

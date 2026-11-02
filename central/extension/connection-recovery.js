@@ -1,6 +1,6 @@
 import {currentRegistration} from './registration-state.js';
 // Restore only previously saved destinations, never infer new channel URLs.
-export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureSeparate=async()=>{},canRecover=async()=>true}){
+export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureManagedWindow=async()=>{},canRecover=async()=>true}){
  const saved=currentRegistration(await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']),state.resetEpoch??0);
  const records=saved.dicoCentralTabs||[];
  // An empty registration is intentional after reset; open Discord tabs are
@@ -27,7 +27,7 @@ export async function recoverConnections({chrome,state,findAccount,openChannel,r
    let matching=false;try{const url=new URL(tab.url);matching=url.origin==='https://discord.com'&&url.pathname===`/channels/${record.guildId}/${record.channelId}`;}catch{}
    if(!matching){await progress('blocked',completed,'TARGET_MISMATCH');return;}
    if(!await safe()){await progress('blocked',completed,'ATTEMPT_UNRESOLVED');return;}
-   try{await ensureSeparate(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'WINDOW_SEPARATION_PARTIAL');return;}
+   try{await ensureManagedWindow(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'WINDOW_CONSOLIDATION_PARTIAL');return;}
   }else{
    if(!await safe()){await progress('blocked',completed,'ATTEMPT_UNRESOLVED');return;}
    try{await openChannel(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'CHANNEL_NOT_READY');return;}

@@ -506,3 +506,19 @@ test('a suspended PREPARE response times out, revokes authorization and releases
  await r.client.handleCommand({id:'stop-after-timeout',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{action:'stop',groupId:'group',runId:'run',attemptId:'attempt'}});
  assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='stop-after-timeout'&&x.status==='applied'));
 });
+
+const clearedComposerReceipt=()=>({status:'confirmed',confirmationBasis:'composer_cleared',timing:{confirmationMs:500},deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false,emptyStableMs:500}});
+test('실행기는 메시지 ID 없는 입력창 비움 증명을 영구 보관·보고하고 같은 허가를 재실행하지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const send=r.chrome.tabs.sendMessage;
+ r.chrome.tabs.sendMessage=async(id,message)=>{if(message.type==='DICO_DELIVER'){r.messages.push(message);return clearedComposerReceipt();}return send(id,message);};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));await r.client.handleCommand(cmd('COMMIT_PERMIT','duplicate'));
+ assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.state.attempts.attempt.result.messageId,undefined);assert.equal(r.state.attempts.attempt.result.confirmationBasis,'composer_cleared');assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);
+ const report=r.reports.find(m=>m.type==='DELIVERY_RESULT');assert.equal(report.outcome,'confirmed');assert.equal(report.messageId,undefined);assert.equal(report.confirmationBasis,'composer_cleared');assert.equal(report.deliveryEvidence.emptyStableMs,500);
+ await r.client.handleCommand(cmd('PREPARE','repeat-preparation'));assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);assert.equal(r.state.processed['repeat-preparation'],true);
+});
+test('실행기는 불완전한 입력창 비움 증명이나 실패 표시를 성공으로 보고하지 않는다',async()=>{
+ for(const patch of [{enterAttempted:false},{sameEditor:false},{failedSeen:true},{emptyStableMs:499}]){
+  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));r.chrome.tabs.sendMessage=async()=>({...clearedComposerReceipt(),deliveryEvidence:{...clearedComposerReceipt().deliveryEvidence,...patch}});
+  await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'unknown');assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').outcome,'unknown');
+ }
+});

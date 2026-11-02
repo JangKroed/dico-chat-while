@@ -19,9 +19,9 @@ function rig(){
 test('계정 등록은 검증된 실제 닉네임·사용자명을 저장하고 ACCOUNT_OBSERVATION에 전달한다',async()=>{
  const r=rig();await r.registerActiveAccount();
  assert.equal(r.saved.dicoCentralAccount.accountName,'호야');assert.equal(r.saved.dicoCentralAccount.username,'hoya');
- assert.equal(r.requests[0].accountName,'호야');assert.equal(r.requests[0].username,'hoya');assert.equal(r.requests[0].name,undefined);
+ assert.equal(r.requests[0].accountName,'호야');assert.equal(r.requests[0].username,'hoya');assert.equal(r.requests[0].name,undefined);assert.equal(r.requests[0].explicitRegistration,true);
  const snapshot=await r.collectObservation();assert.equal(snapshot.account.accountName,'호야');assert.equal(snapshot.account.username,'hoya');
- await r.publishObservation(snapshot);assert.equal(r.requests[1].accountName,'호야');assert.equal(r.requests[1].username,'hoya');
+ await r.publishObservation(snapshot);assert.equal(r.requests[1].accountName,'호야');assert.equal(r.requests[1].username,'hoya');assert.equal(r.requests[1].explicitRegistration,undefined);
 });
 test('재관측은 저장된 별칭이나 채널 제목 대신 현재 검증된 계정 이름만 전달한다',async()=>{
  const r=rig();await r.registerActiveAccount();r.setSeen({verified:true,accountId:'123456789012345678',accountName:'새 이름',username:'new_name',name:'서버 채널'});

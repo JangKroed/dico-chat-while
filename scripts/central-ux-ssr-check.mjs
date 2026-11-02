@@ -10,7 +10,7 @@ const {build}=require('esbuild');
 const contents=`
 import assert from 'node:assert/strict';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {Dashboard} from './src/App.tsx';
+import {Dashboard,History} from './src/App.tsx';
 import {ConnectionProgress} from './src/ConnectionProgress.tsx';
 import {ServerClock,GroupCountdown} from './src/RuntimeCountdown.tsx';
 const now=Date.now();
@@ -42,8 +42,11 @@ const many=renderToStaticMarkup(<Dashboard {...props} s={{...snapshot,groups:Arr
 assert.ok(many.includes('aria-label="발송그룹6 시작"'),'Dashboard keeps controls for groups beyond the old six-row cutoff');
 const fullGroupGap=renderToStaticMarkup(<ServerClock serverNow={now} receivedAt={performance.now()} connected={true}><GroupCountdown s={snapshot} group={{...snapshot.groups[0],nextEligibleAt:now+20000,nextPreparationAt:now+20000}}/></ServerClock>);
 assert.ok(fullGroupGap.includes('입력 준비까지 약 20초'),'Server preparation deadline preserves all twenty seconds instead of applying a second five-second deduction');
+const history=renderToStaticMarkup(<History s={{...snapshot,attempts:[{id:'composer-result',status:'confirmed',confirmationBasis:'composer_cleared',finalizedAt:now},{id:'message-result',status:'confirmed',confirmationBasis:'message_observed',messageId:'123456789012345678',finalizedAt:now}]}} run={async()=>true} busy={false} go={()=>{}} retryNotSent={async()=>{}} retryWaitingId={null}/>);
+assert.ok(history.includes('발송 처리')&&history.includes('게시 확인'),'History distinguishes composer completion and observed post evidence');
+assert.ok(history.includes('전송 요청 후 입력창이 비워지면'),'History explains the active completion criterion');
 console.log('PASS production React SSR: operational hierarchy, compact ready state, account aliases, semantic progress, loading/error analytics');
 `;
-const result=await build({stdin:{contents,resolveDir:join(root,'central/ui'),sourcefile:'ux-check.tsx',loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'dashboard-test-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {Dashboard};\n',loader:'tsx'}));}}]});
+const result=await build({stdin:{contents,resolveDir:join(root,'central/ui'),sourcefile:'ux-check.tsx',loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'dashboard-test-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {Dashboard,History};\n',loader:'tsx'}));}}]});
 const directory=await mkdtemp(join(tmpdir(),'dico-ux-ssr-'));
 try{const file=join(directory,'check.cjs');await writeFile(file,result.outputFiles[0].contents);require(file);}finally{await rm(directory,{recursive:true,force:true});}

@@ -10,7 +10,7 @@ import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
 import {createCentralExecutor} from './executor.js';
 import {channelTabContext} from './panel-context.js';
-import {createManagedWindow,createManagedWindowController,ensureSeparateManagedWindow} from './managed-windows.js';
+import {createManagedWindow,createManagedWindowController,ensureConsolidatedManagedWindow} from './managed-windows.js';
 import {createObservationQueue,createSingleFlight,observeManagedChannel,observeRegisteredAccount} from './observation-queue.js';
 import {lookupExistingChannelName} from './channel-name.js';
 
@@ -57,14 +57,14 @@ const currentAccountResult=(expectedId,preferredTabId)=>observeRegisteredAccount
 async function currentAccount(expectedId,preferredTabId){return(await currentAccountResult(expectedId,preferredTabId)).seen;}
 async function registerActiveAccount(windowId) {
   if(!executor.state?.legacyDeclaration)throw Error('기존 실행기 사용 여부를 먼저 확인 상태 저장으로 기록해 주세요.');
-  if(!transport.connected)await connect();
+  if(!transport.connected)await connect({explicit:true});
   const sessionId=executor.state.sessionId;
   const tab=await activeSourceTab(windowId);
   const seen=tab&&await observe(tab.id);
   if(sessionId!==executor.state.sessionId)throw Error('연결이 변경되었습니다. 계정을 다시 등록하세요.');
   if(!seen?.verified)throw Error(identityFailureMessage(seen));
   const account={accountId:seen.accountId,sourceTabId:tab.id,resetEpoch:executor.state.resetEpoch??0,...accountIdentityMetadata(seen)};
-  const result=await executor.request({type:'ACCOUNT_OBSERVATION',accountId:seen.accountId,...accountIdentityMetadata(seen),verified:true,legacyFrozen:true,legacyPending:false});
+  const result=await executor.request({type:'ACCOUNT_OBSERVATION',accountId:seen.accountId,...accountIdentityMetadata(seen),explicitRegistration:true,verified:true,legacyFrozen:true,legacyPending:false});
   if(sessionId!==executor.state.sessionId)throw Error('연결이 변경되었습니다. 계정을 다시 등록하세요.');
   await chrome.storage.local.set({dicoCentralAccount:account});
   if(sessionId!==executor.state.sessionId)throw Error('연결이 변경되었습니다. 계정을 다시 등록하세요.');
@@ -93,7 +93,7 @@ async function publishObservation(snapshot){
 }
 async function restoreSavedConnections(){
   const sessionId=executor.state.sessionId;
-  await recoverConnections({chrome,state:executor.state,findAccount:currentAccount,openChannel:openManagedChannel,ensureSeparate:separateRecoveredChannel,
+  await recoverConnections({chrome,state:executor.state,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
     canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
@@ -105,14 +105,14 @@ async function runHeartbeat() {
     for(const item of result.terminalAttempts || []) {
       const local=executor.state.attempts[item.attemptId];if(!local)continue;
       local.phase=item.status;local.reported=true;
-      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',messageId:item.messageId,executionBlocked:true};
+      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',messageId:item.messageId,confirmationBasis:item.confirmationBasis,deliveryEvidence:item.deliveryEvidence,executionBlocked:true};
     }
     await executor.save();
     for(const command of result.commands || [])void executor.handleCommand(command);
     await refreshManagedContent();if(recoveryPending&&executor.isIdle)await restoreSavedConnections();await observation();await updater.check();lastError=null;
   }catch{lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
-async function connect() {
+async function connect({explicit=false}={}) {
   if(connecting)return connecting;
   connecting=(async()=>{
     await executor.load();
@@ -122,10 +122,20 @@ async function connect() {
       // Same-ID developer upgrades must never reactivate an older scheduler.
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
       const browser=await detectConnectedBrowser(chrome,navigator);
-      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1']});
+      const response=await transport.request({type:'HELLO',protocolVersion:1,explicitReconnect:explicit,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1','close-channel-v1']});
+      if(response.removed){
+        // A deleted browser may reconnect only through an explicit user action.
+        // Retain failed cleanup records so the next connection can retry safely.
+        const failures=[],completedRemovalIds=[];for(const target of response.closeChannels||[]){try{await manageChannelWindow({...target,action:'close'});completedRemovalIds.push(target.removalId);}catch(error){failures.push(error);}}
+        for(let offset=0;offset<completedRemovalIds.length;offset+=100)await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId,resetEpoch:executor.state.resetEpoch,completedRemovalIds:completedRemovalIds.slice(offset,offset+100)});
+        await chrome.storage.local.remove('dicoCentralAccount');lastAccountObservation=null;recoveryPending=false;
+        executor.state.sessionId=null;executor.state.bindings={};await executor.save();
+        throw Error(failures.length?'삭제한 브라우저의 전송 탭을 닫지 못했습니다. 남은 전송 탭을 확인하고 직접 닫아 주세요.':'중앙 설정에서 삭제한 브라우저입니다. 다시 사용할 때 확장에서 관리 프로그램 연결을 눌러 등록하세요.');
+      }
       const session=await executor.setSession(response);
       if(session.reset){lastAccountObservation=null;recoveryPending=false;}
-      for(const command of response.commands || [])void executor.handleCommand(command);
+      for(const command of response.commands||[])if(command.type==='CLOSE_CHANNEL')await executor.handleCommand(command);
+      for(const command of response.commands||[])if(command.type!=='CLOSE_CHANNEL')void executor.handleCommand(command);
       await refreshManagedContent();
       await restoreSavedConnections();
       await observation();void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
@@ -136,15 +146,15 @@ async function connect() {
 function openManagedChannel(p){
   const next=channelOpening.then(()=>openManagedChannelNow(p));channelOpening=next.catch(()=>{});return next;
 }
-async function separateRecoveredChannel(record){
+async function consolidateRecoveredChannel(record){
   const next=channelOpening.then(async()=>{
-    if(!transport.connected||executor.state?.emergencyStopped||!executor.beginMaintenance())throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 창을 분리하세요.'),{code:'ATTEMPT_UNRESOLVED'});
-    try{return await ensureSeparateManagedWindow(chrome,record);}finally{executor.endMaintenance();}
+    if(!transport.connected||executor.state?.emergencyStopped||!executor.beginMaintenance())throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 전송 창을 모으세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    try{return await ensureConsolidatedManagedWindow(chrome,record);}finally{executor.endMaintenance();}
   });
   channelOpening=next.catch(()=>{});return next;
 }
 async function manageChannelWindow(p){
-  if(!['consolidate','separate'].includes(p.action))return windowController(p);
+  if(!['consolidate','separate','close'].includes(p.action))return windowController(p);
   const next=channelOpening.then(async()=>{
     if(Object.values(executor.state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 창을 정리하세요.'),{code:'ATTEMPT_UNRESOLVED'});
     return windowController(p);
@@ -161,6 +171,7 @@ async function openManagedChannelNow(p) {
   if(!await currentAccount(p.accountId,saved?.sourceTabId))throw Object.assign(Error('이 브라우저의 로그인 계정을 다시 등록해 주세요.'),{code:'ACCOUNT_UNVERIFIED'});
   const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;
   const existing=records.find(r=>r.accountId===p.accountId&&r.guildId===p.guildId&&r.channelId===p.channelId);
+  if(p.recovery&&!existing)throw Object.assign(Error('연결 해제한 채널의 자동 복구를 취소했습니다.'),{code:'MANAGED_TAB_MISSING'});
   if(existing) {
     const seen=await observe(existing.tabId);
     if(seen?.verified&&seen.accountId===p.accountId&&seen.guildId===p.guildId&&seen.channelId===p.channelId){await observation();return {alreadyConnected:true};}
@@ -212,7 +223,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(message.type==='CENTRAL_STATUS')return {connected:transport.connected,instanceId:executor.state.instanceId,legacyDeclaration:executor.state.legacyDeclaration,lastError:updateIssue || lastError || executor.state.lastError,bindings:Object.keys(executor.state.bindings).length,account:lastAccountObservation,activeTab:await activeChannelContext(message.windowId)};
     if(message.type==='CENTRAL_TAB_CONTEXT')return activeChannelContext(message.windowId);
     if(message.type==='CENTRAL_REGISTER_ACCOUNT')return registerActiveAccount(message.windowId);
-    if(message.type==='CENTRAL_CONNECT'){if(transport.connected&&!executor.state.emergencyStopped){await observation();return {connected:true};}executor.state.emergencyStopped=false;await executor.save();await connect();return {connected:true};}
+    if(message.type==='CENTRAL_CONNECT'){executor.state.emergencyStopped=false;await executor.save();await connect({explicit:true});return {connected:true};}
     if(message.type==='CENTRAL_DECLARE'){await executor.declareLegacy(message.value);if(!transport.connected)await connect();await observation();return {saved:true};}
     if(message.type==='CENTRAL_BIND')return bindActive(message.windowId);
     if(message.type==='CENTRAL_OPEN'){if(!transport.connected)await connect();const result=await transport.request({type:'OPEN_DASHBOARD'});const u=new URL(result.url);u.pathname='/channels';if(u.hostname!=='127.0.0.1'||u.protocol!=='http:')throw Error('관리 페이지 주소를 확인할 수 없습니다.');await chrome.tabs.create({url:u.href});return {opened:true};}

@@ -1,3 +1,4 @@
+import {composerClearedEvidence} from './delivery-receipt.js';
 const terminal=new Set(['confirmed','not_sent','cancelled']);
 const sameTarget=(a,b)=>a.bindingId===b.bindingId||(a.accountId===b.accountId&&a.guildId===b.guildId&&a.channelId===b.channelId);
 const sameAttempt=(a,b)=>['attemptId','bindingId','accountId','guildId','channelId','tabId','runId','configVersion','body'].every(key=>a[key]===b[key]);
@@ -11,7 +12,7 @@ export function planDraftPreparation({attempt,attempts={},inspection}){
   const existing=known.find(item=>item?.attemptId===attempt.attemptId);
   if(existing){
     if(!sameAttempt(existing,attempt))return blocked('PREPARATION_MISMATCH');
-    if(existing.phase==='confirmed'&&existing.result?.outcome==='confirmed'&&/^\d{17,20}$/.test(existing.result.messageId||''))return{action:'confirmed',messageId:existing.result.messageId};
+    if(existing.phase==='confirmed'&&existing.result?.outcome==='confirmed'&&(/^\d{17,20}$/.test(existing.result.messageId||'')||existing.result.confirmationBasis==='composer_cleared'&&composerClearedEvidence(existing.result.deliveryEvidence)))return{action:'confirmed',...(existing.result.messageId?{messageId:existing.result.messageId}:{}),...(existing.result.confirmationBasis?{confirmationBasis:existing.result.confirmationBasis}:{})};
     if(existing.enterRequested||!['preparing','prepared'].includes(existing.phase))return blocked('ATTEMPT_UNRESOLVED');
   }
   if(known.some(item=>item&&item.attemptId!==attempt.attemptId&&sameTarget(item,attempt)&&!terminal.has(item.phase)))return blocked('ATTEMPT_UNRESOLVED');

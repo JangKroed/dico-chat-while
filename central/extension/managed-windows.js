@@ -1,18 +1,47 @@
 function fail(code,message){throw Object.assign(Error(message),{code});}
 function discordTab(tab){try{return new URL(tab?.url).origin==='https://discord.com';}catch{return false;}}
+function channelTab(tab,record){try{const url=new URL(tab?.url);return url.origin==='https://discord.com'&&[ `/channels/${record.guildId}/${record.channelId}`,`/channels/${record.guildId}/${record.channelId}/`].includes(url.pathname);}catch{return false;}}
 function ownsWindow(win,records){
-  return win?.type==='normal'&&win.tabs?.length>0&&win.tabs.every(tab=>discordTab(tab)&&records.some(record=>record.tabId===tab.id&&record.windowId===win.id));
+  return win?.type==='normal'&&win.tabs?.length>0&&win.tabs.every(tab=>records.some(record=>record.tabId===tab.id&&record.windowId===win.id&&channelTab(tab,record)));
 }
 // A stored window ID is provenance, not sufficient ownership: users can move
 // ordinary tabs into a managed window. Never minimize or reuse such a window.
+async function ownedWindowId(chrome,saved){
+  const records=saved.dicoCentralTabs||[];
+  const candidates=[saved.dicoCentralWindowId,...records.map(record=>record.windowId)].filter(Number.isInteger);
+  for(const windowId of new Set(candidates)){
+    let win;try{win=await chrome.windows.get(windowId,{populate:true});}catch{continue;}
+    if(ownsWindow(win,records))return windowId;
+  }
+}
 export async function createManagedWindow(chrome,target){
-  // One active tab per window keeps channels from competing for tab activation.
-  // Moving existing tabs uses the helper below so their drafts survive.
-  return chrome.windows.create({url:`https://discord.com/channels/${target.guildId}/${target.channelId}`,type:'normal',focused:false,state:'minimized'});
+  const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralWindowId']);
+  const windowId=await ownedWindowId(chrome,saved),url=`https://discord.com/channels/${target.guildId}/${target.channelId}`;
+  if(Number.isInteger(windowId)){
+    const tab=await chrome.tabs.create({windowId,active:false,url});
+    await chrome.storage.local.set({dicoCentralWindowId:windowId});return{id:windowId,tabs:[tab]};
+  }
+  const win=await chrome.windows.create({url,type:'normal',focused:false,state:'minimized'});
+  if(Number.isInteger(win?.id))await chrome.storage.local.set({dicoCentralWindowId:win.id});
+  return win;
+}
+export async function ensureConsolidatedManagedWindow(chrome,target){
+  const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralWindowId']),records=saved.dicoCentralTabs||[];
+  const record=records.find(item=>item.tabId===target.tabId&&item.accountId===target.accountId&&item.guildId===target.guildId&&item.channelId===target.channelId);
+  if(!record)fail('MANAGED_TAB_MISSING','연결된 전송용 탭을 찾을 수 없습니다.');
+  const tab=await managedTab(chrome,record);let windowId=await ownedWindowId(chrome,saved);
+  if(!Number.isInteger(windowId)){
+    const win=await chrome.windows.create({tabId:tab.id,type:'normal',state:'minimized',focused:false});
+    if(!Number.isInteger(win?.id))fail('WINDOW_CONSOLIDATION_PARTIAL','전송 창을 모으지 못했습니다. 기존 탭을 확인해 주세요.');
+    windowId=win.id;
+  }else if(tab.windowId!==windowId)await chrome.tabs.move(tab.id,{windowId,index:-1});
+  // Move the existing page without reload; keep every successful move recoverable.
+  record.windowId=windowId;await chrome.storage.local.set({dicoCentralTabs:records,dicoCentralWindowId:windowId});
+  return windowId;
 }
 async function managedTab(chrome,record){
   let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{fail('MANAGED_TAB_MISSING','닫힌 전송용 탭이 있습니다. 채널 연결을 먼저 확인해 주세요.');}
-  if(!Number.isInteger(tab?.windowId)||!discordTab(tab))fail('TARGET_MISMATCH','Discord를 벗어난 전송용 탭이 있습니다. 해당 탭을 확인해 주세요.');
+  if(!Number.isInteger(tab?.windowId)||!channelTab(tab,record))fail('TARGET_MISMATCH','등록된 채널을 벗어난 전송용 탭이 있습니다. 해당 탭을 확인해 주세요.');
   return tab;
 }
 async function separateRecord(chrome,records,record){
@@ -47,11 +76,7 @@ async function consolidateManagedWindows(chrome,records,target){
   // Preflight every existing tab before the first move. Missing targets require
   // a reconnect; consolidation must never manufacture replacement tabs.
   const tabs=[];
-  for(const record of records){
-    let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{fail('MANAGED_TAB_MISSING','닫힌 전송용 탭이 있습니다. 채널 연결을 먼저 확인해 주세요.');}
-    if(!Number.isInteger(tab?.windowId)||!discordTab(tab))fail('TARGET_MISMATCH','Discord를 벗어난 전송용 탭이 있습니다. 해당 탭을 확인해 주세요.');
-    tabs.push(tab);
-  }
+  for(const record of records)tabs.push(await managedTab(chrome,record));
   let windowId;
   for(const candidate of new Set(records.map(record=>record.windowId).filter(Number.isInteger))){
     let win;try{win=await chrome.windows.get(candidate,{populate:true});}catch{continue;}
@@ -81,11 +106,26 @@ async function consolidateManagedWindows(chrome,records,target){
   }
   return{action:'consolidate',tabId:target.tabId,windowId,visible:false,managedTabs:tabs.length};
 }
+async function closeManagedChannel(chrome,records,record,target){
+  if(!Number.isInteger(target.tabId))return{action:'close',closed:false,alreadyClosed:true};
+  let tab;try{tab=await chrome.tabs.get(target.tabId);}catch{}
+  const unregister=async()=>{if(record)await chrome.storage.local.set({dicoCentralTabs:records.filter(item=>item!==record)});};
+  if(!tab){await unregister();return{action:'close',tabId:target.tabId,closed:false,alreadyClosed:true};}
+  if(!channelTab(tab,target)){
+    // A deleted destination must not be recovered, but a user-navigated page is
+    // no longer ours to close. Keep the command rejected until manually resolved.
+    await unregister();fail('TARGET_MISMATCH','전송 탭이 다른 화면으로 이동하여 닫지 않았습니다. 해당 탭을 직접 확인해 주세요.');
+  }
+  if(!record)fail('WINDOW_NOT_DEDICATED','삭제할 채널의 전송 탭 소유권을 확인하지 못해 닫지 않았습니다. 해당 탭을 직접 확인해 주세요.');
+  await chrome.tabs.remove(tab.id);
+  await unregister();return{action:'close',tabId:tab.id,closed:true};
+}
 export function createManagedWindowController({chrome}){
   return async function manageChannelWindow(target){
-    if(!['reveal','hide','consolidate','separate'].includes(target.action))fail('INVALID_WINDOW_ACTION','지원하지 않는 창 동작입니다.');
+    if(!['reveal','hide','consolidate','separate','close'].includes(target.action))fail('INVALID_WINDOW_ACTION','지원하지 않는 창 동작입니다.');
     const records=(await chrome.storage.local.get('dicoCentralTabs')).dicoCentralTabs||[];
-    const record=records.find(item=>item.tabId===target.tabId&&item.accountId===target.accountId&&item.guildId===target.guildId&&item.channelId===target.channelId);
+    const record=records.find(item=>(target.action==='close'&&target.tabId===undefined||item.tabId===target.tabId)&&item.accountId===target.accountId&&item.guildId===target.guildId&&item.channelId===target.channelId);
+    if(target.action==='close')return closeManagedChannel(chrome,records,record,{...target,tabId:record?.tabId??target.tabId});
     if(!record)fail('MANAGED_TAB_MISSING','연결된 전송용 탭을 찾을 수 없습니다. 채널 연결 상태를 확인해 주세요.');
     if(target.action==='separate')return separateManagedWindows(chrome,records,target);
     if(target.action==='consolidate')return consolidateManagedWindows(chrome,records,target);
@@ -93,7 +133,7 @@ export function createManagedWindowController({chrome}){
     if(!Number.isInteger(tab?.windowId)||!discordTab(tab))fail('TARGET_MISMATCH','연결된 탭이 Discord 화면이 아닙니다. 탭 상태를 확인해 주세요.');
     let win;try{win=await chrome.windows.get(tab.windowId,{populate:true});}catch{fail('MANAGED_TAB_MISSING','전송용 창을 찾을 수 없습니다.');}
     if(target.action==='hide'){
-      if(record.windowId!==tab.windowId||win.tabs?.length!==1||!ownsWindow(win,records))fail('WINDOW_NOT_DEDICATED','여러 탭이 있거나 소유권을 확인할 수 없는 창은 자동으로 숨기지 않습니다. 계정·브라우저에서 채널별 창 분리를 먼저 실행해 주세요.');
+      if(record.windowId!==tab.windowId||!ownsWindow(win,records))fail('WINDOW_NOT_DEDICATED','일반 탭이 섞였거나 소유권을 확인할 수 없는 창은 자동으로 숨기지 않습니다. 전송 창 상태를 확인해 주세요.');
       await chrome.windows.update(tab.windowId,{state:'minimized'});
     }else{
       // Visibility-only: an unreadable or mismatching login/channel is exactly

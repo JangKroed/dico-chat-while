@@ -1,3 +1,4 @@
+import {composerClearedEvidence} from './delivery-receipt.js';
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
 const deliveryCodes=new Set(['MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
@@ -8,7 +9,8 @@ function deliveryEvidence(value) {
   const evidence={};
   if(['prepare','commit','send'].includes(value.phase))evidence.phase=value.phase;
   if(['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage))evidence.stage=value.stage;
-  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused'])if(typeof value[key]==='boolean')evidence[key]=value[key];
+  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched'])if(typeof value[key]==='boolean')evidence[key]=value[key];
+  if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)evidence.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))evidence.submitMethod=value.submitMethod;
   for(const key of ['retryCount','maxSendRetries'])if(Number.isInteger(value[key])&&value[key]>=0&&value[key]<=5)evidence[key]=value[key];
   return Object.keys(evidence).length?evidence:undefined;
@@ -49,7 +51,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   }
   async function report(a) {
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
-    await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
+    await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
     const samples=pendingCooldownSamples.get(a.attemptId)||[];pendingCooldownSamples.delete(a.attemptId);
     if(a.phase==='confirmed')for(const sample of samples)await cooldownSample({deliveryId:a.attemptId,sample},a.tabId);
@@ -65,9 +67,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     for(const item of response.terminalAttempts){
       const local=state.attempts[item?.attemptId];
       if(!requested.has(item?.attemptId)||!local||!['preparing','prepared','executing','unknown'].includes(local.phase)||!['confirmed','not_sent','cancelled'].includes(item.status))continue;
-      if(item.status==='confirmed'&&!/^\d{17,20}$/.test(item.messageId||''))continue;
+      if(item.status==='confirmed'&&!/^\d{17,20}$/.test(item.messageId||'')&&!(item.confirmationBasis==='composer_cleared'&&composerClearedEvidence(item.deliveryEvidence)))continue;
       local.phase=item.status;local.reported=true;
-      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',...(item.messageId?{messageId:item.messageId}:{}),executionBlocked:true};changed=true;
+      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',...(item.messageId?{messageId:item.messageId}:{}),confirmationBasis:item.confirmationBasis,...(item.deliveryEvidence?{deliveryEvidence:item.deliveryEvidence}:{}),executionBlocked:true};changed=true;
     }
     if(changed)await save();
   }
@@ -147,6 +149,19 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(['consolidate','separate'].includes(p.action))maintenance=true;
       try{await manageChannelWindow(p);}finally{if(['consolidate','separate'].includes(p.action))maintenance=false;}
       await ack(c,'applied');
+    } else if(c.type==='CLOSE_CHANNEL') {
+      if(typeof manageChannelWindow!=='function')throw Object.assign(Error('채널 연결 해제를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
+      if(p.tabId!==undefined&&!Number.isInteger(p.tabId)||!p.accountId||!p.guildId||!p.channelId)throw Object.assign(Error('닫을 전송 탭 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
+      if(Object.values(state.attempts).some(a=>(p.tabId!==undefined?a.tabId===p.tabId:['accountId','guildId','channelId'].every(key=>a[key]===p[key]))&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 연결을 해제하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+      maintenance=true;
+      try{
+        await manageChannelWindow({...p,action:'close'});
+        for(const [id,binding] of Object.entries(state.bindings)){
+          if((!p.bindingId||id===p.bindingId)&&(p.tabId===undefined||binding.tabId===p.tabId)&&['accountId','guildId','channelId'].every(key=>binding[key]===p[key]))delete state.bindings[id];
+        }
+        await save();
+      }finally{maintenance=false;}
+      await ack(c,'applied');
     } else if(c.type==='OPEN_CHANNEL') {
       if(state.emergencyStopped)throw Object.assign(Error('긴급 중지를 해제하고 다시 연결하세요.'),{code:'EXECUTION_STOPPED'});
       if(typeof openChannel!=='function')throw Object.assign(Error('채널 연결 기능을 지원하는 확장으로 업데이트하세요.'),{code:'OPEN_CHANNEL_UNSUPPORTED'});
@@ -207,8 +222,8 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         a.permitId=p.permitId;a.phase='executing';a.enterRequested=true;await save();
         let result;
         try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVER',target:target(a),delivery:delivery(a)});}catch{}
-        if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')) {
-          a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationMs:result.timing?.confirmationMs,...diagnostic(result)};
+        if(result?.status==='confirmed' && (result.confirmationBasis==='composer_cleared'?composerClearedEvidence(result.deliveryEvidence):(!result.confirmationBasis||result.confirmationBasis==='message_observed')&&/^\d{17,20}$/.test(result.messageId || ''))) {
+          a.phase='confirmed';a.result={outcome:'confirmed',...(result.messageId?{messageId:result.messageId}:{}),confirmationBasis:result.confirmationBasis||'message_observed',confirmationMs:result.timing?.confirmationMs,...diagnostic(result)};
         } else if(result?.status==='blocked' || result?.status==='deferred') {
           a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true,...diagnostic(result)};
         } else {
@@ -233,7 +248,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       else {
         const a=prior || {...p,startedAt:now(),phase:'unknown'};
         let result;try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_RECONCILE',target:target(a),delivery:delivery(a)});}catch{}
-        if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId};state.attempts[p.attemptId]=a;await save();await report(a);}
+        if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationBasis:'message_observed'};state.attempts[p.attemptId]=a;await save();await report(a);}
         else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});
         await ack(c,'applied');
@@ -248,7 +263,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(commandJobs.has(commandKey))return commandJobs.get(commandKey);
     if(c?.type==='CONTROL'){volatileStops.add(c.payload?.groupId);if(c.payload?.runId)volatileStoppedRuns.add(c.payload.runId);}
     const job=(async()=>{
-      inFlight++;try {await load();const key=c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
+      inFlight++;try {await load();const key=c.type==='CLOSE_CHANNEL'?'config':c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
       const lane=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
         state.lastError=String(error.message || error).slice(0,250);
         // Rejection is terminal too. Persist before ACK so already queued or

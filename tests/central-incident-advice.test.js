@@ -122,3 +122,5 @@ test('clock gaps and unavailable managed waits explain unknown delivery without 
     assert.ok(advice.steps.some(step=>step.includes('미발송의 증거가 아닙니다')));
   }
 });
+
+test('removed channel close rejection directs to remaining browser tab without recreating a deleted account',()=>{const s=snapshot();s.commands=[{id:'close',type:'CLOSE_CHANNEL',instanceId:'browser',rejectionCode:'ACCOUNT_UNVERIFIED',payload:{accountId:'123',guildId:'guild',channelId:'channel'}}];const advice=incidentAdvice({id:'problem',code:'command_rejected',commandId:'close'},s);assert.match(advice.title,/전송 탭을 닫/);assert.equal(advice.page,'connections');assert.ok(advice.steps.some(step=>step.includes('직접 닫')));assert.ok(advice.steps.every(step=>!step.includes('계정 등록')));});
