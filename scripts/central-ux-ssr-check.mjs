@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {Dashboard} from './src/App.tsx';
 import {ConnectionProgress} from './src/ConnectionProgress.tsx';
+import {ServerClock,GroupCountdown} from './src/RuntimeCountdown.tsx';
 const now=Date.now();
 const instances=['Brave','Chrome','Chrome'].map((browser,index)=>({id:'b'+index,name:'연결된 '+browser,browser,connected:true,lastSeenAt:now,legacyFrozen:true,legacyPending:false,capabilities:['managed-window-v1','early-prepare-v1'],extensionVersion:'0.4.7'}));
 const accounts=instances.map((i,index)=>({id:'a'+index,instanceId:i.id,accountId:String(11111111111111111n+BigInt(index)),name:['브레이브 계정','업무 계정','테스트 계정'][index],version:1,verified:true}));
@@ -39,6 +40,8 @@ assert.ok(stopped.includes('aria-label="순환 그룹 시작"'),'Dashboard expos
 assert.ok(!stopped.includes('서비스 재개'),'Service readiness does not require a separate resume control');
 const many=renderToStaticMarkup(<Dashboard {...props} s={{...snapshot,groups:Array.from({length:7},(_,i)=>({...snapshot.groups[0],id:'group-'+i,name:'발송그룹'+i,status:'stopped'}))}}/>);
 assert.ok(many.includes('aria-label="발송그룹6 시작"'),'Dashboard keeps controls for groups beyond the old six-row cutoff');
+const fullGroupGap=renderToStaticMarkup(<ServerClock serverNow={now} receivedAt={performance.now()} connected={true}><GroupCountdown s={snapshot} group={{...snapshot.groups[0],nextEligibleAt:now+20000,nextPreparationAt:now+20000}}/></ServerClock>);
+assert.ok(fullGroupGap.includes('입력 준비까지 약 20초'),'Server preparation deadline preserves all twenty seconds instead of applying a second five-second deduction');
 console.log('PASS production React SSR: operational hierarchy, compact ready state, account aliases, semantic progress, loading/error analytics');
 `;
 const result=await build({stdin:{contents,resolveDir:join(root,'central/ui'),sourcefile:'ux-check.tsx',loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'dashboard-test-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {Dashboard};\n',loader:'tsx'}));}}]});

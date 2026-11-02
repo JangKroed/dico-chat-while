@@ -15,6 +15,7 @@ export function accountIdentity(s:IdentitySnapshot,ref:IdentityRef) {
   const record=account as Record<string,unknown>|undefined
   const alias=string(account?.name)
   const observed=string(record?.observedName)||string(record?.displayName)||string(record?.username)||string(ref.accountName)||string(ref.observedAccountName)||string(ref.username)
-  return {name:alias&&alias!==accountId?alias:observed||accountId||'계정 정보 없음',accountId,instanceId}
+  const customized=record?.nameCustomized===true||record?.nameCustomized!==false&&alias!==accountId
+  return {name:alias&&customized?alias:observed||alias||accountId||'계정 정보 없음',accountId,instanceId}
 }
 export function accountLabel(s:IdentitySnapshot,ref:IdentityRef) {return accountIdentity(s,ref).name}

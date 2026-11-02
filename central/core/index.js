@@ -56,10 +56,24 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(c.intervalMs!==previous){c.configVersion++;c.appliedVersion=0;}
   }
   // Catalog entities describe identity and destination independently of execution tabs.
-  function upsertAccount(instanceId,accountId,{verified=false,sessionId,observedAt=now()}={}){
+  function accountMetadataText(value){
+    if(typeof value!=='string')return undefined;
+    const trimmed=value.trim();return trimmed&&trimmed.length<=100&&!/[\u0000-\u001f\u007f]/.test(trimmed)?trimmed:undefined;
+  }
+  function accountNameCustomized(a){return typeof a.nameCustomized==='boolean'?a.nameCustomized:Boolean(a.name&&a.name!==a.accountId);}
+  function upsertAccount(instanceId,accountId,{verified=false,sessionId,observedAt=now(),accountName,username}={}){
     let account=state.accounts.find(a=>a.instanceId===instanceId&&a.accountId===accountId);
-    if(!account){account={id:id(),instanceId,accountId,name:accountId,version:1,verified:false,createdAt:now(),updatedAt:now()};state.accounts.push(account);event('account.created',{accountEntityId:account.id,instanceId});}
-    if(verified){account.verified=true;account.sessionId=sessionId;account.lastVerifiedAt=Math.max(account.lastVerifiedAt||0,observedAt);account.updatedAt=Math.max(account.updatedAt||0,observedAt);}
+    const created=!account;
+    if(!account){account={id:id(),instanceId,accountId,name:accountId,nameCustomized:false,version:1,verified:false,createdAt:now(),updatedAt:now()};state.accounts.push(account);event('account.created',{accountEntityId:account.id,instanceId});}
+    account.nameCustomized=accountNameCustomized(account);
+    if(verified){
+      let changed=false;
+      for(const [key,value] of [['observedName',accountMetadataText(accountName)],['username',accountMetadataText(username)]])if(value!==undefined&&account[key]!==value){account[key]=value;changed=true;}
+      const automaticName=account.observedName||account.username||accountId;
+      if(!account.nameCustomized&&account.name!==automaticName){account.name=automaticName;changed=true;}
+      if(changed&&!created)account.version++;
+      account.verified=true;account.sessionId=sessionId;account.lastVerifiedAt=Math.max(account.lastVerifiedAt||0,observedAt);account.updatedAt=Math.max(account.updatedAt||0,observedAt);
+    }
     return account;
   }
   function upsertTarget(guildId,channelId,name){
@@ -346,7 +360,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'message.archive':{const m=get('messages',p.id);expected(m,p);m.archived=p.archived!==false;m.version++;event('message.archived',{messageId:m.id});return m;}
       case 'message.delete':{const m=get('messages',p.id);expected(m,p);ensure(!state.channels.some(c=>[...c.playlist,...(c.pendingPlaylist||[])].some(i=>i.messageId===m.id))&&!state.attempts.some(a=>a.messageIdRef===m.id&&ACTIVE.has(a.status)),'MESSAGE_IN_USE','This message is referenced. Archive it or remove its channel assignments.',409);state.messages=state.messages.filter(x=>x.id!==m.id);event('message.deleted',{messageId:m.id});return {id:m.id,deleted:true};}
       case 'instance.update':{const i=get('instances',p.id);expected(i,p);i.name=text(p.name,'name');i.nameCustomized=true;i.version++;event('instance.updated',{instanceId:i.id});return publicInstance(i);}
-      case 'account.update':{const a=get('accounts',p.id);expected(a,p);a.name=text(p.name,'name');a.version++;a.updatedAt=now();event('account.updated',{accountEntityId:a.id,instanceId:a.instanceId});return publicAccount(a);}
+      case 'account.update':{const a=get('accounts',p.id);expected(a,p);a.name=text(p.name,'name');a.nameCustomized=true;a.version++;a.updatedAt=now();event('account.updated',{accountEntityId:a.id,instanceId:a.instanceId});return publicAccount(a);}
       case 'target.create':{
         ensure(typeof p.url==='string'&&/^https:\/\/discord\.com\/channels\/\d{1,30}\/\d{1,30}\/?$/.test(p.url),'VALIDATION','Use a Discord server channel URL: https://discord.com/channels/server/channel.');
         const [,guildId,channelId]=/^https:\/\/discord\.com\/channels\/(\d+)\/(\d+)\/?$/.exec(p.url);
@@ -395,7 +409,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
       case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&ACTIVE.has(a.status));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
         if(active){c.pendingPlaylist=items;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
-      case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??60000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
+      case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??20000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
       case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}
       case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
       case 'group.start':case 'group.resume':return start(get('groups',p.id));
@@ -503,7 +517,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   function exportBackup(){return clone({format:'dico-central-backup',version:1,createdAt:now(),settings:state.settings,messages:state.messages,
     instances:state.instances.map(i=>({id:i.id,name:i.name,browser:i.browser})),
-    accounts:state.accounts.map(a=>({id:a.id,instanceId:a.instanceId,accountId:a.accountId,name:a.name})),
+    accounts:state.accounts.map(a=>({id:a.id,instanceId:a.instanceId,accountId:a.accountId,name:a.name,nameCustomized:accountNameCustomized(a),...(a.observedName?{observedName:a.observedName}:{}),...(a.username?{username:a.username}:{})})),
     targets:state.targets.map(t=>({id:t.id,url:t.url,guildId:t.guildId,channelId:t.channelId,name:t.name})),
     channels:state.channels.map(c=>({id:c.id,instanceId:c.instanceId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,name:c.name,intervalMs:c.intervalMs,intervalMode:c.intervalMode,customIntervalMs:c.customIntervalMs,slowmodeMs:c.slowmodeMs,slowmodeObservedAt:c.slowmodeObservedAt,playlist:c.playlist,playlistIndex:c.playlistIndex})),
     groups:state.groups.map(g=>({id:g.id,name:g.name,members:g.members,intervalMs:g.intervalMs,cursor:g.cursor}))});}
@@ -537,7 +551,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       ensure(instances.some(i=>i.id===instanceId),'VALIDATION','Account references a missing browser.');
       // Existing v1 bindings may use legacy identity placeholders. Only those exact identities are grandfathered.
       ensure(/^\d{1,30}$/.test(accountId)||channels.some(c=>c.instanceId===instanceId&&c.accountId===accountId),'VALIDATION','Invalid Discord account ID.');
-      return{id:text(a.id,'id',100),instanceId,accountId,name:text(a.name,'name'),version:1,verified:false,createdAt:at,updatedAt:at};
+      const observedName=accountMetadataText(a.observedName),username=accountMetadataText(a.username);
+      return{id:text(a.id,'id',100),instanceId,accountId,name:text(a.name,'name'),nameCustomized:accountNameCustomized(a),...(observedName?{observedName}:{}),...(username?{username}:{}),version:1,verified:false,createdAt:at,updatedAt:at};
     });
     const targets=(backup.targets||[]).map(t=>{
       const guildId=text(t.guildId,'guildId',100),channelId=text(t.channelId,'channelId',100),url=text(t.url,'url',300);
@@ -666,7 +681,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           incident('account_mismatch',{instanceId:i.id});
         }
         for(const c of state.commands.filter(c=>confirmedMismatch&&c.instanceId===i.id&&c.payload.accountId&&affected(c.payload.accountId)&&(['queued','received'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')&&['OPEN_CHANNEL','PREPARE','COMMIT_PERMIT'].includes(c.type)))c.status='superseded';
-        const account=message.verified?upsertAccount(i.id,message.accountId,{verified:true,sessionId:i.sessionId}):state.accounts.find(a=>a.instanceId===i.id&&a.accountId===message.accountId);
+        const account=message.verified?upsertAccount(i.id,message.accountId,{verified:true,sessionId:i.sessionId,accountName:message.accountName,username:message.username}):state.accounts.find(a=>a.instanceId===i.id&&a.accountId===message.accountId);
         event('account.observed',{accountEntityId:account?.id,instanceId:i.id,verified:message.verified});return{ok:true,account:account?publicAccount(account):null,commands:commands(i.id)};
       }
       if(message.type==='OBSERVATION'){
@@ -683,7 +698,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             state.instances=state.instances.filter(x=>x.id!==previousInstance);
             for(const old of state.accounts.filter(a=>a.instanceId===previousInstance)){
               const current=state.accounts.find(a=>a.instanceId===i.id&&a.accountId===old.accountId);
-              if(current){if(current.name===current.accountId&&old.name!==old.accountId){current.name=old.name;current.version++;}state.accounts=state.accounts.filter(a=>a.id!==old.id);}
+              if(current){if(!accountNameCustomized(current)&&accountNameCustomized(old)){current.name=old.name;current.nameCustomized=true;current.version++;}state.accounts=state.accounts.filter(a=>a.id!==old.id);}
               else{old.instanceId=i.id;old.verified=false;old.version++;}
             }
           }event('legacy.bound',{channelId:c.id,instanceId:i.id});}}
@@ -692,7 +707,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))markUnknown(a,'execution_tab_changed');continue;}
           c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
-            upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId});upsertTarget(guildId,channelId,c.name);
+            upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId,accountName:observed.accountName,username:observed.username});upsertTarget(guildId,channelId,c.name);
             for(const cmd of state.commands.filter(cmd=>cmd.type==='OPEN_CHANNEL'&&cmd.instanceId===i.id&&cmd.sessionId===i.sessionId&&['queued','received','applied'].includes(cmd.status)&&cmd.payload.accountId===accountId&&cmd.payload.guildId===guildId&&cmd.payload.channelId===channelId)){cmd.status='completed';cmd.completedAt=now();}
           }
           if(observed.slowmodeMs!==undefined){
@@ -838,7 +853,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       try{eligibleChannel(c);}catch(error){g.waitReason=error.code.toLowerCase();g.nextEligibleAt=null;continue;}
       if(monotonicNow()<(g.prepareRetryAfterMono||0)){g.waitReason='preparation_retry';g.nextEligibleAt=wall+(g.prepareRetryAfterMono-mono);continue;}
       const due=Math.max(g.nextMono||0,c.nextMono||0),earlyPrepare=get('instances',c.instanceId).capabilities?.includes('early-prepare-v1')===true;
-      if(mono<due-(earlyPrepare?5000:0)){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
+      // Input may lead an account cooldown, but never consumes the group's
+      // full post-confirmation gap. Preparation/response latency adds afterward.
+      const prepareDue=Math.max(g.nextMono||0,(c.nextMono||0)-(earlyPrepare?5000:0));
+      if(mono<prepareDue){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
       const item=c.playlist[c.playlistIndex%c.playlist.length],m=get('messages',item.messageId),revision=m.revisions.find(r=>r.id===item.revisionId);
       const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false,maxSendRetries:state.settings.maxSendRetries};
       state.attempts.push(a);g.activeAttemptId=a.id;g.waitReason='preparing';g.nextEligibleAt=null;command('PREPARE',c.instanceId,attemptPayload(a));event('delivery.preparing',{attemptId:a.id,groupId:g.id,instanceId:c.instanceId,accountId:c.accountId,channelId:c.channelId});
@@ -861,13 +879,18 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   function publicChannel(c,clock=deadlineClock()){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),minimumIntervalMs:minimumInterval(c),correctedBaseIntervalMs:correctedBaseInterval(c),cooldownCorrectionMs:cooldownCorrection(c),customExtraMs:customExtraInterval(c),effectiveIntervalMs:effectiveInterval(c),nextEligibleAt:channelNextEligibleAt(c,clock)};}
   function publicGroup(g,clock=deadlineClock()){
-    const{nextMono,...dto}=g;let nextEligibleAt=null;
+    const{nextMono,...dto}=g;let nextEligibleAt=null,nextPreparationAt=null;
     if(g.status==='running'&&!g.activeAttemptId&&!g.controlIntent){
       const channel=state.channels.find(c=>c.id===g.members[g.cursor]);
       const channelAt=channel?channelNextEligibleAt(channel,clock):null;
-      if(channelAt!==null&&(nextMono===undefined||Number.isFinite(nextMono)))nextEligibleAt=Math.max(channelAt,clock.wall+Math.max(0,(nextMono??clock.mono)-clock.mono));
+      if(channelAt!==null&&(nextMono===undefined||Number.isFinite(nextMono))){
+        const groupAt=clock.wall+Math.max(0,(nextMono??clock.mono)-clock.mono);
+        nextEligibleAt=Math.max(channelAt,groupAt);
+        const lead=get('instances',channel.instanceId).capabilities?.includes('early-prepare-v1')===true?5000:0;
+        nextPreparationAt=Math.max(groupAt,channelAt-lead);
+      }
     }
-    return{...clone(dto),nextEligibleAt};
+    return{...clone(dto),nextEligibleAt,nextPreparationAt};
   }
   function publicAttempt(a){const{sessionId,body,readyMono,preparedObservedAt,preEnterWaitObservedAt,permitId,...dto}=a;return clone(dto);}
   function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}

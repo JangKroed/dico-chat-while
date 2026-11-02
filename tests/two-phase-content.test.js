@@ -6,7 +6,7 @@ import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 import {createCentralManager} from '../central/core/index.js';
 import {createCentralExecutor} from '../central/extension/executor.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
+function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
@@ -23,7 +23,12 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
   }
   if(event.type==='keyup'&&throwAfterEnter)throw Error('Synthetic post-Enter DOM failure');
  }};
- const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:sel=>sel.includes('panels')?{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
+ let panelUsername='hoya',panelDisplayName='호야';
+ const nameNode={get textContent(){return panelUsername;},childElementCount:0,getAttribute:()=>null};
+ const ownRoot={getAttribute:()=>null,querySelector:selector=>selector.includes('panelTitleContainer')?{get textContent(){return panelDisplayName;}}:selector.includes('panelSubtextContainer')?{querySelectorAll:()=>panelUsername?[nameNode]:[]}:null,querySelectorAll:selector=>selector==='img'?[{getAttribute:()=>'/embed/avatars/0.png'}]:selector.includes('username')&&panelUsername?[nameNode]:[]};
+ const ownPanel={querySelector:()=>ownRoot};
+ const identity=()=>({verified:Boolean(loggedUser),accountId:loggedUser,guildId,channelId,username:'hoya',accountName:'호야',identitySource:'own-panel-current-user'});
+ const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:sel=>sel.includes('panels')?defaultAvatar?ownPanel:{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
  const tick=ms=>{if(tickHook){let remaining=ms;while(remaining>0){const step=Math.min(500,remaining);clock+=step;remaining-=step;tickHook();}}else clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
  if(fault==='text_mismatch')editor.innerText='WRONG';
  if(fault==='focus_lost')document.activeElement=null;
@@ -48,11 +53,11 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`},Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{listener(message,{id:'ext'},resolve);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{listener(message,{id:'ext'},resolve);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
@@ -504,4 +509,36 @@ test('stopping a retained-draft retry preserves the observed composer and postin
  assert.equal(result.deliveryEvidence.composerRetained,true);
  for(const key of ['newMessage','matchingMessage','sendingSeen','failedSeen'])assert.equal(result.deliveryEvidence[key],false,key);
  assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+test('기본 아바타는 MAIN 계정 증명으로 검사·준비·발송하며 닉네임만으로 입력하지 않는다',async()=>{
+ const r=rig({loggedUser:'123456789012345678',defaultAvatar:true,managed:true});r.target.coordinated=true;
+ assert.equal((await r.request('DICO_INSPECT')).ok,true);
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(3000);
+ assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.ok(r.requests.filter(m=>m.type==='DICO_ACCOUNT_IDENTITY').length>=2);
+ for(const loggedUser of [null,'987654321098765432']){
+  const blocked=rig({loggedUser,defaultAvatar:true,managed:true});blocked.target.coordinated=true;
+  assert.equal((await blocked.request('DICO_PREPARE')).status,'blocked');assert.equal(blocked.events.length,0);
+ }
+});
+test('기본 아바타의 같은 표시명·다른 사용자명은 오래된 MAIN 증명으로 준비하지 않는다',async()=>{
+ const r=rig({loggedUser:'123456789012345678',defaultAvatar:true,managed:true});r.target.coordinated=true;
+ assert.equal((await r.request('DICO_INSPECT')).ok,true);r.profile({username:'switched_account'});
+ assert.equal((await r.request('DICO_PREPARE')).status,'blocked');assert.equal(r.events.length,0);
+});
+test('기본 아바타의 사용자명 DOM이 없으면 명시적 currentUser의 표시명 증명을 사용한다',async()=>{
+ const r=rig({loggedUser:'123456789012345678',defaultAvatar:true,managed:true});r.target.coordinated=true;r.profile({username:''});
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');
+});
+test('기본 아바타 계정 전환은 준비 후 새 증명으로 감지하여 Enter를 막는다',async()=>{
+ const r=rig({loggedUser:'123456789012345678',defaultAvatar:true,managed:true});r.target.coordinated=true;
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(3000);r.account('987654321098765432');
+ assert.equal((await r.request('DICO_DELIVER')).status,'blocked');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);assert.equal(r.editor.innerText,'A');
+});
+test('기본 아바타 검사 요청이 실패해도 모든 비동기 검사 응답은 입력 없이 완료된다',async()=>{
+ for(const type of ['DICO_INSPECT','DICO_DRAFT_INSPECT','DICO_RECONCILE']){
+  const r=rig({defaultAvatar:true,managed:true});r.target.coordinated=true;r.onRuntime(async m=>{if(m.type==='DICO_ACCOUNT_IDENTITY')throw Error('MAIN unavailable');return{};});
+  const result=await r.request(type);assert.ok(result);assert.equal(r.events.length,0);assert.notEqual(result.ok,true);
+ }
 });

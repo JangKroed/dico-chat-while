@@ -25,3 +25,10 @@ test('logs resolve their account name through command, attempt or binding refere
   assert.equal(accountLabel(events,{attemptId:'attempt'}),'내가 정한 업무 계정');
   assert.equal(accountLabel(events,{channelId:'binding'}),'내가 정한 업무 계정');
 });
+
+test('automatic account labels prefer refreshed observed names while custom numeric aliases are respected',()=>{
+  const snapshot={accounts:[{id:'a',instanceId:'browser',accountId:'123',name:'오래된 자동 이름',observedName:'최신 Discord 이름',username:'fresh.user',nameCustomized:false}],channels:[]};
+  assert.equal(accountLabel(snapshot,{accountId:'123',instanceId:'browser'}),'최신 Discord 이름');
+  snapshot.accounts[0].name='123';snapshot.accounts[0].nameCustomized=true;
+  assert.equal(accountLabel(snapshot,{accountId:'123',instanceId:'browser'}),'123');
+});

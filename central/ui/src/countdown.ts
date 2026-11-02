@@ -7,7 +7,7 @@ export function secondsUntil(deadline:Timestamp|null|undefined,serverNow:number|
 }
 type TimingGroup=Pick<Group,'status'>&Partial<Pick<Group,'members'|'cursor'|'activeAttemptId'|'waitReason'>>
 export function waitReasonText(reason?:string) {
-  return ({preparation_retry:'현재 계정 입력 준비 자동 재시도 중',preparation_failed:'입력 준비 실패 · 전송 창 확인 필요',send_retry:'현재 계정 전송 재시도 중',scheduled_input_ready:'입력 준비 완료 · 예정 시각 대기',discord_cooldown:'Discord 실제 제한 해제 대기',awaiting_result:'게시 결과 확인 대기',account_unverified:'계정·채널 검증 필요',connection_lost:'브라우저 연결 다시 확인 필요',config_pending:'확장 적용 확인 대기'} as Record<string,string>)[reason||'']||reason||'실행 조건 확인 중'
+  return ({group_interval:'그룹 최소 간격 대기',account_interval:'계정 주기 대기',preparing:'입력 준비 중',delivery_unknown:'실제 게시 여부 확인 필요',manual_resume:'실행 조건 다시 확인 필요',preparation_retry:'현재 계정 입력 준비 자동 재시도 중',preparation_failed:'입력 준비 실패 · 전송 창 확인 필요',send_retry:'현재 계정 전송 재시도 중',scheduled_input_ready:'입력 준비 완료 · 예정 시각 대기',discord_cooldown:'Discord 실제 제한 해제 대기',awaiting_result:'게시 결과 확인 대기',account_unverified:'계정·채널 검증 필요',connection_lost:'브라우저 연결 다시 확인 필요',config_pending:'확장 적용 확인 대기'} as Record<string,string>)[reason||'']||reason||'실행 조건 확인 중'
 }
 export function preparationDeadline(deadline:Timestamp|null|undefined,leadSeconds:number):number|null {
   if(deadline===null||deadline===undefined)return null

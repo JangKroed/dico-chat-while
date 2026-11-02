@@ -23,7 +23,8 @@ async function refresh(){
     $('#status').textContent=s.lastError || (s.connected?`관리 프로그램 연결됨 · 전송 채널 ${s.bindings}개`:'관리 프로그램을 실행한 뒤 다시 연결하세요.');
     $('#legacy-check').hidden=Boolean(s.legacyDeclaration);
     $('#tab-context').textContent=s.activeTab?.eligible?`서버 ${s.activeTab.guildId} · 채널 ${s.activeTab.channelId}`:'현재 탭: 연결할 서버 채널을 열어 주세요.';
-    $('#account-status').textContent=s.account?`계정 ${s.account.accountId} · ${s.account.verified?'현재 확인됨':'다시 검증 필요'}`:'아직 등록된 계정이 없습니다.';
+    const accountName=s.account?.accountName||s.account?.username||s.account?.accountId;
+    $('#account-status').textContent=s.account?`계정 ${accountName}${accountName!==s.account.accountId?` · ID ${s.account.accountId}`:''} · ${s.account.verified?'현재 확인됨':'다시 검증 필요'}`:'아직 등록된 계정이 없습니다.';
     if(s.legacyDeclaration){const input=document.querySelector(`input[value="${s.legacyDeclaration}"]`);if(input)input.checked=true;}
   }catch(error){if(generation!==refreshGeneration)return;state=null;$('#status').textContent=error.message;}
   renderControls();

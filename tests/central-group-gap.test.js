@@ -1,0 +1,16 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import{createCentralManager}from'../central/core/index.js';
+function fixture(){let time=1_800_000_000_000;const manager=createCentralManager({now:()=>time,monotonicNow:()=>time});const peers=[];for(const accountId of ['A','B']){const peer=manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['early-prepare-v1']});manager.bridge({type:'OBSERVATION',sessionId:peer.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId,guildId:'g',channelId:'c',tabId:peers.length+1,verified:true,slowmodeMs:0}]},peer.instanceId);const channel=manager.snapshot().channels.find(c=>c.instanceId===peer.instanceId);const m=manager.execute('message.create',{name:accountId,body:accountId});manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:m.id}]});manager.bridge({type:'ACK',sessionId:peer.sessionId,commandId:manager.commands(peer.instanceId).find(c=>c.type==='CONFIG_SYNC').id,status:'applied'},peer.instanceId);peers.push({...peer,accountId,bindingId:channel.id});}const advance=ms=>{while(ms>0){const step=Math.min(ms,1000);time+=step;ms-=step;for(const p of peers)manager.bridge({type:'HEARTBEAT',sessionId:p.sessionId},p.instanceId);manager.tick();}};const prepared=a=>{const p=peers.find(p=>p.instanceId===a.instanceId);manager.bridge({type:'PREPARED',sessionId:p.sessionId,attemptId:a.id,configVersion:a.configVersion,accountId:p.accountId,channelId:'c',draftClear:true,cooldownMs:0},p.instanceId);};const confirm=a=>{const p=peers.find(p=>p.instanceId===a.instanceId);manager.bridge({type:'DELIVERY_RESULT',sessionId:p.sessionId,attemptId:a.id,outcome:'confirmed',messageId:'post-'+a.id},p.instanceId);};return{manager,peers,advance,prepared,confirm,now:()=>time};}
+
+test('new groups default to a twenty second minimum',()=>{const f=fixture();try{const g=f.manager.execute('group.create',{name:'Default',members:f.peers.map(p=>p.bindingId)});assert.equal(g.intervalMs,20000);}finally{f.manager.close();}});
+
+test('group gap is fully observed before preparation, and actual preparation and confirmation delays add to the next cycle',()=>{
+ const f=fixture();try{
+ const g=f.manager.execute('group.create',{name:'Timing',members:f.peers.map(p=>p.bindingId),intervalMs:20000});f.manager.execute('group.start',{id:g.id});f.manager.tick();let a=f.manager.snapshot().attempts[0];f.advance(2000);f.prepared(a);f.advance(3000);f.confirm(a);const confirmedAt=f.now();
+ let dto=f.manager.snapshot().groups[0];assert.equal(dto.nextEligibleAt,confirmedAt+20000);assert.equal(dto.nextPreparationAt,confirmedAt+20000);
+ f.advance(15000);assert.equal(f.manager.snapshot().attempts.length,1,'five-second input lead cannot subtract from group gap');
+ f.advance(5000);a=f.manager.snapshot().attempts[1];assert.equal(a.createdAt,confirmedAt+20000);
+ f.advance(7000);f.prepared(a);assert.equal(f.manager.snapshot().attempts[1].permittedAt,confirmedAt+27000,'preparation delay extends actual gap');
+ f.advance(1000);f.confirm(a);dto=f.manager.snapshot().groups[0];assert.equal(dto.nextPreparationAt,f.now()+20000,'confirmation delay is not subtracted from following gap');
+ }finally{f.manager.close();}
+});

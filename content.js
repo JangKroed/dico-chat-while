@@ -180,15 +180,60 @@
     }
     return null;
   }
+  const ownPanel=()=>document.querySelector('section[class*="panels"], div[class*="panels"], section[aria-label="User area"], section[aria-label="사용자 영역"]');
+  const ownPanelRoot=panel=>panel?.querySelector?.('[class*="accountPopoutButtonWrapper"]')||panel?.querySelector?.('[class*="nameTag"]')?.parentElement||panel;
+  function ownPanelIds(panel){
+    const root=ownPanelRoot(panel),ids=new Set();if(!root)return ids;
+    const add=id=>{if(/^\d{17,20}$/.test(id||''))ids.add(id);};
+    for(const node of [root,...(root.querySelectorAll?.('[data-user-id], [data-author-id]')||[])]){add(node.getAttribute?.('data-user-id'));add(node.getAttribute?.('data-author-id'));}
+    for(const image of root.querySelectorAll?.('img')||[]){const src=image.getAttribute('src')||'',match=src.match(/\/(?:avatars\/(\d{17,20})|users\/(\d{17,20})\/avatars)\//);if(match)add(match[1]||match[2]);}
+    for(const link of root.querySelectorAll?.('a[href]')||[]){try{const url=new URL(link.getAttribute('href'),location.origin);if(url.origin===location.origin)add(url.pathname.match(/^\/users\/(\d{17,20})\/?$/)?.[1]);}catch{}}
+    return ids;
+  }
+  let ownIdentityProof=null;
+  function rememberOwnIdentity(target,identity){
+    if(!target?.coordinated)return;
+    const panel=ownPanel();
+    ownIdentityProof=identity?.verified===true&&/^\d{17,20}$/.test(identity.accountId||'')&&identity.guildId===target.guildId&&identity.channelId===target.channelId&&panel
+      ?{...identity,panel,root:ownPanelRoot(panel),path:location.pathname,checkedAt:Date.now()}:null;
+  }
+  function proofMatchesPanel(proof,panel){
+    if(!proof||proof.panel!==panel||proof.root!==ownPanelRoot(panel)||proof.path!==location.pathname||Date.now()-proof.checkedAt<0||Date.now()-proof.checkedAt>2000)return false;
+    const clean=value=>typeof value==='string'?value.replace(/[\u200b-\u200d\ufeff]/g,'').trim():'';
+    const root=proof.root,username=proof.username;
+    const names=[...(root.querySelectorAll?.('[class*="username"], [class*="userTag"], [class*="hovered"], [data-username], [class*="panelSubtextContainer"] *')||[])].map(node=>clean(node.getAttribute?.('data-username')||node.textContent));
+    const subtext=root.querySelector?.('[class*="panelSubtextContainer"]');
+    const firstSubtext=[...(subtext?.querySelectorAll?.('*')||[])].find(node=>!node.childElementCount&&clean(node.textContent))||subtext;
+    const labels=[...(root.querySelectorAll?.('[class*="username"], [class*="userTag"], [data-username]')||[]),firstSubtext].filter(Boolean).map(node=>clean(node.getAttribute?.('data-username')||node.textContent).replace(/^@/,'')).filter(name=>/^[a-z0-9_.]{2,32}$/.test(name));
+    if(username&&labels.some(name=>name!==username))return false;
+    if(username&&names.some(name=>name===username||name==='@'+username))return true;
+    const title=root.querySelector?.('[class*="panelTitleContainer"], [class*="displayName"], [data-display-name]');
+    return proof.identitySource==='own-panel-current-user'&&Boolean(proof.accountName)&&clean(title?.textContent)===proof.accountName;
+  }
+  async function refreshOwnIdentity(target){
+    if(!target?.coordinated)return;
+    const panel=ownPanel(),ids=ownPanelIds(panel);
+    if(ids.size>0)return;
+    if(proofMatchesPanel(ownIdentityProof,panel)&&Date.now()-ownIdentityProof.checkedAt<1000)return;
+    const began=Date.now();let identity;
+    try{identity=await chrome.runtime.sendMessage({type:'DICO_ACCOUNT_IDENTITY'});}catch{}
+    if(Date.now()-began<0||Date.now()-began>2000)identity=null;
+    rememberOwnIdentity(target,identity);
+  }
+  async function requestInputAuthorization(target,message){
+    const response=await chrome.runtime.sendMessage(message);
+    if(target?.coordinated&&response?.identity)rememberOwnIdentity(target,response.identity);
+    return response;
+  }
   function ownUserId(target) {
     if (/^\d{17,20}$/.test(target.ownUserId || '')) return target.ownUserId;
-    const panel = document.querySelector('section[class*="panels"], div[class*="panels"], section[aria-label="User area"], section[aria-label="사용자 영역"]');
-    return panel ? avatarUserId(panel) : null;
+    const ids=ownPanelIds(ownPanel());return ids.size===1?[...ids][0]:null;
   }
   function coordinatedAccountMatches(target) {
     if (!target.coordinated) return true;
-    const panel=document.querySelector('section[class*="panels"], div[class*="panels"], section[aria-label="User area"], section[aria-label="사용자 영역"]');
-    return Boolean(panel && avatarUserId(panel)===target.ownUserId);
+    const panel=ownPanel(),ids=ownPanelIds(panel);
+    if(ids.size)return ids.size===1&&ids.has(target.ownUserId);
+    return proofMatchesPanel(ownIdentityProof,panel)&&ownIdentityProof.accountId===target.ownUserId;
   }
   function authorId(row) {
     // Consecutive messages can omit the avatar; their group inherits the
@@ -299,7 +344,7 @@
     };
     cooldownProbeCancel=()=>{done=true;clearInterval(timer);};
     if(managedTiming(target)){
-      void(async()=>{while(!done){await deliveryDelay(target,500);if(!done)check();}})().catch(()=>finish('inconclusive'));
+      void(async()=>{while(!done){await deliveryDelay(target,500);if(!done){await refreshOwnIdentity(target);if(!done)check();}}})().catch(()=>finish('inconclusive'));
     }else timer=setInterval(check,500);
     check();
   }
@@ -587,6 +632,7 @@
       return false;
     };
     while (true) {
+      await refreshOwnIdentity(target);
       const now=Date.now(),gap=now-lastSample;
       maxSampleGapMs=Math.max(maxSampleGapMs,gap);lastSample=now;
       // A suspended/throttled page cannot supply observations. Never count the
@@ -633,6 +679,7 @@
   async function waitForCommitCooldown(target,delivery,editor,trace,state) {
     const maxWaitMs=21630000,mono=()=>globalThis.performance?.now() ?? Date.now();
     for(;;){
+      await refreshOwnIdentity(target);
       const observed=state.guard?.();if(observed)return observed;
       const current=inspect(target),found=editors();
       if(!current.ok)return{status:'blocked',code:current.code,error:current.error};
@@ -663,6 +710,7 @@
     const evidence={phase:delivery?.phase==='prepare'?'prepare':delivery?.phase==='commit'?'commit':'send',stage:'inspect',enterAttempted:false};
     evidence.retryCount=0;
     evidence.maxSendRetries=delivery?.phase==='commit'?(Number.isInteger(delivery.maxSendRetries)?Math.max(0,Math.min(5,delivery.maxSendRetries)):5):0;
+    await refreshOwnIdentity(target);
     const result=await performDelivery(target,delivery,evidence);
     // Final-response metadata survives even when optional tracing is unavailable.
     // Never include message text, DOM, URLs or raw exceptions in this object.
@@ -696,7 +744,7 @@
       // Distinguish a blocked worker/permission reply from slow editor preparation.
       evidence.stage='authorize';
       trace('authorization-request');
-      const authorization = await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase, ...(delivery.phase==='commit'?{retryCount:0}:{}) });
+      const authorization = await requestInputAuthorization(target,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase, ...(delivery.phase==='commit'?{retryCount:0}:{}) });
       trace('authorization-response',{authorized:authorization?.allowed===true});
       if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
       result = inspectForDelivery(target,delivery);
@@ -715,7 +763,7 @@
           if(!stable)return {status:'blocked',code:'COMMIT_EDITOR_UNSTABLE',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
           evidence.stage='authorize';
           const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
-          const finalAuthorization=await chrome.runtime.sendMessage({type:'DICO_CAN_SEND',id:delivery.id,phase:'commit',retryCount});
+          const finalAuthorization=await requestInputAuthorization(target,{type:'DICO_CAN_SEND',id:delivery.id,phase:'commit',retryCount});
           const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
           const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-authorizationMonoStarted;
           const staleAuthorization=delivery.strictAuthorization && (!Number.isFinite(finalAuthorization?.authorizedAt) || authorizationElapsed<0 || authorizationElapsed>2000 || authorizationMonoElapsed<0 || authorizationMonoElapsed>2000 || Math.abs(authorizationElapsed-authorizationMonoElapsed)>1000 || authorizationNow-finalAuthorization.authorizedAt<0 || authorizationNow-finalAuthorization.authorizedAt>2000);
@@ -749,7 +797,7 @@
         await deliveryDelay(target,100);
         result = inspectForDelivery(target,delivery);
         if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
-        if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
+        if (!(await requestInputAuthorization(target,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
           return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
         }
         const live = editors()[0];
@@ -792,7 +840,7 @@
         }
         editor = currentEditors[0];
         if (!matchesTarget(target)) return { status: 'uncertain', error: '문구 입력 중 채널이 변경되었습니다. 초안을 확인해 주세요.' };
-        if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
+        if (!(await requestInputAuthorization(target,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
           return { status: 'uncertain', error: '문구 입력 후 예약이 취소되었습니다. 남은 초안을 확인해 주세요.' };
         }
         if (!matchesTarget(target) || !editor.isConnected || !composerMatches(editor,delivery.text)) {
@@ -876,13 +924,11 @@
     if(message?.type==='DICO_CONTENT_STATUS'){respond({buildId:CONTENT_BUILD_ID,busy});return false;}
     if(message?.type==='DICO_CONTENT_DISPOSE'){respond({disposed:globalThis.__dicoWhileLifecycle.dispose()});return false;}
     if (message?.type === 'DICO_RECONCILE') {
-      const result = reconcile(message.target, message.delivery);
-      reportTrace(message.delivery, 'reconcile', {result:result.status,draftAction:result.draftAction});
-      respond(result); return false;
+      void refreshOwnIdentity(message.target).then(()=>{const result=reconcile(message.target,message.delivery);reportTrace(message.delivery,'reconcile',{result:result.status,draftAction:result.draftAction});respond(result);}).catch(()=>respond({status:'uncertain',code:'ACCOUNT_UNREADABLE'}));return true;
     }
-    if (message?.type === 'DICO_CHANNEL_LIMIT') { detectSlowmodeSetting(message.target).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
-    if(message?.type==='DICO_DRAFT_INSPECT'){respond(inspectManagedDraft(message.target,message.delivery));return false;}
-    if (message?.type === 'DICO_INSPECT') { detectSlowmodeSetting(message.target).catch(()=>null).then(()=>{const result=inspect(message.target),found=editors();const draftMatches=result.ok===true&&found.length===1&&typeof message.target?.expectedText==='string'&&composerMatches(found[0],message.target.expectedText);respond({...result,draftMatches,diagnostics:{...traceSnapshot(message.target,message.target.expectedText || ''),contentVersion:CONTENT_VERSION}});}); return true; }
+    if (message?.type === 'DICO_CHANNEL_LIMIT') { refreshOwnIdentity(message.target).then(()=>detectSlowmodeSetting(message.target)).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
+    if(message?.type==='DICO_DRAFT_INSPECT'){void refreshOwnIdentity(message.target).then(()=>respond(inspectManagedDraft(message.target,message.delivery))).catch(()=>respond({status:'blocked',code:'ACCOUNT_UNREADABLE'}));return true;}
+    if (message?.type === 'DICO_INSPECT') { refreshOwnIdentity(message.target).then(()=>detectSlowmodeSetting(message.target)).catch(()=>null).then(()=>refreshOwnIdentity(message.target)).then(()=>{const result=inspect(message.target),found=editors();const draftMatches=result.ok===true&&found.length===1&&typeof message.target?.expectedText==='string'&&composerMatches(found[0],message.target.expectedText);respond({...result,draftMatches,diagnostics:{...traceSnapshot(message.target,message.target.expectedText || ''),contentVersion:CONTENT_VERSION}});}).catch(()=>respond({ok:false,code:'ACCOUNT_UNREADABLE'})); return true; }
     if (message?.type === 'DICO_PREPARE') { deliver(message.target,{...message.delivery,phase:'prepare'}).then(respond); return true; }
     if (message?.type === 'DICO_DELIVER') { deliver(message.target, message.delivery).then(respond); return true; }
     return false;
@@ -891,7 +937,7 @@
     isCurrent(){try{return Boolean(loadedRuntime?.id)&&loadedRuntime.id===chrome.runtime.id;}catch{return false;}},
     dispose(){
       if(busy)return false;
-      cooldownProbeCancel?.();
+      cooldownProbeCancel?.();ownIdentityProof=null;
       try{loadedRuntime?.onMessage.removeListener?.(messageListener);}catch{}
       document.removeEventListener?.('compositionstart',compositionStart,true);
       document.removeEventListener?.('compositionend',compositionEnd,true);

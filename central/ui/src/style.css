@@ -2160,6 +2160,14 @@ main {
 .runtime-account:last-child {
   border-bottom: 0;
 }
+.runtime-account[aria-current="step"] {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 var(--accent);
+}
+.runtime-account[aria-current="step"] .runtime-account-main>small:first-child {
+  color: var(--accent);
+  font-weight: 700;
+}
 .runtime-account>div {
   min-width: 0;
 }

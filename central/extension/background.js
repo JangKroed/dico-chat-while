@@ -2,7 +2,8 @@ import {managedPageDelay} from './managed-delay.js';
 import {recoverConnections} from './connection-recovery.js';
 import {BUILD_ID} from './build-info.js';
 import {createExtensionUpdater,ensureManagedContent} from './update.js';
-import {pageIdentityObservation,identityFailureMessage} from './identity-observation.js';
+import {identityFailureMessage,accountIdentityMetadata} from './identity-observation.js';
+import {readAccountIdentity,authorizeAccountInput} from './account-identity.js';
 import {detectConnectedBrowser} from './browser-identity.js';
 import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
@@ -47,7 +48,7 @@ transport.onCommand(c=>void executor.handleCommand(c));
 transport.onDisconnect(()=>{executor.disconnect();lastError='관리 프로그램과 연결이 끊겼습니다.';clearInterval(heartbeatTimer);if(!executor.state?.emergencyStopped)void chrome.alarms.create('dico-central-reconnect',{delayInMinutes:0.5});});
 
 async function observe(tabId) {
-  try{return (await chrome.scripting.executeScript({target:{tabId},func:pageIdentityObservation}))[0]?.result || {verified:false,reason:'SCRIPT_UNAVAILABLE'};}catch{return {verified:false,reason:'SCRIPT_UNAVAILABLE'};}
+  return readAccountIdentity(chrome,tabId);
 }
 let lastAccountObservation=null;
 const currentAccountResult=(expectedId,preferredTabId)=>observeRegisteredAccount(chrome,observe,expectedId,preferredTabId);
@@ -58,9 +59,9 @@ async function registerActiveAccount(windowId) {
   const tab=await activeSourceTab(windowId);
   const seen=tab&&await observe(tab.id);
   if(!seen?.verified)throw Error(identityFailureMessage(seen));
-  const account={accountId:seen.accountId,sourceTabId:tab.id};
-  const result=await executor.request({type:'ACCOUNT_OBSERVATION',accountId:seen.accountId,verified:true,legacyFrozen:true,legacyPending:false});
-  await chrome.storage.local.set({dicoCentralAccount:account});lastAccountObservation={accountId:seen.accountId,verified:true};
+  const account={accountId:seen.accountId,sourceTabId:tab.id,...accountIdentityMetadata(seen)};
+  const result=await executor.request({type:'ACCOUNT_OBSERVATION',accountId:seen.accountId,...accountIdentityMetadata(seen),verified:true,legacyFrozen:true,legacyPending:false});
+  await chrome.storage.local.set({dicoCentralAccount:account});lastAccountObservation={accountId:seen.accountId,...accountIdentityMetadata(seen),verified:true};
   await observation();
   return{registered:true,account:result.account};
 }
@@ -74,7 +75,7 @@ async function collectObservation() {
     account?currentAccountResult(account.accountId,account.sourceTabId):null,
     Promise.all(records.map(record=>observeManagedChannel(chrome,record,{observe,observeLimit:observeChannelLimit}))),
   ]);
-  return{sessionId,account:account?{accountId:account.accountId,verified:Boolean(accountResult.seen),verificationReason:accountResult.verificationReason}:null,channels};
+  return{sessionId,account:account?{accountId:account.accountId,...accountIdentityMetadata(accountResult.seen),verified:Boolean(accountResult.seen),verificationReason:accountResult.verificationReason}:null,channels};
 }
 async function publishObservation(snapshot){
   if(!transport.connected||executor.state.emergencyStopped||snapshot.sessionId!==executor.state.sessionId)return{ignored:true};
@@ -181,7 +182,8 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(message?.type==='DICO_DELAY'){void executor.load().then(()=>managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id})).then(respond).catch(()=>respond({ok:false}));return true;}
   if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.preEnterWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.retryWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
-  if(message?.type==='DICO_CAN_SEND' && sender.tab){executor.canSend(message,sender.tab.id).then(allowed=>respond({allowed,authorizedAt:Date.now(),maxAgeMs:2000})).catch(()=>respond({allowed:false}));return true;}
+  if(message?.type==='DICO_ACCOUNT_IDENTITY'&&sender.tab){void observe(sender.tab.id).then(respond).catch(()=>respond({verified:false,reason:'SCRIPT_UNAVAILABLE'}));return true;}
+  if(message?.type==='DICO_CAN_SEND' && sender.tab){authorizeAccountInput({chrome,executor,message,tabId:sender.tab.id}).then(respond).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_TIMING_SAMPLE'&&sender.tab){executor.cooldownSample(message,sender.tab.id).then(ok=>respond({ok})).catch(()=>respond({ok:false}));return true;}
   if(sender.tab){if(message?.type==='DICO_TRACE'){respond({ok:true});return true;}return false;}
   if(!sender.url?.startsWith(chrome.runtime.getURL('')))return false;

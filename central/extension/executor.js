@@ -26,13 +26,14 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
   const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&(a.maxSendRetries??5)===(p.maxSendRetries??5);
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
+  function inputAllowed(message,tabId){
+    const a=state?.attempts?.[message?.id];
+    if(!state||maintenance||!transport.connected||state.emergencyStopped||!a||a.tabId!==tabId||a.sessionId!==state.sessionId||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))return false;
+    const config=state.bindings[a.bindingId];if(!config||config.configVersion!==a.configVersion)return false;
+    return message.phase==='prepare'?a.phase==='preparing':a.phase==='executing'&&Boolean(a.permitId)&&a.enterRequested===true;
+  }
   async function canSend(message,tabId) {
-    await load();const a=state.attempts[message.id];
-    const localAllowed=()=>{
-      if(maintenance || !transport.connected || state.emergencyStopped || !a || a.tabId!==tabId || a.sessionId!==state.sessionId || volatileStops.has(a.groupId) || state.stoppedGroups[a.groupId] || state.stoppedRuns[a.runId] || volatileStoppedRuns.has(a.runId))return false;
-      const config=state.bindings[a.bindingId];if(!config || config.configVersion!==a.configVersion)return false;
-      return message.phase==='prepare'?a.phase==='preparing':a.phase==='executing' && Boolean(a.permitId) && a.enterRequested===true;
-    };
+    await load();const a=state.attempts[message.id],localAllowed=()=>inputAllowed(message,tabId);
     if(!localAllowed())return false;
     if(message.phase==='prepare')return true;
     const retryCount=message.retryCount??0;
@@ -257,5 +258,5 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     void job.finally(()=>{if(commandJobs.get(commandKey)===job)commandJobs.delete(commandKey);}).catch(()=>{});
     return job;
   }
-  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,preEnterWait,retryWait,cooldownSample,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
+  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,inputAllowed,preEnterWait,retryWait,cooldownSample,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
 }

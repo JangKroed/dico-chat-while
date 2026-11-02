@@ -73,3 +73,7 @@ test('preparation recovery holds the current account and explains its automatic 
  assert.equal(accountTimingState({id:'next'},group,undefined,5),'차례 대기');
  assert.equal(waitReasonText('preparation_failed'),'입력 준비 실패 · 전송 창 확인 필요');
 });
+
+test('group and account waits use readable Korean state labels',()=>{
+ for(const [reason,expected] of [['group_interval','그룹 최소 간격 대기'],['account_interval','계정 주기 대기'],['preparing','입력 준비 중'],['delivery_unknown','실제 게시 여부 확인 필요'],['manual_resume','실행 조건 다시 확인 필요']])assert.equal(waitReasonText(reason),expected);
+});
