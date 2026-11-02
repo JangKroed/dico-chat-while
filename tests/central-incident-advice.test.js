@@ -104,3 +104,21 @@ test('prepare failures retain phase-specific recovery and a recorded not-sent ou
   s.attempts[0].status='unknown';const unknown=incidentAdvice({id:'incident',code:'command_rejected',commandId:'command'},s);
   assert.doesNotMatch(unknown.cause,/미발송으로 확정/);
 });
+
+test('managed wait and retry failures expose their actual cause instead of generic rejection guidance',()=>{
+  for(const [code,pattern,page] of [['MANAGED_DELAY_UNAVAILABLE',/대기.*응답|대기.*연결/,'channels'],['RETRY_CANCELLED',/재시도.*중지|재시도.*연결/,'history'],['RETRY_DELIVERY_AMBIGUOUS',/게시.*흔적|입력창.*변화/,'history']]){
+    const advice=incidentAdvice({id:code,code:'command_rejected',rejectionCode:code},snapshot());
+    assert.equal(advice.knownReason,true);assert.equal(advice.page,page);assert.match(advice.cause,pattern);
+    assert.ok(advice.steps.some(step=>step.includes('실제')&&step.includes('게시')));
+  }
+});
+
+test('clock gaps and unavailable managed waits explain unknown delivery without inferring non-delivery',()=>{
+  for(const [reason,pattern] of [['MANAGED_DELAY_UNAVAILABLE',/대기.*응답|대기.*연결/],['clock_or_sleep_gap',/시계|절전/]]){
+    const s=snapshot();s.attempts=[{id:'attempt',status:'unknown',reasonCode:reason,executionBlocked:true}];
+    const advice=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
+    assert.equal(advice.page,'history');assert.match(advice.cause,pattern);assert.doesNotMatch(advice.cause,/미발송으로 확정/);
+    assert.ok(advice.steps.some(step=>step.includes('실행 차단이 확인')));
+    assert.ok(advice.steps.some(step=>step.includes('미발송의 증거가 아닙니다')));
+  }
+});

@@ -19,7 +19,7 @@ test('runtime reuses its persisted endpoint and preserves the same cookie and CS
   const bootstrap=await fetch(originalUrl+'/api/session',{method:'POST',headers:{Origin:originalUrl,'Content-Type':'application/json'},body:JSON.stringify({token:runtime.app.issueBootstrap()})});
   assert.equal(bootstrap.status,200);const cookie=bootstrap.headers.get('set-cookie').split(';')[0],session=await bootstrap.json();assert.match(session.appVersion,/^\d+\.\d+\.\d+$/);
   const persisted=JSON.parse(await readFile(join(directory,'ui-sessions.json'),'utf8'));assert.equal(persisted.sessions[0].csrfToken,session.csrfToken);if(process.platform!=='win32')assert.equal((await stat(join(directory,'ui-sessions.json'))).mode&0o777,0o600);
-  await runtime.close({forUpdate:true});runtime=await startCentralRuntime({directory});assert.equal(runtime.url,originalUrl);
+  await runtime.close({forUpdate:true});runtime=await startCentralRuntime({directory});assert.equal(runtime.url,originalUrl);assert.equal(runtime.manager.snapshot().service.status,'ready');assert.equal(runtime.manager.snapshot().attempts.length,0);
   const resumed=await fetch(runtime.url+'/api/session',{headers:{Cookie:cookie}});assert.equal(resumed.status,200);assert.equal((await resumed.json()).csrfToken,session.csrfToken);
   const send=csrf=>fetch(runtime.url+'/api/command',{method:'POST',headers:{Origin:runtime.url,Cookie:cookie,'Content-Type':'application/json','X-Dico-CSRF':csrf},body:JSON.stringify({action:'message.create',payload:{name:'After restart',body:'Preserved session'}})});
   assert.equal((await send('wrong')).status,403);assert.equal((await send(session.csrfToken)).status,200);

@@ -496,3 +496,12 @@ test('disposing managed content stops calibration worker wakeups after the pendi
  await new Promise(resolve=>setImmediate(resolve));const count=r.requests.filter(m=>m.type==='DICO_DELAY').length;
  await new Promise(resolve=>setImmediate(resolve));assert.equal(r.requests.filter(m=>m.type==='DICO_DELAY').length,count);
 });
+
+test('stopping a retained-draft retry preserves the observed composer and posting evidence',async()=>{
+ const r=rig({ignoreFirstEnters:1});await r.request('DICO_PREPARE');r.tick(3000);
+ r.onRetry(()=>r.stop());const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'uncertain');assert.equal(result.code,'RETRY_CANCELLED');
+ assert.equal(result.deliveryEvidence.composerRetained,true);
+ for(const key of ['newMessage','matchingMessage','sendingSeen','failedSeen'])assert.equal(result.deliveryEvidence[key],false,key);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});

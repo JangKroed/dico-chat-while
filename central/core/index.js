@@ -206,9 +206,19 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function markUnknown(a,reasonCode){if(!ACTIVE.has(a.status))return;a.status='unknown';a.reasonCode=reasonCode;const g=get('groups',a.groupId);if(!g.controlIntent)g.status='needs_review';g.waitReason='delivery_unknown';incident('delivery_unknown',{attemptId:a.id,groupId:g.id,instanceId:a.instanceId});event('delivery.unknown',{attemptId:a.id,groupId:g.id,reasonCode},'error');}
   function release(g){state.locks=state.locks.filter(l=>l.groupId!==g.id);}
   function controlComplete(g){
-    if(!g.controlIntent||g.activeAttemptId)return;
+    if(!g.controlIntent)return;
+    const active=state.attempts.find(a=>a.id===g.activeAttemptId);
+    const blockedUnknown=active?.status==='unknown'&&active.executionBlocked===true;
+    if(g.activeAttemptId&&!blockedUnknown)return;
     const controls=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded');
-    if(controls.every(c=>c.status==='applied')){g.status=g.controlIntent==='stop'?'stopped':'paused';g.controlIntent=null;g.waitReason=null;release(g);resolveControlIncidents(g.id);event('group.control_applied',{groupId:g.id,status:g.status});}
+    const owners=new Set(g.members.map(member=>state.channels.find(c=>c.id===member)?.instanceId));
+    if(controls.length&&controls.every(c=>c.status==='applied')&&[...owners].every(owner=>owner&&controls.some(c=>c.instanceId===owner))){
+      g.status=g.controlIntent==='stop'?'stopped':'paused';g.controlIntent=null;g.waitReason=blockedUnknown?'delivery_unknown':null;
+      // Applied stop and fenced execution settle future activity, not the past
+      // delivery. Retain its attempt and resource locks until a final result.
+      if(!blockedUnknown)release(g);
+      resolveControlIncidents(g.id);event('group.control_applied',{groupId:g.id,status:g.status});
+    }
   }
   function controlPayload(g,instanceId){
     const attempt=state.attempts.find(a=>a.id===g.activeAttemptId);
@@ -282,6 +292,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     resolveIncidents(a.id);
     if(c.pendingPlaylist){applyPlaylist(c,c.pendingPlaylist);delete c.pendingPlaylist;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
     if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){g.status='paused';release(g);}
+    else if(['stopped','paused'].includes(g.status)){g.waitReason=null;release(g);}
     event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual});return a;
   }
   function failPreparation(a,reasonCode){
@@ -320,7 +331,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     ensure(!g.activeAttemptId,'ATTEMPT_UNRESOLVED','Resolve the current attempt before resuming.',409);
     ensure(!g.controlIntent,'CONTROL_PENDING','Wait for actual stop/pause acknowledgments.',409);
     acquire(g);g.members.map(m=>get('channels',m)).forEach(eligibleChannel);
-    if(state.service.status==='resume_required'){
+    if(['resume_required','stopped'].includes(state.service.status)){
       state.service.status='ready';state.service.reasonCode=null;
       restoreConfirmedDeadlines();
     }
@@ -392,7 +403,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'service.startAll':{
         ensure(state.groups.length>0,'NO_GROUPS','먼저 발송 그룹을 만들어 주세요.',409);
         const candidates=state.groups.filter(g=>g.status!=='running');
-        if(state.service.status==='stopped'){state.service.status='resume_required';}
         for(const g of candidates)start(g);
         event('service.started_all',{started:candidates.length,alreadyRunning:state.groups.length-candidates.length});
         return{started:candidates.length,alreadyRunning:state.groups.length-candidates.length};
@@ -405,11 +415,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const removed={messages:state.messages.length,channels:state.channels.length,groups:state.groups.length,instances:state.instances.length,accounts:state.accounts.length,targets:state.targets.length};
         for(const c of state.commands)if(['queued','received'].includes(c.status))c.status='superseded';
         state.messages=[];state.channels=[];state.groups=[];state.instances=[];state.accounts=[];state.targets=[];state.locks=[];state.legacyImports=[];
-        state.settings=initial(now()).settings;state.service.status='stopped';state.service.reasonCode='settings_reset';
+        state.settings=initial(now()).settings;state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;
         event('settings.reset',removed,'warning');return{reset:true,removed,historyPreserved:true};
       }
-      case 'service.stopAll':state.service.status='stopped';for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
-      case 'service.resume':state.service.status='ready';state.service.reasonCode=null;restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
+      case 'service.stopAll':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
+      case 'service.resume':state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
       case 'attempt.retryNotSent':{
         ensure(p.confirmation==='CONFIRM_NOT_SENT','VALIDATION','Explicitly confirm that this attempt was not sent.');
@@ -430,7 +440,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         // A pending stop belongs to all group members. Record the user's outcome
         // now, but require another explicit continue after every control is applied.
         if(g.controlIntent)return{status:'waiting',reasonCode:'CONTROL_PENDING',attemptId:a.id,groupId:g.id};
-        if(state.service.status==='stopped')state.service.status='resume_required';
         // Failure rolls back the outcome, service state and locks together.
         start(g);a.retryRunId=g.runId;
         event('delivery.retry_not_sent',{attemptId:a.id,groupId:g.id,runId:g.runId});
@@ -543,7 +552,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.messages=messages;state.instances=instances;state.channels=channels;state.groups=[];state.accounts=accounts;state.targets=targets;
     for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    state.locks=[];state.service.status='resume_required';state.service.reasonCode='backup_restored';state.settings.maxSendRetries=5;if(backup.settings)updateSettings(backup.settings);
+    state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;state.settings.maxSendRetries=5;if(backup.settings)updateSettings(backup.settings);
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
   }
   function importBackup(backup){return transact(()=>restore(backup));}
@@ -760,7 +769,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.executionBlocked===true)a.executionBlocked=true;
         if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
         if(message.outcome==='unknown'){
-          const allowedReasons=new Set(['MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+          const allowedReasons=new Set(['RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
@@ -780,7 +789,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   function clockGap(){const elapsed=monotonicNow()-lastMono;return elapsed>15000||elapsed<0||Math.abs((now()-lastWall)-elapsed)>2000;}
   function suspendForClockGap(){
-    state.service.status='resume_required';state.service.reasonCode='clock_or_sleep_gap';
+    const wallDelta=now()-lastWall,monoDelta=monotonicNow()-lastMono;
+    // Preserve the measured trigger; a scheduling delay is not proof of OS sleep.
+    const clockDiagnostic={wallDeltaMs:Math.round(wallDelta),monotonicDeltaMs:Math.round(monoDelta),driftMs:Math.round(wallDelta-monoDelta),trigger:monoDelta<0?'monotonic_reversal':Math.abs(wallDelta-monoDelta)>2000?'clock_drift':'loop_delay'};
+    state.service.clockDiagnostic=clockDiagnostic;
+    state.service.status='ready';state.service.reasonCode='clock_or_sleep_gap';
     const affected=state.groups.filter(g=>g.status==='running'||g.activeAttemptId);
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status))){
       markUnknown(a,'clock_or_sleep_gap');
@@ -789,12 +802,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       for(const c of state.commands.filter(c=>c.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT'].includes(c.type)&&['queued','received'].includes(c.status)))c.status='superseded';
     }
     for(const g of affected){if(!g.controlIntent)control(g,'pause');g.waitReason='manual_resume';g.nextEligibleAt=null;}
-    event('service.resume_required',{reasonCode:'clock_or_sleep_gap'},'warning');
+    // The service remains available for management. Only affected groups need
+    // an explicit start after their controls/results are resolved. Rebuild the
+    // timing baseline without reviving any group or issuing a catch-up permit.
+    restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();
+    event('service.resume_required',{reasonCode:'clock_or_sleep_gap',clockDiagnostic},'warning');
   }
   function tick(){return transact(()=>{
     const wall=now(),mono=monotonicNow(),wallDelta=wall-lastWall,monoDelta=mono-lastMono;
     if(monoDelta>15000||monoDelta<0||Math.abs(wallDelta-monoDelta)>2000)suspendForClockGap();
     lastWall=wall;lastMono=mono;
+    for(const g of state.groups.filter(g=>g.controlIntent))controlComplete(g);
     for(const i of state.instances.filter(i=>i.connected&&mono-(i.lastSeenMono??mono)>15000)){
       blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
       for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status)))markUnknown(a,'connection_lost');
@@ -833,7 +851,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return{wall,mono,safe:Number.isFinite(wall)&&Number.isFinite(mono)&&elapsed>=0&&elapsed<=15000&&Math.abs((wall-lastWall)-elapsed)<=2000};
   }
   function channelNextEligibleAt(c,clock){
-    if(!clock.safe||storageFailure||state.service.status!=='ready'||state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))return null;
+    if(!clock.safe||storageFailure||state.service.status!=='ready'||state.groups.some(g=>g.controlIntent&&g.members.includes(c.id))||state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))return null;
     try{eligibleChannel(c);}catch{return null;}
     const instance=state.instances.find(i=>i.id===c.instanceId);
     if(clock.wall<instance.lastSeenAt||c.nextMono!==undefined&&!Number.isFinite(c.nextMono))return null;
@@ -870,13 +888,13 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
   function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
-    state.service={status:'resume_required',reasonCode:'service_restart',startedAt:now()};
+    state.service={status:'ready',reasonCode:null,startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
     for(const i of state.instances){invalidateAccounts(i.id);i.connected=false;i.sessionId=id();delete i.lastSeenMono;}
     for(const c of state.channels){c.verified=false;c.appliedVersion=0;delete c.tabId;delete c.sessionId;delete c.nextMono;delete c.lastConfirmedMono;}
     for(const g of state.groups){delete g.nextMono;if(g.status==='running')g.status='resume_required';}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');event('service.started',{reasonCode:'manual_resume_required'});
+    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
   else transact(()=>event('service.started'));
   return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};

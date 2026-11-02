@@ -62,3 +62,8 @@ export function pendingConnection(s:Snapshot,a:Account,t:Target) {
     return c.type==='OPEN_CHANNEL'&&['queued','received','applied'].includes(String(c.status))&&c.instanceId===a.instanceId&&(p?.accountEntityId===a.id||p?.accountId===a.accountId||p?.accountId===a.id)&&(p?.targetId===t.id||p?.guildId===t.guildId&&p?.channelId===t.channelId)
   })
 }
+
+export function selectableConnectionAccountIds(s:Snapshot,target:Target|undefined,now=Date.now()):string[] {
+  if(!target||target.id.startsWith('legacy:'))return []
+  return registeredAccounts(s).filter(a=>!a.id.startsWith('legacy:')&&accountReady(s,a,now)&&!pendingConnection(s,a,target)&&!s.channels.some(c=>c.guildId===target.guildId&&c.channelId===target.channelId&&c.instanceId===a.instanceId&&c.accountId===a.accountId&&c.verified)).map(a=>a.id)
+}

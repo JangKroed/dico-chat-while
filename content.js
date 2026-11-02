@@ -506,6 +506,11 @@
     }else poll=setInterval(check,500);
     return {
       get promise(){return promise;},
+      snapshot(){
+        const liveEditor=currentEditor();
+        const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
+        return {...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(liveEditor&&composerMatches(liveEditor,text))};
+      },
       // Preserve the original history baseline and observation across retry
       // waits. A late post must never become an ignored pre-existing message.
       retryOutcome(){
@@ -802,6 +807,9 @@
       let retryCount=0,enterAt,enterMono;
       const afterEnter=outcome=>evidence.enterAttempted&&['blocked','deferred'].includes(outcome.status)?{...outcome,status:'uncertain'}:outcome;
       const finishOutcome=outcome=>{
+        // A stop or revoked retry can return outside watcher.promise. Keep the
+        // observations already made instead of erasing the reason for stopping.
+        if(watcher)outcome={...outcome,deliveryEvidence:{...watcher.snapshot(),...outcome.deliveryEvidence}};
         if(outcome.status==='confirmed'){
           const confirmedAt=Date.now(),confirmationMs=(globalThis.performance?.now() ?? confirmedAt)-enterMono;
           outcome.timing={enterAt,confirmedAt,confirmationMs,cooldownMs:slowmode(editors()[0]).cooldownMs};

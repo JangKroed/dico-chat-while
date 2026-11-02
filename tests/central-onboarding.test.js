@@ -52,3 +52,15 @@ test('all-run detects independent groups competing for the same logical channel'
   s.groups[1].status='running';assert.ok(allRunBlockers(s,now).some(r=>r.includes('같은 채널')));
   s.groups[1].channelId='other-channel';assert.deepEqual(allRunBlockers(s,now),[]);
 });
+
+test('account bulk selection includes only eligible connections and excludes verified, pending and legacy rows',async()=>{
+ const {selectableConnectionAccountIds}=await import('../central/ui/src/onboarding.ts');
+ const now=1800000000000,target={id:'target',guildId:'guild',channelId:'channel'};
+ const accounts=['ready','verified','pending','offline','unverified','legacy:old'].map(id=>({id,instanceId:id,accountId:`discord-${id}`,verified:id!=='unverified'}));
+ const s={accounts,instances:accounts.map(a=>({id:a.id,connected:a.id!=='offline',lastSeenAt:now})),channels:[{id:'binding',instanceId:'verified',accountId:'discord-verified',guildId:'guild',channelId:'channel',verified:true}],commands:[{type:'OPEN_CHANNEL',status:'queued',instanceId:'pending',payload:{accountEntityId:'pending',targetId:'target'}}]};
+ assert.deepEqual(selectableConnectionAccountIds(s,target,now),['ready']);
+ assert.deepEqual(selectableConnectionAccountIds(s,{...target,id:'legacy:target'},now),[]);
+ assert.deepEqual(selectableConnectionAccountIds(s,undefined,now),[]);
+ s.channels[0].verified=false;s.commands=[];
+ assert.deepEqual(selectableConnectionAccountIds(s,target,now),['ready','verified','pending']);
+});

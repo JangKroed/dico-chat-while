@@ -98,11 +98,11 @@ test('reconnect fences old session but preserves previous unresolved permit', ()
   assert.equal(f.manager.commands(c.instanceId).filter(c=>c.type==='COMMIT_PERMIT').length,0);f.manager.close();
 });
 
-test('restart persists all state, blocks automatic resume and preserves active permits', () => {
+test('restart automatically readies the service while blocking automatic group resume and preserving active permits', () => {
   const dir=mkdtempSync(join(tmpdir(),'dico-core-')),databasePath=join(dir,'state.sqlite');
   try {const f=fixture({databasePath}),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.manager.close();
     const reopened=createCentralManager({databasePath});reopened.tick();assert.equal(reopened.snapshot().attempts.length,1);assert.equal(reopened.snapshot().attempts[0].status,'unknown');
-    assert.equal(reopened.snapshot().service.status,'resume_required');assert.equal(reopened.snapshot().channels[0].verified,false);reopened.close();
+    assert.equal(reopened.snapshot().service.status,'ready');assert.equal(reopened.snapshot().channels[0].verified,false);reopened.close();
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
@@ -112,10 +112,10 @@ test('referenced revisions cannot be deleted and editing library does not change
   const g=f.group([c]);f.start(g);assert.equal(f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE').payload.body,'Fixed');f.manager.close();
 });
 
-test('wall-clock jump and loop stall require manual resume, never catch-up permits', () => {
+test('wall-clock jump and loop stall require group resume only, never catch-up permits', () => {
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c],60000);f.start(g);let a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a);
-  f.jumpWall(3600000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().service.status,'resume_required');f.manager.close();
-  const z=fixture(),d=z.connect();z.apply(d,[z.message()]);z.start(z.group([d]));z.advance(20000);z.manager.tick();assert.equal(z.manager.snapshot().service.status,'resume_required');z.manager.close();
+  f.jumpWall(3600000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().service.status,'ready');f.manager.close();
+  const z=fixture(),d=z.connect();z.apply(d,[z.message()]);z.start(z.group([d]));z.advance(20000);z.manager.tick();assert.equal(z.manager.snapshot().service.status,'ready');z.manager.close();
 });
 
 test('events are durable ordered and exclude raw bridge credentials or body diagnostics', () => {
@@ -288,7 +288,7 @@ test('last-moment Enter authorization is exact and a clock gap revokes pending p
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];
   const authorize=overrides=>f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,...overrides},c.instanceId);
   assert.equal(authorize().allowed,false);f.prepared(c,a);assert.equal(authorize().allowed,true);assert.equal(authorize({runId:'old-run'}).allowed,false);assert.equal(authorize({configVersion:a.configVersion+1}).allowed,false);
-  f.advance(16000);assert.equal(authorize().allowed,false);const snap=f.manager.snapshot();assert.equal(snap.service.status,'resume_required');assert.equal(snap.attempts[0].status,'unknown');
+  f.advance(16000);assert.equal(authorize().allowed,false);const snap=f.manager.snapshot();assert.equal(snap.service.status,'ready');assert.equal(snap.attempts[0].status,'unknown');
   assert.equal(f.manager.commands(c.instanceId).some(c=>c.type==='COMMIT_PERMIT'),false);const stop=f.manager.commands(c.instanceId).find(c=>c.type==='CONTROL');assert.equal(stop.payload.runId,a.runId);
   f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:stop.id,status:'applied',executionBlocked:true,attemptId:a.id},c.instanceId);assert.equal(f.manager.snapshot().attempts[0].status,'unknown');assert.equal(authorize().allowed,false);f.manager.close();
 });
@@ -340,7 +340,7 @@ test('초기화는 구성을 비우고 기본값으로 복원하며 이전 확�
  const c=f.connect(),m=f.message();f.apply(c,[m]);f.group([c]);f.manager.execute('settings.update',{notificationsEnabled:true,retentionDays:30});
  f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:f.manager.snapshot().configurationToken});
  const s=f.manager.snapshot();for(const list of ['messages','channels','groups','instances'])assert.equal(s[list].length,0);
- assert.equal(s.settings.notificationsEnabled,false);assert.equal(s.settings.retentionDays,90);assert.equal(s.service.status,'stopped');
+ assert.equal(s.settings.notificationsEnabled,false);assert.equal(s.settings.retentionDays,90);assert.equal(s.service.status,'ready');
  assert.throws(()=>f.manager.bridge({type:'OBSERVATION',sessionId:c.sessionId,channels:[]},c.instanceId),{code:'NOT_FOUND'});
  assert.ok(f.manager.events().some(e=>e.type==='settings.reset'));assert.doesNotThrow(()=>f.manager.analytics());
  }finally{f.manager.close();}
@@ -443,7 +443,7 @@ test('unknown with an issued permit remains unknown despite a blocking control a
  f.prepared(c,a);f.result(c,a,'unknown');f.manager.execute('group.stop',{id:g.id});const cmd=f.manager.commands(c.instanceId).findLast(x=>x.type==='CONTROL');
  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'applied',executionBlocked:true,attemptId:a.id},c.instanceId);
  assert.equal(f.manager.snapshot().attempts[0].status,'unknown');assert.equal(f.manager.snapshot().attempts[0].executionBlocked,true);
- assert.equal(f.manager.snapshot().groups[0].status,'stop_pending');f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+ assert.equal(f.manager.snapshot().groups[0].status,'stopped');assert.equal(f.manager.snapshot().groups[0].activeAttemptId,a.id);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
  }finally{f.manager.close();}
 });
 
@@ -1193,4 +1193,43 @@ test('preparation rejection after a permit stays unknown and is never automatica
  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
  const command=f.manager.commands(c.instanceId).find(x=>x.type==='COMMIT_PERMIT');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode:'PREPARE_TIMEOUT'},c.instanceId);
  assert.equal(f.manager.snapshot().attempts[0].status,'unknown');assert.equal(f.manager.snapshot().groups[0].status,'needs_review');f.manager.close();
+});
+
+test('retry cancellation reasons survive the executor-to-service boundary',()=>{
+ for(const reason of ['RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS']){
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'unknown',{reasonCode:reason,executionBlocked:true});
+  assert.equal(f.manager.snapshot().attempts[0].reasonCode,reason);f.manager.close();
+ }
+});
+
+test('stopAll stops group execution while the service stays ready for a later group start',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.manager.execute('group.start',{id:g.id});
+ assert.equal(f.manager.execute('service.stopAll').status,'ready');
+ let s=f.manager.snapshot();assert.equal(s.service.status,'ready');assert.equal(s.groups[0].status,'stop_pending');
+ f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,0);
+ assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'CONTROL_PENDING'});
+ const control=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONTROL');
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'applied',executionBlocked:true},c.instanceId);
+ for(let i=0;i<3;i++){f.advance(1000);f.manager.tick();}
+ s=f.manager.snapshot();assert.equal(s.groups[0].status,'stopped');assert.equal(s.attempts.length,0);
+ assert.doesNotThrow(()=>f.manager.execute('group.start',{id:g.id}));f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);f.manager.close();
+});
+
+test('legacy stopped service migrates to ready on startup without automatically starting any group',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'dico-service-ready-')),databasePath=join(dir,'state.sqlite');
+ try{
+  const f=fixture({databasePath}),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.manager.close();
+  const store=new CentralStore(databasePath),state=store.read();state.service.status='stopped';state.stateVersion++;store.commit(state,[]);store.close();
+  const reopened=fixture({databasePath});let s=reopened.manager.snapshot();assert.equal(s.service.status,'ready');assert.equal(s.groups[0].status,'stopped');
+  reopened.manager.tick();s=reopened.manager.snapshot();assert.equal(s.attempts.length,0);assert.equal(s.commands.some(cmd=>['PREPARE','COMMIT_PERMIT'].includes(cmd.type)&&['queued','received'].includes(cmd.status)),false);
+  assert.throws(()=>reopened.manager.execute('group.start',{id:g.id}),{code:'CONNECTION_LOST'});reopened.manager.close();
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('clock gap keeps the service ready but revokes old permits and never restarts affected groups',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+ f.advance(16000);f.manager.tick();const s=f.manager.snapshot();assert.equal(s.service.status,'ready');assert.equal(s.attempts[0].status,'unknown');assert.equal(s.groups[0].status,'pause_pending');
+ assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion},c.instanceId).allowed,false);
+ f.advance(1000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().groups[0].status,'pause_pending');f.manager.close();
 });

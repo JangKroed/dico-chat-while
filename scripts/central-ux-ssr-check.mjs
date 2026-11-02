@@ -33,6 +33,12 @@ assert.ok(failed.includes('선택 기간 집계를 불러오지 못했습니다.
 assert.ok(!failed.includes('class="chart-area"'),'Failed period request must not render a fabricated chart');
 const loading=renderToStaticMarkup(<Dashboard {...props} analytics={null} analyticsStatus="loading"/>);
 assert.ok(!loading.includes('class="chart-area"'),'Loading must not look like zero posts');
+assert.ok(html.includes('aria-label="순환 그룹 중지"'),'Dashboard exposes a stop for each running group');
+const stopped=renderToStaticMarkup(<Dashboard {...props} s={{...snapshot,service:{status:'ready'},groups:[{...snapshot.groups[0],status:'stopped'}]}}/>);
+assert.ok(stopped.includes('aria-label="순환 그룹 시작"'),'Dashboard exposes group start after stop');
+assert.ok(!stopped.includes('서비스 재개'),'Service readiness does not require a separate resume control');
+const many=renderToStaticMarkup(<Dashboard {...props} s={{...snapshot,groups:Array.from({length:7},(_,i)=>({...snapshot.groups[0],id:'group-'+i,name:'발송그룹'+i,status:'stopped'}))}}/>);
+assert.ok(many.includes('aria-label="발송그룹6 시작"'),'Dashboard keeps controls for groups beyond the old six-row cutoff');
 console.log('PASS production React SSR: operational hierarchy, compact ready state, account aliases, semantic progress, loading/error analytics');
 `;
 const result=await build({stdin:{contents,resolveDir:join(root,'central/ui'),sourcefile:'ux-check.tsx',loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'dashboard-test-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {Dashboard};\n',loader:'tsx'}));}}]});

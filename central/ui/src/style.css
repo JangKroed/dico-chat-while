@@ -3650,3 +3650,8 @@ small {
     pointer-events: auto;
   }
 }
+
+.dashboard-group-controls {display:flex;flex-direction:column;gap:8px;align-items:flex-start;min-width:190px;max-width:300px}
+.dashboard-group-controls .control-row {margin:0;gap:6px;flex-wrap:wrap}
+.dashboard-group-controls .secondary {line-height:1.5}
+@media(max-width:700px){.dashboard-group-controls{min-width:0;max-width:100%;width:100%}}

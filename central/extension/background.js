@@ -178,7 +178,7 @@ async function bindActive(windowId) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id)return false;
-  if(message?.type==='DICO_DELAY'){void managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id}).then(respond).catch(()=>respond({ok:false}));return true;}
+  if(message?.type==='DICO_DELAY'){void executor.load().then(()=>managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id})).then(respond).catch(()=>respond({ok:false}));return true;}
   if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.preEnterWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.retryWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){executor.canSend(message,sender.tab.id).then(allowed=>respond({allowed,authorizedAt:Date.now(),maxAgeMs:2000})).catch(()=>respond({allowed:false}));return true;}
