@@ -155,7 +155,7 @@ test('입력 이벤트·화면 상태 진단은 허용된 타입만 중앙으로
 
 test('잘못된 입력 진단 타입과 전송 방식은 보고하지 않는다',async()=>{
  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
- r.chrome.tabs.sendMessage=async()=>({status:'uncertain',code:'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:'true',keyupDefaultPrevented:1,documentHidden:null,documentFocused:{secret:'private'},submitMethod:'private click',retryCount:6,maxSendRetries:'5'}});
+ r.chrome.tabs.sendMessage=async()=>({status:'uncertain',code:'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:'true',keyupDefaultPrevented:1,documentHidden:null,documentFocused:{secret:'private'},submitMethod:'private click',retryCount:Number.MAX_SAFE_INTEGER+1,maxSendRetries:'5'}});
  await r.client.handleCommand(cmd('COMMIT_PERMIT'));
  assert.deepEqual(r.reports.find(x=>x.type==='DELIVERY_RESULT').deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true});
  assert.equal(JSON.stringify(r.reports).includes('private'),false);
@@ -507,18 +507,24 @@ test('a suspended PREPARE response times out, revokes authorization and releases
  assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='stop-after-timeout'&&x.status==='applied'));
 });
 
-const clearedComposerReceipt=()=>({status:'confirmed',confirmationBasis:'composer_cleared',timing:{confirmationMs:500},deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false,emptyStableMs:500}});
+const clearedComposerReceipt=()=>({status:'confirmed',confirmationBasis:'composer_cleared',timing:{confirmationMs:0},deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false}});
 test('실행기는 메시지 ID 없는 입력창 비움 증명을 영구 보관·보고하고 같은 허가를 재실행하지 않는다',async()=>{
  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const send=r.chrome.tabs.sendMessage;
  r.chrome.tabs.sendMessage=async(id,message)=>{if(message.type==='DICO_DELIVER'){r.messages.push(message);return clearedComposerReceipt();}return send(id,message);};
  await r.client.handleCommand(cmd('COMMIT_PERMIT'));await r.client.handleCommand(cmd('COMMIT_PERMIT','duplicate'));
  assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.state.attempts.attempt.result.messageId,undefined);assert.equal(r.state.attempts.attempt.result.confirmationBasis,'composer_cleared');assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);
- const report=r.reports.find(m=>m.type==='DELIVERY_RESULT');assert.equal(report.outcome,'confirmed');assert.equal(report.messageId,undefined);assert.equal(report.confirmationBasis,'composer_cleared');assert.equal(report.deliveryEvidence.emptyStableMs,500);
+ const report=r.reports.find(m=>m.type==='DELIVERY_RESULT');assert.equal(report.outcome,'confirmed');assert.equal(report.messageId,undefined);assert.equal(report.confirmationBasis,'composer_cleared');assert.equal(report.deliveryEvidence.emptyStableMs,undefined);
  await r.client.handleCommand(cmd('PREPARE','repeat-preparation'));assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);assert.equal(r.state.processed['repeat-preparation'],true);
 });
 test('실행기는 불완전한 입력창 비움 증명이나 실패 표시를 성공으로 보고하지 않는다',async()=>{
- for(const patch of [{enterAttempted:false},{sameEditor:false},{failedSeen:true},{emptyStableMs:499}]){
+ for(const patch of [{enterAttempted:false},{sameEditor:false},{failedSeen:true}]){
   const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));r.chrome.tabs.sendMessage=async()=>({...clearedComposerReceipt(),deliveryEvidence:{...clearedComposerReceipt().deliveryEvidence,...patch}});
   await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'unknown');assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').outcome,'unknown');
  }
+});
+test('실행기의 명시적 무제한 재시도는 5회·누적 대기 상한을 넘기되 중지와 세션 제한을 지킨다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const a=r.client.state.attempts.attempt;
+ Object.assign(a,{phase:'executing',permitId:'permit',enterRequested:true,sendRetryCount:6,maxSendRetries:null});r.transport.request=async()=>({allowed:true});
+ assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:7,cooldownMs:0,elapsedMs:24_000_000},7),true);assert.equal(a.sendRetryCount,7);
+ assert.equal(await r.client.canSend({id:'attempt',phase:'commit',retryCount:7},7),true);r.client.disconnect();assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:8,cooldownMs:0,elapsedMs:0},7),false);
 });

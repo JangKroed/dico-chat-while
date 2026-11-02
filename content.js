@@ -464,11 +464,11 @@
       }
     };
     const expectedDraft=Boolean(submissionTarget&&editor.isConnected&&composerMatches(editor,text));
-    let submitted=false,emptySince=null,lastEmptyCheck=null;
-    const mono=()=>globalThis.performance?.now()??Date.now();
+    let submitted=false,composerReadable=false;
     let observer, timer, poll, resolve, latest, deadline=null, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
+    const composerEvidence=()=>submissionTarget?Object.fromEntries(['composerEmpty','editorPresent','sameEditor','targetMatched','accountMatched','expectedDraftSubmitted','sendingActive','ownMessageSeen'].filter(key=>typeof evidence[key]==='boolean').map(key=>[key,evidence[key]])):{};
     let promise = new Promise(done => { resolve = done; });
     const finish = value => {
       if (finished) return;
@@ -476,7 +476,7 @@
       report(evidence);
       const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
       const deliveryEvidence=Object.fromEntries(fields.map(key=>[key,evidence[key]===true]));
-      Object.assign(deliveryEvidence,value.deliveryEvidence||{});
+      Object.assign(deliveryEvidence,composerEvidence(),value.deliveryEvidence||{});
       if(finished){observer?.disconnect();clearInterval(poll);}
       clearTimeout(timer);deadline=null;latest={...value,deliveryEvidence};resolve(latest);
     };
@@ -488,6 +488,7 @@
       // Skipping server confirmation must not skip evidence that Enter submitted
       // the composer. Never advance A/B merely because dispatchEvent returned.
       if (submissionOnly && empty) { finish({status:'unverified'}); return; }
+      let sendingActive=false;
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
@@ -506,7 +507,7 @@
         // Optimistic IDs need not be final snowflakes. Observe them even while
         // Slate still displays the submitted draft, then require a final ID.
         if (isSending) {
-          evidence.sendingSeen = true;
+          evidence.sendingSeen = true;sendingActive=true;
           locallySending.add(node.id); localNodes.add(node); localRows.add(row);
           const sendingAuthor=authorId(row);
           if(sendingAuthor && (!userId || sendingAuthor===userId))localAuthors.add(sendingAuthor);
@@ -531,31 +532,40 @@
           evidence.authorUnknown = true;
           detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
         }
+        evidence.ownMessageSeen=true;
         if (!empty) { detail = '입력창이 비워졌는지 확인하지 못했습니다.'; continue; }
         evidence.messageId=id;
         if(!submissionTarget){finish({status:'confirmed',messageId:id,confirmationBasis:'message_observed'});return;}
       }
       if(submissionTarget){
-        const found=editors(),sameEditor=editor.isConnected&&found.length===1&&found[0]===editor;
+        const found=editors(),sameEditor=Boolean(editor.isConnected&&found.length===1&&found[0]===editor);
         const targetMatched=matchesTarget(submissionTarget),accountMatched=coordinatedAccountMatches(submissionTarget);
         const form=editor.closest?.('form')||editor.parentElement;
-        const valid=expectedDraft&&submitted&&sameEditor&&targetMatched&&accountMatched&&empty&&!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')&&!evidence.failedSeen;
-        const at=mono(),wall=Date.now();
-        if(!valid){emptySince=null;lastEmptyCheck=null;return;}
-        if(lastEmptyCheck&&(at-lastEmptyCheck.at<0||at-lastEmptyCheck.at>1500||Math.abs((wall-lastEmptyCheck.wall)-(at-lastEmptyCheck.at))>1000))emptySince=null;
-        if(emptySince===null)emptySince=at;lastEmptyCheck={at,wall};
-        if(freshIdentity&&at-emptySince>=500)finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor:true,targetMatched:true,accountMatched:true,emptyStableMs:Math.min(30000,Math.floor(at-emptySince))}});
+        composerReadable=!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]');
+        Object.assign(evidence,{editorPresent:found.length>0,sameEditor,targetMatched,accountMatched,composerEmpty:Boolean(sameEditor&&empty),expectedDraftSubmitted:expectedDraft&&submitted,sendingActive});
+        const valid=expectedDraft&&submitted&&sameEditor&&targetMatched&&accountMatched&&composerReadable&&!evidence.failedSeen;
+        // The user's completion criterion is the actual submitted composer
+        // becoming empty. There is no duration or posted-message requirement.
+        if(valid&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor:true,targetMatched:true,accountMatched:true}});return;}
+        // Give the page its next observation turn; do not repeatedly spend a
+        // 25-second post-confirmation window on a retained exact draft.
+        if(freshIdentity&&deadline!==null&&valid&&composerMatches(editor,text)&&!sendingActive&&!evidence.ownMessageSeen)finish({status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{composerRetained:true},error:'입력창에 같은 문구가 남아 있어 실제 쿨다운 해제 후 재시도합니다.'});
       }
     };
     observer = new MutationObserver(records=>{linkReplacements(records);check();});
     observer.observe(document.querySelector('main') || document.body, {subtree:true,childList:true,characterData:true,attributes:true});
     // Read-only checks: no additional Enter, reload or retransmission.
     const expire = (freshIdentity=false) => {
-      check(freshIdentity);
+      check(freshIdentity);if(finished||deadline===null)return;
       const liveEditor = currentEditor();
-      const retained = liveEditor && composerMatches(liveEditor,text);
+      const retained = Boolean(liveEditor&&composerMatches(liveEditor,text)&&(!submissionTarget||evidence.sameEditor));
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
-      finish({status:retryDraft ? 'draft-retained' : 'uncertain',code:retryDraft?'DELIVERY_DRAFT_RETAINED':'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{composerRetained:Boolean(retained)},error:liveEditor && normalize(editorText(liveEditor))
+      if(submissionTarget){
+        const code=evidence.failedSeen?'DISCORD_SEND_FAILED':!evidence.targetMatched?'TARGET_MISMATCH':!evidence.accountMatched?'ACCOUNT_UNVERIFIED':!evidence.editorPresent?'COMPOSER_EDITOR_MISSING':!evidence.sameEditor?'COMPOSER_EDITOR_CHANGED':!composerReadable?'COMPOSER_STATE_UNREADABLE':retained?'DELIVERY_DRAFT_RETAINED':!evidence.composerEmpty?'COMPOSER_DRAFT_CHANGED':'COMPOSER_STATE_UNREADABLE';
+        const errors={DISCORD_SEND_FAILED:'Discord가 전송 실패를 표시했습니다. 초안과 오류 표시를 확인하세요.',TARGET_MISMATCH:'전송 후 다른 채널로 이동했습니다. 원래 채널의 입력 상태를 확인하세요.',ACCOUNT_UNVERIFIED:'전송 후 등록 계정을 확인할 수 없습니다. 로그인 계정과 입력 상태를 확인하세요.',COMPOSER_EDITOR_MISSING:'전송 후 입력창이 보이지 않습니다. 전송용 채널을 확인하세요.',COMPOSER_EDITOR_CHANGED:'전송 후 입력창이 바뀌었습니다. 남은 초안과 입력 상태를 확인하세요.',COMPOSER_STATE_UNREADABLE:'전송 후 입력 상태를 읽을 수 없습니다. 초안을 보존합니다.',COMPOSER_DRAFT_CHANGED:'전송 후 입력 문구가 바뀌었습니다. 변경된 초안을 보존합니다.',DELIVERY_DRAFT_RETAINED:'입력창에 문구가 남아 있습니다. 진행 중인 전송 표시와 초안을 확인하세요.'};
+        finish({status:'uncertain',code,deliveryEvidence:{composerRetained:retained},error:errors[code]});return;
+      }
+      finish({status:retryDraft ? 'draft-retained' : 'uncertain',code:retryDraft?'DELIVERY_DRAFT_RETAINED':'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{composerRetained:retained},error:liveEditor && normalize(editorText(liveEditor))
         ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
         : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
     };
@@ -570,7 +580,7 @@
       snapshot(){
         const liveEditor=currentEditor();
         const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        return {...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(liveEditor&&composerMatches(liveEditor,text))};
+        return {...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),...composerEvidence(),composerRetained:Boolean(liveEditor&&composerMatches(liveEditor,text)&&(!submissionTarget||evidence.sameEditor))};
       },
       // Preserve the original history baseline and observation across retry
       // waits. A late post must never become an ignored pre-existing message.
@@ -578,7 +588,7 @@
         check();
         if(finished)return latest;
         const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if(fields.some(key=>evidence[key]) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor || !composerMatches(editor,text))return{status:'uncertain',code:'RETRY_DELIVERY_AMBIGUOUS',error:'이전 Enter 이후 게시 기록 또는 입력창이 변경되어 추가 전송을 중지합니다.',deliveryEvidence:{...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(editor.isConnected&&composerMatches(editor,text))}};
+        if((submissionTarget?evidence.sendingActive||evidence.failedSeen||evidence.ownMessageSeen:fields.some(key=>evidence[key])) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor || !composerMatches(editor,text))return{status:'uncertain',code:'RETRY_DELIVERY_AMBIGUOUS',error:'이전 Enter 이후 게시 기록 또는 입력창이 변경되어 추가 전송을 중지합니다.',deliveryEvidence:{...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(editor.isConnected&&composerMatches(editor,text))}};
         return null;
       },
       rearm(){if(finished)return false;promise=new Promise(done=>{resolve=done;});armTimeout();return true;},
@@ -703,7 +713,7 @@
       if(!current.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',draftPrepared:true,error:'Discord의 남은 대기 시간을 확인하지 못했습니다. 초안을 보존하고 중지합니다.'};
       const now=Date.now(),monoNow=mono();
       const elapsed=state.startedAt===undefined?0:now-state.startedAt,monoElapsed=state.monoStarted===undefined?0:monoNow-state.monoStarted;
-      if(elapsed<0||monoElapsed<0||elapsed>=maxWaitMs||monoElapsed>=maxWaitMs||Math.abs(elapsed-monoElapsed)>1000)return{status:'deferred',code:'COOLDOWN_WAIT_TIMEOUT',retryAfterMs:current.cooldownMs,draftPrepared:true,error:'Discord 대기 확인 시간이 만료되었습니다. 현재 초안과 차례를 보존합니다.'};
+      if(elapsed<0||monoElapsed<0||state.retryCount===0&&(elapsed>=maxWaitMs||monoElapsed>=maxWaitMs)||Math.abs(elapsed-monoElapsed)>1000)return{status:'deferred',code:'COOLDOWN_WAIT_TIMEOUT',retryAfterMs:current.cooldownMs,draftPrepared:true,error:'Discord 대기 확인 시간이 만료되었습니다. 현재 초안과 차례를 보존합니다.'};
       if(current.cooldownMs<=0){
         if(state.waiting){
           const progress=await chrome.runtime.sendMessage({type:state.retryCount>0?'DICO_RETRY_WAIT':'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',retryCount:state.retryCount||0,elapsedMs:elapsed,cooldownMs:0,maxWaitMs,enterAttempted:state.retryCount>0});
@@ -725,7 +735,7 @@
   async function deliver(target, delivery) {
     const evidence={phase:delivery?.phase==='prepare'?'prepare':delivery?.phase==='commit'?'commit':'send',stage:'inspect',enterAttempted:false};
     evidence.retryCount=0;
-    evidence.maxSendRetries=delivery?.phase==='commit'?(Number.isInteger(delivery.maxSendRetries)?Math.max(0,Math.min(5,delivery.maxSendRetries)):5):0;
+    evidence.maxSendRetries=delivery?.phase==='commit'?(delivery.maxSendRetries===null?null:Number.isSafeInteger(delivery.maxSendRetries)&&delivery.maxSendRetries>=0?delivery.maxSendRetries:0):0;
     await refreshOwnIdentity(target);
     const result=await performDelivery(target,delivery,evidence);
     // Final-response metadata survives even when optional tracing is unavailable.
@@ -905,7 +915,7 @@
         }
         cooldownProbeCancel?.();
         enterAt=Date.now();enterMono=globalThis.performance?.now() ?? enterAt;
-        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null);
+        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries===null||evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null);
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
         trace('before-enter');
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
@@ -925,7 +935,7 @@
         evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;
         const flags=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if(outcome.status!=='draft-retained'||retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||flags.some(key=>outcome.deliveryEvidence?.[key]!==false))return finishOutcome(outcome);
+        if(outcome.status!=='draft-retained'||evidence.maxSendRetries!==null&&retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.failedSeen===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
         const observed=watcher.retryOutcome();if(observed)return finishOutcome(observed);
         retryCount++;
       }

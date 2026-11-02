@@ -1,7 +1,7 @@
 import {composerClearedEvidence} from './delivery-receipt.js';
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
-const deliveryCodes=new Set(['MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+const deliveryCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
 const deliveryStatuses=new Set(['uncertain','draft-retained','blocked','deferred','confirmed','failed','no_response','reconcile_inconclusive','executor_result']);
 const safeReason=code=>deliveryCodes.has(code)||deliveryStatuses.has(code)?code:undefined;
 function deliveryEvidence(value) {
@@ -9,10 +9,11 @@ function deliveryEvidence(value) {
   const evidence={};
   if(['prepare','commit','send'].includes(value.phase))evidence.phase=value.phase;
   if(['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage))evidence.stage=value.stage;
-  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched'])if(typeof value[key]==='boolean')evidence[key]=value[key];
+  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')evidence[key]=value[key];
   if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)evidence.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))evidence.submitMethod=value.submitMethod;
-  for(const key of ['retryCount','maxSendRetries'])if(Number.isInteger(value[key])&&value[key]>=0&&value[key]<=5)evidence[key]=value[key];
+  for(const key of ['retryCount','maxSendRetries'])if(Number.isSafeInteger(value[key])&&value[key]>=0)evidence[key]=value[key];
+  if(value.maxSendRetries===null)evidence.maxSendRetries=null;
   return Object.keys(evidence).length?evidence:undefined;
 }
 const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
@@ -24,9 +25,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const request=async message=>{if(state.resetPending)throw Error('초기화된 연결 정보를 저장하는 중입니다.');return transport.request({...message,sessionId:state.sessionId,resetEpoch:state.resetEpoch},state.instanceId);};
   const ack=(c,status,extra={})=>request({type:'ACK',commandId:c.id,status,...extra});
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
-  const delivery=a=>({id:a.attemptId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??5,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
+  const delivery=a=>({id:a.attemptId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??null,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
   const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
-  const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&(a.maxSendRetries??5)===(p.maxSendRetries??5);
+  const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&(a.maxSendRetries??null)===(p.maxSendRetries??null);
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
   function inputAllowed(message,tabId){
     const a=state?.attempts?.[message?.id];
@@ -39,7 +40,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(!localAllowed())return false;
     if(message.phase==='prepare')return true;
     const retryCount=message.retryCount??0;
-    if(!Number.isInteger(retryCount)||retryCount!==(a.sendRetryCount??0))return false;
+    if(!Number.isSafeInteger(retryCount)||retryCount!==(a.sendRetryCount??0))return false;
     // Revalidate service state immediately before Enter, including any sleep,
     // stale run, configuration change or global pause since the permit arrived.
     const started=now(),monoStarted=monotonicNow();
@@ -87,7 +88,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   async function retryWait(message,tabId){
     await load();const a=state.attempts[message?.id];
     const allowed=()=>Boolean(!maintenance&&transport.connected&&!state.emergencyStopped&&a&&a.tabId===tabId&&a.phase==='executing'&&a.permitId&&a.enterRequested===true&&a.sessionId===state.sessionId&&!volatileStops.has(a.groupId)&&!state.stoppedGroups[a.groupId]&&!state.stoppedRuns[a.runId]&&!volatileStoppedRuns.has(a.runId)&&state.bindings[a.bindingId]?.configVersion===a.configVersion);
-    if(message?.phase!=='commit'||!Number.isInteger(message.retryCount)||message.retryCount<1||message.retryCount>(a?.maxSendRetries??5)||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.elapsedMs>23400000||message.retryCount<(a?.sendRetryCount??0)||message.retryCount>(a?.sendRetryCount??0)+1||!allowed())return false;
+    if(message?.phase!=='commit'||!Number.isSafeInteger(message.retryCount)||message.retryCount<1||a?.maxSendRetries!=null&&message.retryCount>a.maxSendRetries||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.retryCount<(a?.sendRetryCount??0)||message.retryCount>(a?.sendRetryCount??0)+1||!allowed())return false;
     const started=now(),monoStarted=monotonicNow();
     try{
       const response=await request({type:'DELIVERY_WAIT',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount:message.retryCount,cooldownMs:message.cooldownMs,elapsedMs:message.elapsedMs});

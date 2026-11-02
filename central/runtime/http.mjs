@@ -22,7 +22,7 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
   const currentOrigin=()=>new URL(origin);
   const prune=()=>{for (const [k,v] of bootstraps)if(v<=now())bootstraps.delete(k);for (const [k,v] of sessions)if(v.expires<=now())sessions.delete(k);};
   const persistSessions=async()=>{prune();const records=normalizeSessions([...sessions].map(([id,session])=>({id,...session})),now());const retained=new Set(records.map(session=>session.id));for(const id of sessions.keys())if(!retained.has(id))sessions.delete(id);await saveSessions(records);};
-  const issueBootstrap=()=>{prune();const token=secret();bootstraps.set(token,now()+30000);return token;};
+  const issueBootstrap=(ttl=30000)=>{prune();const token=secret();bootstraps.set(token,now()+ttl);return token;};
   const uiSession=req=>{
     prune();const id=(req.headers.cookie || '').split(';').map(x=>x.trim()).find(x=>x.startsWith('dico_session='))?.slice(13);
     const session=id && sessions.get(id);
@@ -90,6 +90,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         }
         if (path==='/api/snapshot' && req.method==='GET')return json(res,200,manager.snapshot());
         if (path==='/api/analytics' && req.method==='GET')return json(res,200,manager.analytics({from:Number(url.searchParams.get('from')) || undefined,to:Number(url.searchParams.get('to')) || undefined}));
+        if (req.method==='GET'&&(path==='/api/history'||path==='/api/logs'&&url.searchParams.get('paged')==='1')){
+          const options={cursor:url.searchParams.get('cursor')||undefined,limit:Math.min(500,Math.max(1,Number(url.searchParams.get('limit'))||100)),from:Number(url.searchParams.get('from'))||0,to:Number(url.searchParams.get('to'))||Number.MAX_SAFE_INTEGER,query:(url.searchParams.get('query')||'').slice(0,200),status:url.searchParams.get('status')||undefined,level:url.searchParams.get('level')||undefined};
+          return json(res,200,path==='/api/history'?manager.historyPage(options):manager.eventPage(options));
+        }
         if (path==='/api/logs' && req.method==='GET')return json(res,200,{events:manager.events({after:Number(url.searchParams.get('after')) || 0,limit:Math.min(500,Number(url.searchParams.get('limit')) || 200)})});
         if (path==='/api/events' && req.method==='GET') {
           res.setHeader('Content-Type','text/event-stream');res.setHeader('Connection','keep-alive');res.writeHead(200);
@@ -107,6 +111,7 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
             if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
             return json(res,202,await updates.start());
           }
+          if(path==='/api/remote-access-link')return json(res,200,{url:`${origin}/#bootstrap=${issueBootstrap(120000)}`,expiresAt:now()+120000});
           if (path==='/api/command') {
             if (typeof payload.action!=='string')throw fail(400,'명령을 확인하세요.');
             const result=manager.execute(payload.action,payload.payload || {});

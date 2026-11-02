@@ -6,7 +6,7 @@ import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 import {createCentralManager} from '../central/core/index.js';
 import {createCentralExecutor} from '../central/extension/executor.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,noPostedMessage=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
+function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',maxSendRetries=5,emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,noPostedMessage=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
@@ -50,7 +50,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
   editor.nodeType=1;editor.tagName='DIV';
  }
  const target={managed,guildId,channelId,ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)&&!confirmation};
- const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
+ const delivery={id:'attempt',index:0,text:message,maxSendRetries,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  const pageLocation={origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:pageLocation,Date:DateMock,
@@ -379,11 +379,11 @@ test('무시된 첫 Enter만 재시도하고 실제 성공 뒤에는 Enter를 �
   assert.equal(r.events.filter(e=>e.type==='keydown').length,ignored+1);
  }
 });
-test('재시도는 설정한 횟수만 수행하며 기본값과 최대값은 5회이다',async()=>{
- for(const maximum of [undefined,0,2,5,99]){
+test('명시한 재시도 횟수를 지키며 5회보다 큰 설정도 자르지 않는다',async()=>{
+ for(const maximum of [0,2,5,8]){
   const r=rig({ignoreEnter:true});if(maximum!==undefined)r.delivery.maxSendRetries=maximum;
   await r.request('DICO_PREPARE');r.tick(3000);const result=await r.request('DICO_DELIVER');
-  const expected=maximum===undefined?5:Math.min(5,maximum);
+  const expected=maximum;
   assert.equal(result.status,'draft-retained');assert.equal(r.events.filter(e=>e.type==='keydown').length,expected+1);
   assert.equal(result.deliveryEvidence.retryCount,expected);assert.equal(result.deliveryEvidence.maxSendRetries,expected);
  }
@@ -548,14 +548,14 @@ async function preparedComposerRig(options={}){
  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,...options});r.target.coordinated=true;r.delivery.maxSendRetries=0;
  assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(3000);return r;
 }
-test('중앙 발송은 실제 제출 뒤 같은 입력창이 500ms 비면 게시 메시지 DOM 없이 전송 처리한다',async()=>{
+test('중앙 발송은 실제 제출 뒤 같은 입력창이 비면 게시 메시지 DOM과 추가 대기 없이 즉시 처리한다',async()=>{
  const r=await preparedComposerRig({defaultAvatar:true});const result=await r.request('DICO_DELIVER');
  assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.messageId,undefined);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
  for(const field of ['enterAttempted','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched'])assert.equal(result.deliveryEvidence[field],true,field);
- assert.equal(result.deliveryEvidence.failedSeen,false);assert.ok(result.deliveryEvidence.emptyStableMs>=500);assert.ok(result.timing.confirmationMs>=500);
+ assert.equal(result.deliveryEvidence.failedSeen,false);assert.equal(result.deliveryEvidence.emptyStableMs,undefined);assert.equal(result.timing.confirmationMs,0);
 });
 test('관리 발송의 원래 입력창 비움이 기준이고 메시지 ID는 실제 관측한 경우에만 함께 기록한다',async()=>{
- const r=await preparedComposerRig({noPostedMessage:false});const result=await r.request('DICO_DELIVER');assert.equal(result.confirmationBasis,'composer_cleared');assert.match(result.messageId,/^\d{17,20}$/);assert.ok(result.timing.confirmationMs>=500);
+ const r=await preparedComposerRig({noPostedMessage:false});const result=await r.request('DICO_DELIVER');assert.equal(result.confirmationBasis,'composer_cleared');assert.match(result.messageId,/^\d{17,20}$/);assert.equal(result.timing.confirmationMs,0);
 });
 test('처음부터 비어 있는 입력창과 Enter 전 취소는 전송 처리 근거가 아니다',async()=>{
  for(const mode of ['empty','cancel']){const r=await preparedComposerRig();if(mode==='empty')r.editor.innerText='';else r.stop();const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);}
@@ -563,14 +563,39 @@ test('처음부터 비어 있는 입력창과 Enter 전 취소는 전송 처리 
 test('Enter 뒤 입력창이 없어지거나 교체되거나 채널·계정이 바뀌면 빈 상태로 성공 처리하지 않는다',async()=>{
  for(const mode of ['missing','replacement','channel','account']){
   const r=await preparedComposerRig();r.onSubmit(()=>{if(mode==='missing')r.removeEditor();if(mode==='replacement')r.replaceEditor();if(mode==='channel')r.navigate('/channels/123/999');if(mode==='account')r.account('987654321098765432');});
-  const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed',mode);assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+  const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed',mode);assert.equal(result.code,({missing:'COMPOSER_EDITOR_MISSING',replacement:'COMPOSER_EDITOR_CHANGED',channel:'TARGET_MISMATCH',account:'ACCOUNT_UNVERIFIED'})[mode]);assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(result.deliveryEvidence.sameEditor,!['missing','replacement'].includes(mode));assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
  }
 });
 test('명시적 전송 실패 또는 남은 초안은 입력창 비움 성공 기준을 충족하지 않는다',async()=>{
- const failed=await preparedComposerRig();failed.onSubmit(()=>failed.post({failed:true,text:'다르게 렌더링된 실패 문구'}));const result=await failed.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(result.deliveryEvidence.failedSeen,true);
+ const failed=await preparedComposerRig();failed.onSubmit(()=>failed.post({failed:true,text:'다르게 렌더링된 실패 문구'}));const result=await failed.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(result.code,'DISCORD_SEND_FAILED');assert.equal(result.deliveryEvidence.failedSeen,true);
  const retained=await preparedComposerRig({ignoreEnter:true});const remaining=await retained.request('DICO_DELIVER');assert.notEqual(remaining.status,'confirmed');assert.equal(retained.editor.innerText,'A');assert.equal(remaining.deliveryEvidence.composerRetained,true);
 });
-test('비워졌다가 초안이 되돌아오면 500ms 안정 시간을 처음부터 다시 측정한다',async()=>{
- const r=await preparedComposerRig();let began;r.onSubmit(()=>{began=r.now();});r.onTick(()=>{if(began!==undefined)r.editor.innerText=r.now()-began<=500?'A':'';});
- const result=await r.request('DICO_DELIVER');assert.equal(result.confirmationBasis,'composer_cleared');assert.ok(result.timing.confirmationMs>=1500);
+test('제출 뒤 빈 입력창은 500ms 샘플이나 타이머 응답을 기다리지 않는다',async()=>{
+ const r=await preparedComposerRig();let afterSubmissionTick=false,submitted=false;r.onSubmit(()=>{submitted=true;});r.onTick(()=>{if(submitted)afterSubmissionTick=true;});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.timing.confirmationMs,0);assert.equal(afterSubmissionTick,false);
+});
+test('중앙 입력 관찰 종료는 변경된 초안·읽기 불가·불안정한 빈 상태를 게시 확인 시간초과로 뭉뚱그리지 않는다',async()=>{
+ for(const mode of ['changed','unreadable']){
+  const r=await preparedComposerRig();let began;r.onSubmit(()=>{began=r.now();if(mode==='changed')r.editor.innerText='사용자가 바꾼 문구';if(mode==='unreadable')r.compose();});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');assert.equal(result.code,({changed:'COMPOSER_DRAFT_CHANGED',unreadable:'COMPOSER_STATE_UNREADABLE'})[mode]);
+  assert.equal(result.deliveryEvidence.expectedDraftSubmitted,true);assert.equal(result.deliveryEvidence.sameEditor,true);assert.equal(result.deliveryEvidence.editorPresent,true);assert.equal(result.deliveryEvidence.composerEmpty,mode!=='changed');assert.equal(result.deliveryEvidence.emptyStableMs,undefined);
+  assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.doesNotMatch(result.error,/25초|게시.{0,4}확인.{0,4}시간/);
+ }
+});
+test('명시적 무제한은 5회를 넘겨 같은 초안만 재시도하고 입력창이 비는 즉시 끝난다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:8,maxSendRetries:null});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);const began=r.now();const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.timing.confirmationMs,0);assert.equal(result.deliveryEvidence.retryCount,8);assert.equal(result.deliveryEvidence.maxSendRetries,null);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,9);assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.ok(r.now()-began<20000,'retained drafts do not wait 25 seconds for each retry');
+});
+test('무제한도 중지 즉시 끝나고 구형 요청의 미지정 재시도는 자동 무제한이 되지 않는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',ignoreEnter:true,maxSendRetries:null});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);r.onRetry(m=>{if(m.retryCount===8)r.stop();});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');assert.equal(r.events.filter(e=>e.type==='keydown').length,8);assert.equal(r.editor.innerText,'A');
+ const old=await preparedComposerRig({ignoreEnter:true});delete old.delivery.maxSendRetries;const stopped=await old.request('DICO_DELIVER');assert.equal(stopped.status,'draft-retained');assert.equal(old.events.filter(e=>e.type==='keydown').length,1);
+});
+test('다른 사람의 새 메시지는 남은 동일 초안의 재시도를 막지 않는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:6,maxSendRetries:null});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);r.onRetry(m=>{if(m.retryCount===1)r.post({text:'다른 사람의 대화',author:'987654321098765432'});});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(result.deliveryEvidence.retryCount,6);assert.equal(r.events.filter(e=>e.type==='keydown').length,7);
 });

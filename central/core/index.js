@@ -6,7 +6,6 @@ export { CentralError } from './validation.js';
 
 const ACTIVE = new Set(['preparing','permitted','unknown']);
 const MAX_PRE_ENTER_WAIT_MS=21_630_000;
-const MAX_SEND_RETRY_ELAPSED_MS=23_400_000;
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
@@ -15,10 +14,11 @@ const clone = value => structuredClone(value);
 function deliveryEvidence(value){
   if(!value||typeof value!=='object'||!['prepare','commit','send'].includes(value.phase)||!['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage)||typeof value.enterAttempted!=='boolean')return undefined;
   const result={phase:value.phase,stage:value.stage,enterAttempted:value.enterAttempted};
-  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched'])if(typeof value[key]==='boolean')result[key]=value[key];
+  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')result[key]=value[key];
   if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)result.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))result.submitMethod=value.submitMethod;
-  for(const key of ['retryCount','maxSendRetries'])if(Number.isInteger(value[key])&&value[key]>=0&&value[key]<=5)result[key]=value[key];
+  for(const key of ['retryCount','maxSendRetries'])if(Number.isSafeInteger(value[key])&&value[key]>=0)result[key]=value[key];
+  if(value.maxSendRetries===null)result.maxSendRetries=null;
   return result;
 }
 const minimumInterval = c => (c.slowmodeMs||0)+3000;
@@ -27,12 +27,12 @@ const correctedBaseInterval = c => minimumInterval(c)+cooldownCorrection(c);
 const customExtraInterval = c => c.intervalMode==='custom'?Math.max(0,(c.customIntervalMs??c.intervalMs)-minimumInterval(c)):0;
 const effectiveInterval = c => correctedBaseInterval(c)+customExtraInterval(c);
 const confirmationOffset = c => Number.isFinite(c.lastConfirmationMs)&&c.lastConfirmationMs>=0&&c.lastConfirmationMs<=30000?c.lastConfirmationMs:0;
-const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:5,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
+const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:null,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
   const store = new CentralStore(databasePath), listeners=new Set();
   let state=store.read(), closed=false, storageFailure=null, lastWall=now(), lastMono=monotonicNow();
-  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;state.settings.maxSendRetries??=5;state.intervals??=[];state.accounts??=[];state.targets??=[];state.removals??={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};for(const c of state.channels)initializeChannelInterval(c);
+  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;if(state.settings.maxSendRetries===undefined)state.settings.maxSendRetries=null;state.intervals??=[];state.accounts??=[];state.targets??=[];state.removals??={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};for(const c of state.channels)initializeChannelInterval(c);
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
   let pending=[];
@@ -377,8 +377,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function failPreparation(a,reasonCode){
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
-    const transient=['MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
-    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&retryCount<(a.maxSendRetries??5);
+    const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
+    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&(a.maxSendRetries==null||retryCount<a.maxSendRetries);
     // Only the service can issue a COMMIT permit. No permit means this attempt
     // cannot press Enter, even if its PREPARE response arrives after timeout.
     a.reasonCode=reasonCode;a.executionBlocked=true;finish(a,'not_sent');
@@ -587,7 +587,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(p.retentionDays!==undefined){ensure([30,90,180].includes(p.retentionDays),'VALIDATION','Choose 30, 90 or 180 retention days.');state.settings.retentionDays=p.retentionDays;}
     if(p.onboardingStep!==undefined){ensure(Number.isInteger(p.onboardingStep)&&p.onboardingStep>=0&&p.onboardingStep<=10,'VALIDATION','Invalid onboarding step.');state.settings.onboardingStep=p.onboardingStep;}
     if(p.cooldownMs!==undefined){ensure(Number.isInteger(p.cooldownMs)&&p.cooldownMs>=300000&&p.cooldownMs<=86400000,'VALIDATION','Notification cooldown must be between 5 minutes and 24 hours.');state.settings.cooldownMs=p.cooldownMs;}
-    if(p.maxSendRetries!==undefined){ensure(Number.isInteger(p.maxSendRetries)&&p.maxSendRetries>=0&&p.maxSendRetries<=5,'VALIDATION','Send retry count must be between 0 and 5.');state.settings.maxSendRetries=p.maxSendRetries;}
+    if(p.maxSendRetries!==undefined){ensure(p.maxSendRetries===null||Number.isSafeInteger(p.maxSendRetries)&&p.maxSendRetries>=0,'VALIDATION','Send retry count must be null or a nonnegative safe integer.');state.settings.maxSendRetries=p.maxSendRetries;}
     if(p.notificationTypes!==undefined){const allowed=['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure','permit_delay'];ensure(Array.isArray(p.notificationTypes)&&p.notificationTypes.every(x=>allowed.includes(x)),'VALIDATION','Unknown notification type.');state.settings.notificationTypes=[...new Set(p.notificationTypes)];}
     if(p.quietHours!==undefined){const q=p.quietHours,hhmm=/^(?:[01]\d|2[0-3]):[0-5]\d$/;ensure(q&&typeof q.enabled==='boolean'&&hhmm.test(q.start)&&hhmm.test(q.end),'VALIDATION','Quiet hours require enabled and HH:mm start/end.');state.settings.quietHours={enabled:q.enabled,start:q.start,end:q.end};}
   }
@@ -645,11 +645,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.removals.closeRequests=state.removals.closeRequests.filter(r=>!channels.some(c=>bindingKey(c)===bindingKey(r)));
     for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;state.settings.maxSendRetries=5;if(backup.settings)updateSettings(backup.settings);
+    state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;state.settings.maxSendRetries=null;if(backup.settings)updateSettings(backup.settings);
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
   }
   function importBackup(backup){return transact(()=>restore(backup));}
-  function attemptPayload(a){return{attemptId:a.id,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:a.maxSendRetries??5};}
+  function attemptPayload(a){return{attemptId:a.id,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:a.maxSendRetries??null};}
   function bridge(message,instanceId){
     ensure(message&&typeof message==='object'&&!Array.isArray(message),'VALIDATION','Bridge message must be an object.');
     return transact(()=>{
@@ -698,11 +698,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
         if(!a||a.status!=='permitted'||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return{allowed:false};
         const g=get('groups',a.groupId),c=get('channels',a.bindingId);
-        if(state.service.status!=='ready'||g.status!=='running'||g.controlIntent||g.activeAttemptId!==a.id||g.runId!==a.runId||c.configVersion!==a.configVersion||c.tabId!==a.tabId||now()-a.permittedAt>(message.retryPhase===true?MAX_SEND_RETRY_ELAPSED_MS:MAX_PRE_ENTER_WAIT_MS))return{allowed:false};
+        if(state.service.status!=='ready'||g.status!=='running'||g.controlIntent||g.activeAttemptId!==a.id||g.runId!==a.runId||c.configVersion!==a.configVersion||c.tabId!==a.tabId||message.retryPhase!==true&&now()-a.permittedAt>MAX_PRE_ENTER_WAIT_MS)return{allowed:false};
         try{eligibleChannel(c);}catch{return{allowed:false};}
         if(message.retryPhase===true){
           const count=message.retryCount,current=a.sendRetryCount??0;
-          if(!Number.isInteger(count)||count<1||count>(a.maxSendRetries??5)||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.elapsedMs>MAX_SEND_RETRY_ELAPSED_MS||count<current||count>current+1||count===current+1&&a.authorizedRetryCount!==count-1||count===current&&a.authorizedRetryCount!==count-1&&a.authorizedRetryCount!==count)return{allowed:false};
+          if(!Number.isSafeInteger(count)||count<1||a.maxSendRetries!=null&&count>a.maxSendRetries||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||now()-(a.retryObservedAt||a.enterReadyAt||a.permittedAt)>30000||count<current||count>current+1||count===current+1&&a.authorizedRetryCount!==count-1||count===current&&a.authorizedRetryCount!==count-1&&a.authorizedRetryCount!==count)return{allowed:false};
           a.sendRetryCount=count;a.retryObservedAt=now();
         }else if(message.retryPhase!==undefined&&message.retryPhase!==false||a.sendRetryCount>0)return{allowed:false};
         const waiting=message.cooldownMs>0,changed=Boolean(a.preEnterWaiting)!==waiting;
@@ -732,7 +732,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
         if(!a||a.status!=='permitted'||a.preEnterWaiting||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion)return{allowed:false};
         const retryCount=message.retryCount??0;
-        if(!Number.isInteger(retryCount)||retryCount<0||retryCount>(a.maxSendRetries??5)||retryCount!==(a.sendRetryCount??0)||retryCount>0&&(!a.retryObservedAt||now()-a.retryObservedAt>30000||now()-a.permittedAt>MAX_SEND_RETRY_ELAPSED_MS))return{allowed:false};
+        if(!Number.isSafeInteger(retryCount)||retryCount<0||a.maxSendRetries!=null&&retryCount>a.maxSendRetries||retryCount!==(a.sendRetryCount??0)||retryCount>0&&(!a.retryObservedAt||now()-a.retryObservedAt>30000))return{allowed:false};
         const g=state.groups.find(g=>g.id===a.groupId),c=state.channels.find(c=>c.id===a.bindingId);
         if(state.service.status!=='ready'||!g||g.status!=='running'||g.controlIntent||g.runId!==a.runId||g.activeAttemptId!==a.id||!c||c.configVersion!==a.configVersion||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||c.tabId!==a.tabId)return{allowed:false};
         try{eligibleChannel(c);}catch{return{allowed:false};}
@@ -886,7 +886,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.executionBlocked===true)a.executionBlocked=true;
         if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
         if(message.outcome==='unknown'){
-          const allowedReasons=new Set(['RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+          const allowedReasons=new Set(['RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
@@ -947,7 +947,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
     }
     for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status))){
-      const absoluteWait=a.sendRetryCount?MAX_SEND_RETRY_ELAPSED_MS:MAX_PRE_ENTER_WAIT_MS;
+      const absoluteWait=a.sendRetryCount?Infinity:MAX_PRE_ENTER_WAIT_MS;
       const stale=a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preparedObservedAt||a.createdAt)>30000:a.preEnterWaiting?wall-a.permittedAt>absoluteWait||wall-(a.preEnterWaitObservedAt||a.permittedAt)>30000:wall-a.permittedAt>absoluteWait||wall-(a.retryObservedAt||a.enterReadyAt||a.permittedAt||a.createdAt)>30000;
       if(stale&&!failPreparation(a,'PREPARE_TIMEOUT'))markUnknown(a,'result_timeout');
     }
@@ -1015,8 +1015,18 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const connectionTimeline=spans.filter(span=>span.scope==='instance'&&(!instanceId||span.targetId===instanceId)).map(span=>({instanceId:span.targetId,from:span.from,to:span.to,status:span.reason}));
     return{from,to,partialRecords:!!state.prunedBefore&&from<state.prunedBefore,retainedFrom:state.prunedBefore||null,waitReasons,connectionTimeline,generatedAt:now(),lastEventId:state.lastEventId,total:attempts.length,confirmed:confirmed.length,outcomes,confirmedBuckets:[...buckets.values()].sort((a,b)=>a.at-b.at),confirmation:{samples:timings.length,p50:percentile(.5),p95:percentile(.95),insufficientSamples:timings.length<20},confirmationRate:outcomes.confirmed+outcomes.not_sent?outcomes.confirmed/(outcomes.confirmed+outcomes.not_sent):null,excludedFromRate:outcomes.cancelled+outcomes.unknown+outcomes.in_progress,timeline:attempts.slice(-200).map(publicAttempt)};
   }
+  function historyPage({cursor,limit=100,from=0,to=Number.MAX_SAFE_INTEGER,status,query=''}={}){
+    const size=Math.min(500,Math.max(1,Number(limit)||100)),q=String(query).toLocaleLowerCase(),items=[];
+    let start=cursor?state.attempts.findIndex(a=>a.id===cursor)-1:state.attempts.length-1;
+    for(let index=start;index>=0;index--){const a=state.attempts[index];if(a.pruned||a.createdAt<Number(from)||a.createdAt>Number(to)||status&&status!=='all'&&a.status!==status)continue;
+      const account=state.accounts.find(account=>account.instanceId===a.instanceId&&account.accountId===a.accountId),group=state.groups.find(group=>group.id===a.groupId);
+      if(q&&!`${a.id} ${a.accountId} ${account?.name||a.accountName||''} ${a.messageName||''} ${a.groupId} ${group?.name||a.groupName||''}`.toLocaleLowerCase().includes(q))continue;
+      items.push(publicAttempt(a));if(items.length>size)break;
+    }
+    const hasMore=items.length>size;return{items:items.slice(0,size),nextCursor:hasMore?items[size-1].id:null,retentionDays:state.settings.retentionDays};
+  }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
-  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter(a=>!a.pruned).slice(-200).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
+  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(ACTIVE.has(a.status)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
     state.service={status:'ready',reasonCode:null,startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
@@ -1027,5 +1037,5 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
   else transact(()=>event('service.started'));
-  return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
+  return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
 }

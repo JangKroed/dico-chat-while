@@ -40,3 +40,10 @@ test('composer-clear completion has its own label and does not claim an observed
  assert.match(confirmationBasisText({status:'confirmed',confirmationBasis:'message_observed'}),/메시지/);
  assert.equal(confirmationBasisText({status:'unknown'}),undefined);
 });
+
+test('legacy timeout and fresh composer failures have actionable input-state labels',()=>{
+ assert.doesNotMatch(deliveryReasonLabel('DELIVERY_CONFIRMATION_TIMEOUT'),/대기 시간 초과/);
+ for(const code of ['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE']){
+  assert.ok(deliveryReasonLabel(code));assert.doesNotMatch(unknownDeliveryCause(code),/증거가 충분하지/);
+ }
+});

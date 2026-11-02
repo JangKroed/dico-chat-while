@@ -991,7 +991,7 @@ test('delivery result persists bounded event and focus observations without chan
 test('delivery result discards malformed event diagnostics and arbitrary submit method',()=>{
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
   const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
-  f.result(c,a,'unknown',{reasonCode:'draft-retained',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:'false',keyupDefaultPrevented:0,documentHidden:'no',documentFocused:{private:'secret'},submitMethod:'private',retryCount:-1,maxSendRetries:6}});
+  f.result(c,a,'unknown',{reasonCode:'draft-retained',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:'false',keyupDefaultPrevented:0,documentHidden:'no',documentFocused:{private:'secret'},submitMethod:'private',retryCount:-1,maxSendRetries:Number.MAX_SAFE_INTEGER+1}});
   assert.deepEqual(f.manager.snapshot().attempts[0].deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true});
   assert.equal(JSON.stringify(f.manager.snapshot()).includes('private'),false);
   f.manager.close();
@@ -1097,8 +1097,8 @@ test('live pre-Enter cooldown holds the same attempt and turn beyond thirty seco
 });
 
 test('send retry setting snapshots each attempt and rejects invalid limits',()=>{
- const f=fixture();assert.equal(f.manager.snapshot().settings.maxSendRetries,5);
- for(const value of [-1,6,1.5,'3',null])assert.throws(()=>f.manager.execute('settings.update',{maxSendRetries:value}),{code:'VALIDATION'});
+ const f=fixture();assert.equal(f.manager.snapshot().settings.maxSendRetries,null);
+ for(const value of [-1,Number.MAX_SAFE_INTEGER+1,Infinity,1.5,'3'])assert.throws(()=>f.manager.execute('settings.update',{maxSendRetries:value}),{code:'VALIDATION'});
  f.manager.execute('settings.update',{maxSendRetries:2});const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
  const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,2);
  assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE').payload.maxSendRetries,2);
@@ -1110,7 +1110,7 @@ test('send retry setting snapshots each attempt and rejects invalid limits',()=>
 test('older backups without retry settings restore the default retry limit',()=>{
  const f=fixture(),backup=f.manager.exportBackup();delete backup.settings.maxSendRetries;
  f.manager.execute('settings.update',{maxSendRetries:0});f.manager.importBackup(backup);
- assert.equal(f.manager.snapshot().settings.maxSendRetries,5);f.manager.close();
+ assert.equal(f.manager.snapshot().settings.maxSendRetries,null);f.manager.close();
 });
 
 test('authorized retries refresh the same permitted attempt without advancing its cursor',()=>{
@@ -1246,20 +1246,20 @@ test('HELLO persists the exact validated extension build in the public instance 
  assert.equal(f.manager.snapshot().instances[0].extensionBuildId,undefined);f.manager.close();
 });
 
-const clearedComposerEvidence=()=>({phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false,emptyStableMs:500});
+const clearedComposerEvidence=()=>({phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false});
 test('입력창 비움 증명은 메시지 ID 없이 한 번만 다음 문구로 진행하고 근거를 보존한다',()=>{
  const f=fixture();try{
   const c=f.connect();f.apply(c,[f.message('A'),f.message('B')]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
   const receipt={messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:clearedComposerEvidence(),confirmationMs:500};f.result(c,a,'confirmed',receipt);f.result(c,a,'confirmed',receipt);
-  const state=f.manager.snapshot(),saved=state.attempts[0];assert.equal(saved.status,'confirmed');assert.equal(saved.confirmationBasis,'composer_cleared');assert.equal(saved.messageId,undefined);assert.equal(state.channels[0].playlistIndex,1);assert.equal(saved.deliveryEvidence.emptyStableMs,500);
+  const state=f.manager.snapshot(),saved=state.attempts[0];assert.equal(saved.status,'confirmed');assert.equal(saved.confirmationBasis,'composer_cleared');assert.equal(saved.messageId,undefined);assert.equal(state.channels[0].playlistIndex,1);assert.equal(saved.deliveryEvidence.emptyStableMs,undefined);
   assert.equal(f.manager.events({type:'delivery.confirmed'}).length,1);assert.equal(f.manager.events({type:'delivery.confirmed'})[0].confirmationBasis,'composer_cleared');
   const terminal=f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId,knownAttemptIds:[a.id]},c.instanceId).terminalAttempts[0];assert.equal(terminal.messageId,undefined);assert.equal(terminal.confirmationBasis,'composer_cleared');assert.equal(terminal.deliveryEvidence.composerCleared,true);
  }finally{f.manager.close();}
 });
-test('미제출·다른 입력창·계정·대상·실패·불충분한 안정 시간은 입력창 비움 성공으로 인정하지 않는다',()=>{
+test('미제출·다른 입력창·계정·대상·실패은 입력창 비움 성공으로 인정하지 않는다',()=>{
  const f=fixture();try{
   const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
-  const invalid=[{enterAttempted:false},{expectedDraftSubmitted:false},{composerCleared:false},{sameEditor:false},{targetMatched:false},{accountMatched:false},{failedSeen:true},{composerRetained:true},{emptyStableMs:499},{emptyStableMs:Infinity},{phase:'prepare'},{stage:'inspect'},{submitMethod:undefined}];
+  const invalid=[{enterAttempted:false},{expectedDraftSubmitted:false},{composerCleared:false},{sameEditor:false},{targetMatched:false},{accountMatched:false},{failedSeen:true},{composerRetained:true},{phase:'prepare'},{stage:'inspect'},{submitMethod:undefined}];
   for(const patch of invalid)assert.throws(()=>f.result(c,a,'confirmed',{messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:{...clearedComposerEvidence(),...patch}}),{code:'EVIDENCE_REQUIRED'});
   assert.equal(f.manager.snapshot().attempts[0].status,'permitted');assert.equal(f.manager.snapshot().channels[0].playlistIndex,0);
  }finally{f.manager.close();}
@@ -1284,4 +1284,26 @@ test('보존기간 정리와 재시작 이후에도 입력창 비움 근거를 �
   manager.close();manager=createCentralManager({databasePath,now:()=>1_800_000_000_000+91*86400000,monotonicNow:()=>1000});
   const restored=retainedRecord();assert.equal(restored.confirmationBasis,'composer_cleared');assert.equal(restored.messageId,undefined);assert.equal(restored.pruned,true);
  }finally{manager?.close();rmSync(directory,{recursive:true,force:true});}
+});
+
+test('무제한 재시도는 5회와 이전 누적 시간 상한을 넘겨도 진행 응답이 살아 있으면 같은 차례를 유지한다',()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message('A'),f.message('B')]);const group=f.group([c]);f.start(group);const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,null);f.prepared(c,a);
+  const authorize=retryCount=>f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryCount},c.instanceId);
+  const progress=(retryCount,cooldownMs=0,elapsedMs=0)=>f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount,cooldownMs,elapsedMs},c.instanceId);
+  assert.equal(authorize(0).allowed,true);assert.equal(progress(1,60000).allowed,true);
+  for(let elapsed=10000;elapsed<=23_410_000;elapsed+=10000){f.advance(10000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();assert.equal(progress(1,60000,elapsed).allowed,true);}
+  assert.equal(progress(1,0,23_410_000).allowed,true);assert.equal(authorize(1).allowed,true);
+  for(let retry=2;retry<=8;retry++){assert.equal(progress(retry).allowed,true);assert.equal(authorize(retry).allowed,true);}
+  const state=f.manager.snapshot();assert.equal(state.attempts[0].status,'permitted');assert.equal(state.attempts[0].sendRetryCount,8);assert.equal(state.channels[0].playlistIndex,0);
+  f.manager.execute('group.stop',{id:group.id});assert.equal(progress(9).allowed,false);assert.equal(authorize(8).allowed,false);
+ }finally{f.manager.close();}
+});
+test('입력 상태별 종료 사유와 제한 없는 재시도 진단은 원문 없이 그대로 보존한다',()=>{
+ for(const reasonCode of ['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE']){
+  const f=fixture();try{const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+   f.result(c,a,'unknown',{reasonCode,deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,editorPresent:true,sameEditor:false,composerEmpty:false,expectedDraftSubmitted:true,targetMatched:true,accountMatched:true,retryCount:8,maxSendRetries:null,privateText:'must not retain'}});
+   const result=f.manager.snapshot().attempts[0];assert.equal(result.reasonCode,reasonCode);assert.equal(result.deliveryEvidence.maxSendRetries,null);assert.equal(result.deliveryEvidence.retryCount,8);assert.equal(result.deliveryEvidence.sameEditor,false);assert.equal(result.deliveryEvidence.privateText,undefined);
+  }finally{f.manager.close();}
+ }
 });

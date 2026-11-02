@@ -68,6 +68,12 @@ export class CentralStore {
       found.push(event);if(found.length>=Math.min(1000,Math.max(1,Number(limit)||200)))break;
     }return found;
   }
+  eventPage({cursor,limit=100,from=0,to=Number.MAX_SAFE_INTEGER,level,query=''}={}) {
+    const size=Math.min(500,Math.max(1,Number(limit)||100)),before=Number(cursor)||Number.MAX_SAFE_INTEGER,q=String(query).toLocaleLowerCase();
+    const rows=this.db.prepare('SELECT event_id,data FROM events WHERE event_id < ? AND at >= ? AND at <= ? ORDER BY event_id DESC').iterate(before,Number(from)||0,Number(to)||Number.MAX_SAFE_INTEGER),items=[];
+    for(const row of rows){const item={...JSON.parse(row.data),eventId:row.event_id};const normalizedLevel=String(item.level||'info').toLowerCase().replace('warning','warn');if(level&&level!=='all'&&normalizedLevel!==String(level).toLowerCase())continue;if(q&&!JSON.stringify(item).toLocaleLowerCase().includes(q))continue;items.push(item);if(items.length>size)break;}
+    const hasMore=items.length>size;return{items:items.slice(0,size),nextCursor:hasMore?String(items[size-1].eventId):null};
+  }
   recent(limit=100){return this.db.prepare('SELECT event_id,data FROM events ORDER BY event_id DESC LIMIT ?').all(limit).reverse().map(row=>({...JSON.parse(row.data),eventId:row.event_id}));}
   close(){this.db.close();}
 }

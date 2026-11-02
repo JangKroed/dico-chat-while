@@ -61,3 +61,23 @@ test('설치 진단은 UI 세션이 필요하며 읽기 전용 provider만 호�
   const status=await request(app,'/api/setup-status',{cookie});assert.equal(status.status,200);assert.equal(JSON.parse(status.body).ready,false);assert.equal(count,1);
   assert.equal((await request(app,'/api/setup-status',{method:'POST',body:{command:'install'},cookie,headers:{origin}})).status,403);
 });
+test('remote browser links require the current UI session and CSRF, expire, and can be used once',async()=>{
+ let at=100000;const app=createCentralApplication({manager:manager(),origin,bridgeToken,now:()=>at});
+ try{
+  assert.equal((await request(app,'/api/remote-access-link',{method:'POST',body:{},headers:{origin}})).status,401);
+  const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}});
+  const cookie=session.headers['set-cookie'].split(';')[0],csrf=JSON.parse(session.body).csrfToken;
+  assert.equal((await request(app,'/api/remote-access-link',{method:'POST',body:{},cookie,headers:{origin}})).status,403);
+  const make=()=>request(app,'/api/remote-access-link',{method:'POST',body:{},cookie,headers:{origin,'x-dico-csrf':csrf}});
+  const link=await make();assert.equal(link.status,200);assert.equal(link.body.includes(bridgeToken),false);
+  const result=JSON.parse(link.body);assert.equal(result.expiresAt,at+120000);assert.equal(new URL(result.url).origin,origin);
+  const token=new URLSearchParams(new URL(result.url).hash.slice(1)).get('bootstrap');
+  at+=119000;
+  assert.equal((await request(app,'/api/session',{method:'POST',body:{token},headers:{origin}})).status,200);
+  assert.equal((await request(app,'/api/session',{method:'POST',body:{token},headers:{origin}})).status,401);
+  const expired=JSON.parse((await make()).body);at+=120001;
+  assert.equal((await request(app,'/api/session',{method:'POST',body:{token:new URLSearchParams(new URL(expired.url).hash.slice(1)).get('bootstrap')},headers:{origin}})).status,401);
+ }finally{app.close();}
+});
+
+test('retained history and log pages require UI authentication and forward bounded page cursors and filters',async()=>{const calls=[];const paged={...manager(),historyPage:options=>{calls.push(['history',options]);return{items:[{id:'older'}],nextCursor:'older',retentionDays:90};},eventPage:options=>{calls.push(['logs',options]);return{items:[{eventId:20}],nextCursor:'20',retentionDays:90};}};const app=createCentralApplication({manager:paged,origin,bridgeToken});try{assert.equal((await request(app,'/api/history')).status,401);assert.equal((await request(app,'/api/logs?paged=1')).status,401);assert.equal(calls.length,0);const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}}),cookie=session.headers['set-cookie'].split(';')[0];const history=await request(app,'/api/history?cursor=older&limit=99999&query=prior&status=unknown&from=100&to=200',{cookie});assert.equal(history.status,200);assert.equal(JSON.parse(history.body).nextCursor,'older');assert.deepEqual(calls[0],['history',{cursor:'older',limit:500,query:'prior',status:'unknown',level:undefined,from:100,to:200}]);const logs=await request(app,'/api/logs?paged=1&cursor=21&level=ERROR',{cookie});assert.equal(logs.status,200);assert.equal(calls[1][0],'logs');assert.equal(calls[1][1].cursor,'21');assert.equal(calls[1][1].level,'ERROR');assert.equal((await request(app,'/api/logs?after=0',{cookie})).status,200);}finally{await app.close();}});
