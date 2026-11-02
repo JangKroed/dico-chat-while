@@ -4,7 +4,7 @@ import {accountLabel} from './account-label'
 import {accountTimingState,groupTimingState,secondsUntil,preparationDeadline} from './countdown'
 import {intervalSettings} from './interval'
 import {channelVerification} from './channel-window'
-import {browserOnline} from './onboarding'
+import {browserOnline,logicalTargets} from './onboarding'
 import {ChannelWindowActions} from './ChannelWindowActions'
 import {browserDisplayName} from './connection-progress'
 import {channelAccountOrder} from './channel-order'
@@ -41,7 +41,7 @@ function RuntimeAccountRow({s,channel,bindingId,group,order,current=false,run,bu
   return <div className="runtime-account" data-binding-id={channel.id} aria-current={current?'step':undefined}><div className="runtime-account-main">{order!==undefined&&<small>{order}번{marker&&` · ${marker}`}</small>}<strong>{accountLabel(s,channel)}</strong><small>{browser?browserDisplayName(browser):'브라우저 연결 확인 필요'}</small><span className={channel.verified&&online?'verification-ok':'verification-help'}>{verification.title}</span></div><div className="runtime-account-status"><AccountCountdown s={s} channel={channel} group={group??null}/><ChannelWindowActions s={s} channel={channel} run={run} busy={busy}/></div><details className="runtime-account-meta"><summary>계정 · 주기 상세</summary><small>Discord ID {channel.accountId} · {verification.action}</small><small>적용 주기 {info.effectiveSeconds}초 · 보정 {info.correctionSeconds}초 · 추가 {info.extraSeconds}초 · {info.observed?`슬로우 모드 ${info.slowmodeSeconds}초 + 여유 3초`:'슬로우 모드 감지 대기'}</small></details></div>
 }
 export function ChannelCountdownCards({s,go,run,busy,renderGroupActions}:{s:Snapshot;go:()=>void;run:(action:string,payload:Record<string,unknown>,success?:string)=>Promise<boolean>;busy:boolean;renderGroupActions?:(group:Group)=>ReactNode}) {
-  const targets=s.targets??[...new Map(s.channels.map(c=>[`${c.guildId}:${c.channelId}`,{id:`${c.guildId}:${c.channelId}`,guildId:c.guildId,channelId:c.channelId,name:c.name}])).values()]
+  const targets=logicalTargets(s)
   if(!targets.length)return null
   return <section className="panel"><div className="panel-head"><div><h2>채널 · 계정별 다음 진행</h2><p>그룹에 설정한 계정 순서와 다음 입력 준비 시간, 현재 차례를 표시합니다.</p></div><button className="text-action" onClick={go}>채널 설정 →</button></div><div className="runtime-channel-grid">{targets.map(target=>{
     const {bindings,groups,ungrouped}=channelAccountOrder(s,target)

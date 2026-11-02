@@ -64,3 +64,9 @@ test('account bulk selection includes only eligible connections and excludes ver
  s.channels[0].verified=false;s.commands=[];
  assert.deepEqual(selectableConnectionAccountIds(s,target,now),['ready','verified','pending']);
 });
+
+test('unnamed legacy channel IDs use a pending label while explicit numeric aliases stay intact',()=>{
+ const s=snapshot();s.targets=[{id:'target',guildId:'g',channelId:'123',name:'123'}];assert.equal(logicalTargets(s)[0].name,'채널 이름 확인 대기');assert.equal(logicalTargets(s)[0].namePending,true);
+ s.targets[0].nameCustomized=true;assert.equal(logicalTargets(s)[0].name,'123');
+ delete s.targets;s.channels=[{guildId:'g',channelId:'123',name:'123'}];assert.equal(logicalTargets(s)[0].namePending,true);
+});

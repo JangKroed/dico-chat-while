@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {updateBlockers,updateInProgress,updatePollingDecision} from '../central/ui/src/update.ts';
+import {extensionVersionState,updateBlockers,updateInProgress,updatePollingDecision} from '../central/ui/src/update.ts';
 
 const snapshot=()=>({groups:[],attempts:[],commands:[]});
 test('update is available only after running groups, unresolved attempts and control requests are settled',()=>{
@@ -28,4 +28,12 @@ test('busy polling has a bound and repeated network failures pause automatic pol
 test('resume-required groups and nonterminal phases explain why update cannot start',()=>{
  const s=snapshot();s.groups=[{status:'resume_required'}];assert.ok(updateBlockers(s).some(reason=>reason.includes('중지')));
  s.groups=[];for(const status of ['prepared','executing']){s.attempts=[{status}];assert.ok(updateBlockers(s).some(reason=>reason.includes('진행 중')));}
+});
+
+test('connected older extensions remain update-required instead of reporting completion',()=>{
+ assert.equal(extensionVersionState('0.4.18','0.4.13',true),'mismatch');
+ assert.equal(extensionVersionState('0.4.18','0.4.18',true),'current');
+ assert.equal(extensionVersionState('0.4.18','0.4.18',false),'offline');
+ assert.equal(extensionVersionState(undefined,'0.4.18',true),'unknown');
+ assert.equal(extensionVersionState('0.4.18',undefined,true),'unknown');
 });

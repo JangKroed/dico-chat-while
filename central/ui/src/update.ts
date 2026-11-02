@@ -15,3 +15,9 @@ export function updatePollingDecision(phase:UpdateStatus['phase']|undefined,busy
   if(updateInProgress(phase)&&busyChecks>=120)return 'busy_timeout'
   return 'continue'
 }
+
+export function extensionVersionState(appVersion:string|undefined,extensionVersion:string|undefined,online:boolean) {
+  if(!online)return 'offline'
+  if(!appVersion||!extensionVersion||extensionVersion==='unknown')return 'unknown'
+  return appVersion===extensionVersion?'current':'mismatch'
+}

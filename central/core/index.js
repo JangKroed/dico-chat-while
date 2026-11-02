@@ -25,12 +25,12 @@ const correctedBaseInterval = c => minimumInterval(c)+cooldownCorrection(c);
 const customExtraInterval = c => c.intervalMode==='custom'?Math.max(0,(c.customIntervalMs??c.intervalMs)-minimumInterval(c)):0;
 const effectiveInterval = c => correctedBaseInterval(c)+customExtraInterval(c);
 const confirmationOffset = c => Number.isFinite(c.lastConfirmationMs)&&c.lastConfirmationMs>=0&&c.lastConfirmationMs<=30000?c.lastConfirmationMs:0;
-const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:5,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
+const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:5,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
   const store = new CentralStore(databasePath), listeners=new Set();
   let state=store.read(), closed=false, storageFailure=null, lastWall=now(), lastMono=monotonicNow();
-  const loaded=!!state;state??=initial(now());state.settings.maxSendRetries??=5;state.intervals??=[];state.accounts??=[];state.targets??=[];for(const c of state.channels)initializeChannelInterval(c);
+  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;state.settings.maxSendRetries??=5;state.intervals??=[];state.accounts??=[];state.targets??=[];for(const c of state.channels)initializeChannelInterval(c);
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
   let pending=[];
@@ -76,16 +76,36 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     return account;
   }
-  function upsertTarget(guildId,channelId,name){
+  const pendingChannelName='채널 이름 확인 대기';
+  function channelObservedName(value,channelId){
+    const name=accountMetadataText(value)?.replace(/^#\s*/,'').trim();
+    return name&&name!==channelId&&name!==pendingChannelName&&!/^(?:\(\d+\)\s*)?Discord(?:\s*[|｜]|$)/i.test(name)&&!/[|｜].*Discord\s*$/i.test(name)&&!/\s[-–—]\sDiscord\s*$/i.test(name)?name:undefined;
+  }
+  function channelNameCustomized(entity){return typeof entity.nameCustomized==='boolean'?entity.nameCustomized:Boolean(channelObservedName(entity.name,entity.channelId));}
+  function applyChannelName(entity,{name,observedName}={},created=false){
+    const before=JSON.stringify([entity.name,entity.observedName]);
+    entity.nameCustomized=channelNameCustomized(entity);
+    const observed=channelObservedName(observedName,entity.channelId);
+    if(observed)entity.observedName=observed;
+    if(name!==undefined){entity.name=name;entity.nameCustomized=true;}
+    if(!entity.nameCustomized)entity.name=channelObservedName(entity.observedName,entity.channelId)||pendingChannelName;
+    entity.namePending=!entity.nameCustomized&&!channelObservedName(entity.observedName,entity.channelId);
+    if(before!==JSON.stringify([entity.name,entity.observedName])&&!created){entity.version=(entity.version||1)+1;entity.updatedAt=now();}
+  }
+  function upsertTarget(guildId,channelId,metadata={}){
     let target=state.targets.find(t=>t.guildId===guildId&&t.channelId===channelId);
-    if(!target){target={id:id(),guildId,channelId,url:`https://discord.com/channels/${guildId}/${channelId}`,name:name||channelId,version:1,createdAt:now(),updatedAt:now()};state.targets.push(target);event('target.created',{targetId:target.id});}
+    const created=!target;
+    if(!target){target={id:id(),guildId,channelId,url:`https://discord.com/channels/${guildId}/${channelId}`,name:pendingChannelName,nameCustomized:false,namePending:true,version:1,createdAt:now(),updatedAt:now()};state.targets.push(target);event('target.created',{targetId:target.id});}
+    applyChannelName(target,metadata,created);
     return target;
   }
   function syncConnectionCatalog(){
+    for(const target of state.targets)applyChannelName(target);
     for(const c of state.channels){
       initializeChannelInterval(c);
+      applyChannelName(c);
       upsertAccount(c.instanceId,c.accountId,{verified:c.verified===true,sessionId:c.sessionId,observedAt:c.observedAt});
-      upsertTarget(c.guildId,c.channelId,c.name);
+      if(!state.targets.some(t=>t.guildId===c.guildId&&t.channelId===c.channelId))upsertTarget(c.guildId,c.channelId,{observedName:c.verified?c.observedName:undefined});
     }
   }
   function invalidateAccounts(instanceId){for(const a of state.accounts.filter(a=>a.instanceId===instanceId))a.verified=false;}
@@ -249,7 +269,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       incident(reasonCode==='connection_lost'?'connection_lost':'account_mismatch',{instanceId});event('group.resume_required',{groupId:g.id,instanceId,reasonCode},'warning');
     }
   }
-  function ensureSession(message,instanceId){const instance=get('instances',instanceId);ensure(instance.sessionId===message.sessionId,'STALE_SESSION','Session changed; reconnect and reconcile previous attempts.',409);if(!instance.connected)instance.stableSinceMono=monotonicNow();instance.lastSeenAt=now();instance.lastSeenMono=monotonicNow();instance.connected=true;return instance;}
+  function ensureSession(message,instanceId){const instance=get('instances',instanceId);ensure(state.resetEpoch===0||message.resetEpoch===state.resetEpoch,'RESET_REQUIRED','설정이 초기화되었습니다. 최신 확장으로 다시 연결하세요.',409);ensure(instance.sessionId===message.sessionId,'STALE_SESSION','Session changed; reconnect and reconcile previous attempts.',409);if(!instance.connected)instance.stableSinceMono=monotonicNow();instance.lastSeenAt=now();instance.lastSeenMono=monotonicNow();instance.connected=true;return instance;}
   function validateMemberChannels(members){
     ensure(Array.isArray(members)&&members.length>=1&&members.length<=50&&new Set(members).size===members.length,'VALIDATION','Select 1–50 distinct channel connections.');
     const cs=members.map(m=>get('channels',m));ensure(cs.every(c=>c.channelId===cs[0].channelId&&c.guildId===cs[0].guildId),'CHANNEL_MISMATCH','Group members must belong to the same Discord channel.');
@@ -364,7 +384,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'target.create':{
         ensure(typeof p.url==='string'&&/^https:\/\/discord\.com\/channels\/\d{1,30}\/\d{1,30}\/?$/.test(p.url),'VALIDATION','Use a Discord server channel URL: https://discord.com/channels/server/channel.');
         const [,guildId,channelId]=/^https:\/\/discord\.com\/channels\/(\d+)\/(\d+)\/?$/.exec(p.url);
-        return upsertTarget(guildId,channelId,p.name===undefined?undefined:text(p.name,'name'));
+        const target=upsertTarget(guildId,channelId,p.name===undefined?{}:{name:text(p.name,'name')});
+        if(target.namePending)for(const instance of state.instances.filter(i=>i.connected&&now()-i.lastSeenAt<=15000&&i.capabilities?.includes('channel-name-lookup-v1'))){
+          if(!state.commands.some(c=>c.type==='LOOKUP_CHANNEL_NAME'&&c.instanceId===instance.id&&c.sessionId===instance.sessionId&&c.payload.targetId===target.id&&['queued','received'].includes(c.status)))command('LOOKUP_CHANNEL_NAME',instance.id,{targetId:target.id,guildId,channelId});
+        }
+        return target;
       }
       case 'channel.reveal':case 'channel.hide':case 'channel.consolidate':case 'channel.separate':{
         const channel=get('channels',p.id),instance=get('instances',channel.instanceId);
@@ -397,7 +421,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
       case 'channel.update':{
         const c=get('channels',p.id);expected(c,p);ensure(!state.groups.some(g=>g.members.includes(c.id)&&(g.status==='running'||g.activeAttemptId)),'GROUP_RUNNING','Pause this channel’s group before editing.',409);
-        if(p.name!==undefined)c.name=text(p.name,'name');
+        if(p.name!==undefined){c.name=text(p.name,'name');c.nameCustomized=true;c.namePending=false;}
         if(p.intervalMode!==undefined||p.intervalMs!==undefined){
           const mode=p.intervalMode??'custom';ensure(['auto','custom'].includes(mode),'VALIDATION','간격 설정은 자동 또는 사용자 설정을 선택하세요.');
           const floor=minimumInterval(c),value=mode==='auto'?floor:duration(p.intervalMs??c.customIntervalMs??c.intervalMs);
@@ -426,11 +450,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(typeof p.expectedConfiguration==='string'&&p.expectedConfiguration===configurationToken(),'VERSION_CONFLICT','화면 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.',409);
         ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','진행 중 또는 미확인 발송을 먼저 확인하세요.',409);
         ensure(state.groups.every(g=>g.status==='stopped'&&!g.controlIntent&&!g.activeAttemptId),'GROUP_RUNNING','모든 그룹을 중지하고 중지 적용 완료를 확인하세요.',409);
+        state.resetEpoch++;
         const removed={messages:state.messages.length,channels:state.channels.length,groups:state.groups.length,instances:state.instances.length,accounts:state.accounts.length,targets:state.targets.length};
         for(const c of state.commands)if(['queued','received'].includes(c.status))c.status='superseded';
         state.messages=[];state.channels=[];state.groups=[];state.instances=[];state.accounts=[];state.targets=[];state.locks=[];state.legacyImports=[];
         state.settings=initial(now()).settings;state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;
-        event('settings.reset',removed,'warning');return{reset:true,removed,historyPreserved:true};
+        event('settings.reset',{...removed,resetEpoch:state.resetEpoch},'warning');return{reset:true,removed,historyPreserved:true};
       }
       case 'service.stopAll':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
       case 'service.resume':state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
@@ -518,8 +543,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function exportBackup(){return clone({format:'dico-central-backup',version:1,createdAt:now(),settings:state.settings,messages:state.messages,
     instances:state.instances.map(i=>({id:i.id,name:i.name,browser:i.browser})),
     accounts:state.accounts.map(a=>({id:a.id,instanceId:a.instanceId,accountId:a.accountId,name:a.name,nameCustomized:accountNameCustomized(a),...(a.observedName?{observedName:a.observedName}:{}),...(a.username?{username:a.username}:{})})),
-    targets:state.targets.map(t=>({id:t.id,url:t.url,guildId:t.guildId,channelId:t.channelId,name:t.name})),
-    channels:state.channels.map(c=>({id:c.id,instanceId:c.instanceId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,name:c.name,intervalMs:c.intervalMs,intervalMode:c.intervalMode,customIntervalMs:c.customIntervalMs,slowmodeMs:c.slowmodeMs,slowmodeObservedAt:c.slowmodeObservedAt,playlist:c.playlist,playlistIndex:c.playlistIndex})),
+    targets:state.targets.map(t=>({id:t.id,url:t.url,guildId:t.guildId,channelId:t.channelId,name:t.name,nameCustomized:channelNameCustomized(t),namePending:t.namePending,observedName:t.observedName})),
+    channels:state.channels.map(c=>({id:c.id,instanceId:c.instanceId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,name:c.name,nameCustomized:channelNameCustomized(c),namePending:c.namePending,observedName:c.observedName,intervalMs:c.intervalMs,intervalMode:c.intervalMode,customIntervalMs:c.customIntervalMs,slowmodeMs:c.slowmodeMs,slowmodeObservedAt:c.slowmodeObservedAt,playlist:c.playlist,playlistIndex:c.playlistIndex})),
     groups:state.groups.map(g=>({id:g.id,name:g.name,members:g.members,intervalMs:g.intervalMs,cursor:g.cursor}))});}
   function restore(backup){
     ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','Resolve every pending attempt before restoring a backup.',409);
@@ -544,7 +569,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(c.intervalMode!==undefined)ensure(['auto','custom'].includes(c.intervalMode),'VALIDATION','Invalid interval mode.');
       if(c.customIntervalMs!==undefined)duration(c.customIntervalMs,'customIntervalMs');
       if(c.slowmodeObservedAt!==undefined)ensure(Number.isSafeInteger(c.slowmodeObservedAt)&&c.slowmodeObservedAt>=0,'VALIDATION','Invalid slowmode observation time.');
-      return{id:text(c.id,'id',100),instanceId:c.instanceId,accountId:text(c.accountId,'accountId',100),guildId:text(c.guildId,'guildId',100),channelId:text(c.channelId,'channelId',100),name:text(c.name,'name'),intervalMs:duration(c.intervalMs),...(c.intervalMode?{intervalMode:c.intervalMode}:{}),...(c.customIntervalMs!==undefined?{customIntervalMs:c.customIntervalMs}:{}),...(c.slowmodeObservedAt!==undefined?{slowmodeObservedAt:c.slowmodeObservedAt}:{}),playlist,playlistIndex:Number.isSafeInteger(c.playlistIndex)&&c.playlistIndex>=0&&c.playlistIndex<playlist.length?c.playlistIndex:0,version:1,configVersion:1,appliedVersion:0,verified:false,slowmodeMs:duration(c.slowmodeMs??0,'slowmodeMs'),createdAt:at};
+      return{id:text(c.id,'id',100),instanceId:c.instanceId,accountId:text(c.accountId,'accountId',100),guildId:text(c.guildId,'guildId',100),channelId:text(c.channelId,'channelId',100),name:text(c.name,'name'),nameCustomized:channelNameCustomized(c),observedName:channelObservedName(c.observedName,c.channelId),intervalMs:duration(c.intervalMs),...(c.intervalMode?{intervalMode:c.intervalMode}:{}),...(c.customIntervalMs!==undefined?{customIntervalMs:c.customIntervalMs}:{}),...(c.slowmodeObservedAt!==undefined?{slowmodeObservedAt:c.slowmodeObservedAt}:{}),playlist,playlistIndex:Number.isSafeInteger(c.playlistIndex)&&c.playlistIndex>=0&&c.playlistIndex<playlist.length?c.playlistIndex:0,version:1,configVersion:1,appliedVersion:0,verified:false,slowmodeMs:duration(c.slowmodeMs??0,'slowmodeMs'),createdAt:at};
     });
     const accounts=(backup.accounts||[]).map(a=>{
       const instanceId=text(a.instanceId,'instanceId',100),accountId=text(a.accountId,'accountId',100);
@@ -559,7 +584,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       const numeric=/^\d{1,30}$/.test(guildId)&&/^\d{1,30}$/.test(channelId);
       const existing=channels.some(c=>c.guildId===guildId&&c.channelId===channelId);
       ensure((numeric||existing)&&url===`https://discord.com/channels/${guildId}/${channelId}`&&/^https:\/\/discord\.com\/channels\/(?:@me|[\w-]+)\/[\w-]+$/.test(url),'VALIDATION','Invalid Discord channel URL in backup.');
-      return{id:text(t.id,'id',100),url,guildId,channelId,name:text(t.name,'name'),version:1,createdAt:at,updatedAt:at};
+      return{id:text(t.id,'id',100),url,guildId,channelId,name:text(t.name,'name'),nameCustomized:channelNameCustomized(t),observedName:channelObservedName(t.observedName,channelId),version:1,createdAt:at,updatedAt:at};
     });
     ensure(new Set(accounts.map(a=>JSON.stringify([a.instanceId,a.accountId]))).size===accounts.length,'VALIDATION','Duplicate account identities in backup.');
     ensure(new Set(targets.map(t=>JSON.stringify([t.guildId,t.channelId]))).size===targets.length,'VALIDATION','Duplicate channel targets in backup.');
@@ -576,6 +601,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     ensure(message&&typeof message==='object'&&!Array.isArray(message),'VALIDATION','Bridge message must be an object.');
     return transact(()=>{
       if(message.type==='HELLO'){
+        ensure(message.resetEpoch===undefined||Number.isSafeInteger(message.resetEpoch)&&message.resetEpoch>=0,'VALIDATION','Invalid reset epoch.');
         ensure(message.protocolVersion===1,'PROTOCOL_MISMATCH','Update the extension to central protocol 1.',409);
         ensure(message.extensionBuildId===undefined||typeof message.extensionBuildId==='string'&&/^[a-f0-9]{64}$/.test(message.extensionBuildId),'VALIDATION','Invalid extension build identity.');
         const capabilities=message.capabilities??[];ensure(Array.isArray(capabilities)&&capabilities.length<=32&&capabilities.every(value=>typeof value==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)),'VALIDATION','Invalid extension capabilities.');
@@ -594,8 +620,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='session_changed';c.appliedVersion=0;delete c.tabId;}
         for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
         for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
-        event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,commands:commands(i.id)};
+        event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
       }
+      if(message.type==='HEARTBEAT'&&state.resetEpoch>0&&message.resetEpoch!==state.resetEpoch)return{ok:false,resetRequired:true,resetEpoch:state.resetEpoch};
       const i=ensureSession(message,instanceId);
       if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&ACTIVE.has(a.status))};
       if(message.type==='CONNECTION_PROGRESS'){
@@ -702,12 +729,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
               else{old.instanceId=i.id;old.verified=false;old.version++;}
             }
           }event('legacy.bound',{channelId:c.id,instanceId:i.id});}}
-          if(!c){c={id:id(),instanceId:i.id,accountId,guildId,channelId,name:typeof observed.name==='string'?observed.name.slice(0,200):channelId,version:1,configVersion:0,appliedVersion:0,playlist:[],playlistIndex:0,intervalMode:'auto',intervalMs:3000,slowmodeMs:0,createdAt:now()};state.channels.push(c);event('channel.discovered',{channelId:c.id,instanceId:i.id});}
+          const createdChannel=!c;
+          if(!c){c={id:id(),instanceId:i.id,accountId,guildId,channelId,name:pendingChannelName,nameCustomized:false,namePending:true,version:1,configVersion:0,appliedVersion:0,playlist:[],playlistIndex:0,intervalMode:'auto',intervalMs:3000,slowmodeMs:0,createdAt:now()};state.channels.push(c);event('channel.discovered',{channelId:c.id,instanceId:i.id});}
           const tabChanged=c.tabId!==observed.tabId||c.sessionId!==i.sessionId;
           if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))markUnknown(a,'execution_tab_changed');continue;}
           c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
-            upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId,accountName:observed.accountName,username:observed.username});upsertTarget(guildId,channelId,c.name);
+            applyChannelName(c,{observedName:observed.channelName??observed.name},createdChannel);
+            upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId,accountName:observed.accountName,username:observed.username});upsertTarget(guildId,channelId,{observedName:c.observedName});
             for(const cmd of state.commands.filter(cmd=>cmd.type==='OPEN_CHANNEL'&&cmd.instanceId===i.id&&cmd.sessionId===i.sessionId&&['queued','received','applied'].includes(cmd.status)&&cmd.payload.accountId===accountId&&cmd.payload.guildId===guildId&&cmd.payload.channelId===channelId)){cmd.status='completed';cmd.completedAt=now();}
           }
           if(observed.slowmodeMs!==undefined){
@@ -732,6 +761,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(['completed','superseded'].includes(c.status)||c.status==='rejected'&&message.status==='rejected'||c.status==='applied'&&message.status==='received')return{ok:true};
         ensure(!(c.status==='rejected'&&message.status!=='rejected'),'COMMAND_REJECTED','Rejected command cannot later be applied.',409);
         c.status=message.status;c[`${message.status}At`]=now();
+        if(message.status==='applied'&&c.type==='LOOKUP_CHANNEL_NAME'){
+          const target=state.targets.find(t=>t.id===c.payload.targetId&&t.guildId===c.payload.guildId&&t.channelId===c.payload.channelId);
+          if(target)applyChannelName(target,{observedName:message.channelName});
+        }
         if(message.status==='applied'&&c.type==='CONFIG_SYNC'){
           const channel=get('channels',c.payload.bindingId);if(channel.configVersion===c.payload.configVersion&&channel.sessionId===i.sessionId)channel.appliedVersion=c.payload.configVersion;
         }

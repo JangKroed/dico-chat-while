@@ -5,9 +5,9 @@ import { encodePacket, readPackets, validateOrigin, validatePacket } from './pro
 import { connectService } from './service.mjs';
 import {installedExtensionStatus} from './extension-update.mjs';
 
-export async function runNativeHost({ input, output, origin, ids, service, installedRoot, pollMs = 1000 }) {
+export async function runNativeHost({ input, output, origin, ids, service, installedRoot, extensionStatus=installedExtensionStatus, pollMs = 1000 }) {
   validateOrigin(origin, ids);
-  let instanceId, sessionId;
+  let instanceId, sessionId, resetEpoch;
   let busy = false;
   const send = packet => output.write(encodePacket(packet));
   const poll = setInterval(async () => {
@@ -25,13 +25,14 @@ export async function runNativeHost({ input, output, origin, ids, service, insta
       try {
         const packet = validatePacket(raw);
         const result = packet.message.type === 'EXTENSION_STATUS'
-          ? await installedExtensionStatus(installedRoot || '',await service.request('/api/bridge/status'))
+          ? await extensionStatus(installedRoot || '',{...await service.request('/api/bridge/status'),extensionId:new URL(origin).hostname})
           : packet.message.type === 'OPEN_DASHBOARD'
           ? await service.request('/api/bridge/open', 'POST', {})
           : await service.request('/api/bridge', 'POST', { instanceId: packet.instanceId || instanceId, message: packet.message });
         if (packet.message.type === 'HELLO') {
           instanceId = result.instanceId;
           sessionId = result.sessionId;
+          resetEpoch=Number.isSafeInteger(result.resetEpoch)?result.resetEpoch:undefined;
         }
         send({ type: 'RESPONSE', requestId, ok: true, result });
         if (packet.message.type === 'HELLO' && Array.isArray(result.commands)) {
@@ -42,7 +43,7 @@ export async function runNativeHost({ input, output, origin, ids, service, insta
   } finally {
     clearInterval(poll);
     if (instanceId && sessionId) {
-      try { await service.request('/api/bridge', 'POST', { instanceId, message: { type: 'DISCONNECT', sessionId } }); }
+      try { await service.request('/api/bridge', 'POST', { instanceId, message: { type: 'DISCONNECT', sessionId,...(resetEpoch===undefined?{}:{resetEpoch}) } }); }
       catch { /* The service may already have stopped. */ }
     }
   }

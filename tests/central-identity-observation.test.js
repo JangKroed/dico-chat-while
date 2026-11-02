@@ -59,3 +59,18 @@ test('계정 관측은 허용한 scalar 값만 반환하고 getter·관련 없�
  const result=r.read();assert.equal(result.verified,true);assert.equal(accesses,0);assert.deepEqual(Object.keys(result).sort(),['accountId','accountName','channelId','guildId','identitySource','name','username','verified'].sort());
  Object.defineProperty(user,'id',{get(){accesses++;return'123456789012345678';}});assert.equal(r.read().verified,false);assert.equal(accesses,0);
 });
+
+function channelView({title='Discord',header,selected,path='/channels/111/222'}={}){
+ const image={getAttribute:()=>'/avatars/123456789012345678/a.png'},panel={querySelectorAll:selector=>selector==='img'?[image]:[]};
+ const document={title,querySelector:selector=>selector.startsWith('section[class*="panels"')?panel:selector.includes('titleWrapper')?(header?{textContent:header}:null):selector.includes('a[href=')?(selected?{textContent:selected,querySelector:()=>({textContent:selected})}:null):null};
+ return vm.runInNewContext(`(${pageIdentityObservation.toString()})()`,{URL,location:{origin:'https://discord.com',pathname:path},document});
+}
+test('channel metadata uses the actual header before sidebar and strips page-title noise',()=>{
+ assert.equal(channelView({header:'# 모집-공지',selected:'다른 이름',title:'(12) #옛이름 | 서버 - Discord'}).channelName,'모집-공지');
+ assert.equal(channelView({selected:'선택한-채널',title:'Discord'}).channelName,'선택한-채널');
+ assert.equal(channelView({title:'(12) #모집-공지 | 게임 서버 - Discord'}).channelName,'모집-공지');
+ assert.equal(channelView({title:'(49) Discord | #테스트1 | OpenClaw'}).channelName,'테스트1');
+ assert.equal(channelView({title:'Discord | #모집-공지 | 서버 이름'}).channelName,'모집-공지');
+ for(const title of ['Discord','(3) Discord','게임 서버 - Discord','친구 | Discord'])assert.equal(channelView({title}).channelName,undefined);
+ assert.equal(channelView({title:'#친구 | Discord',path:'/channels/@me'}).channelName,undefined);
+});

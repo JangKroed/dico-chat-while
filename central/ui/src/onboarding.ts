@@ -5,7 +5,8 @@ export function registeredAccounts(s:Snapshot):Account[] {
   return s.accounts ?? [...new Map(s.channels.map(c=>[`${c.instanceId}:${c.accountId}`,{id:`legacy:${c.instanceId}:${c.accountId}`,instanceId:c.instanceId,accountId:c.accountId,name:c.accountId,version:0,verified:c.verified}])).values()]
 }
 export function logicalTargets(s:Snapshot):Target[] {
-  return s.targets ?? [...new Map(s.channels.map(c=>[`${c.guildId}:${c.channelId}`,{id:`legacy:${c.guildId}:${c.channelId}`,guildId:c.guildId,channelId:c.channelId,name:c.name}])).values()]
+  const targets=s.targets ?? [...new Map(s.channels.map(c=>[`${c.guildId}:${c.channelId}`,{id:`legacy:${c.guildId}:${c.channelId}`,guildId:c.guildId,channelId:c.channelId,name:c.name,nameCustomized:c.nameCustomized,namePending:c.namePending}])).values()]
+  return targets.map(target=>target.namePending||!target.name||target.name===target.channelId&&target.nameCustomized!==true?{...target,name:'채널 이름 확인 대기',namePending:true}:target)
 }
 export function browserOnline(i:Instance|undefined,now=Date.now()) {
   const lastSeen=i?.lastSeenAt===undefined?NaN:new Date(i.lastSeenAt).getTime()

@@ -1,7 +1,11 @@
+import {currentRegistration} from './registration-state.js';
 // Restore only previously saved destinations, never infer new channel URLs.
 export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureSeparate=async()=>{},canRecover=async()=>true}){
- const saved=await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']);
+ const saved=currentRegistration(await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']),state.resetEpoch??0);
  const records=saved.dicoCentralTabs||[];
+ // An empty registration is intentional after reset; open Discord tabs are
+ // not authorization to recreate accounts or destinations automatically.
+ if(!saved.dicoCentralAccount&&!records.length)return{skipped:true};
  const locallySafe=()=>!state.emergencyStopped&&!Object.values(state.attempts||{}).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase));
  const safe=async()=>locallySafe()&&await canRecover()&&locallySafe();
  const progress=(stage,completed=0,reasonCode)=>report({stage,total:records.length,completed,...(reasonCode?{reasonCode}:{})});
@@ -9,7 +13,8 @@ export async function recoverConnections({chrome,state,findAccount,openChannel,r
  await progress('account');
  const seen=await findAccount(saved.dicoCentralAccount?.accountId,saved.dicoCentralAccount?.sourceTabId);
  if(!seen?.verified){await progress('blocked',0,'ACCOUNT_UNVERIFIED');return;}
- if(!saved.dicoCentralAccount)await chrome.storage.local.set({dicoCentralAccount:{accountId:seen.accountId,sourceTabId:seen.tabId}});
+ if(!await safe()){await progress('blocked',0,'ATTEMPT_UNRESOLVED');return;}
+ if(!saved.dicoCentralAccount)await chrome.storage.local.set({dicoCentralAccount:{accountId:seen.accountId,sourceTabId:seen.tabId,resetEpoch:state.resetEpoch??0}});
  // New sessions may contain an old permit. Opening replacement tabs cannot
  // establish its past result and must wait for reconciliation instead.
  if(!await safe()){await progress('blocked',0,'ATTEMPT_UNRESOLVED');return;}

@@ -19,6 +19,9 @@ export async function inspectInstallation({platform=process.platform,home=homedi
   add('ui','중앙 화면 빌드',uiReady?'ok':'error',uiReady?'화면 빌드 파일이 있습니다.':'화면 빌드 파일이 없습니다.','클론 폴더에서 자동 설정을 다시 실행하세요.');
   const app=path.join(directory,'app'),launcher=path.join(app,platform==='win32'?'launcher.exe':'launcher');
   const expectedManifest=path.join(app,`${host}.json`);
+  const extensionDirectory=path.join(app,'extension');
+  add('extension-directory','자동 업데이트용 확장 폴더',await exists(path.join(extensionDirectory,'manifest.json'))?'ok':'warning',extensionDirectory,'확장 버전이 그대로면 이 경로를 복사하세요. Chrome은 chrome://extensions, Brave는 brave://extensions에서 개발자 모드 → 압축해제된 확장 프로그램 로드로 이 폴더를 선택하세요. 기존 DICO 설정을 보존하려면 확장을 삭제하지 말고 같은 고정 ID의 관리 폴더로 다시 로드하세요. 다운로드 폴더의 예전 확장은 다시 등록하지 마세요.');
+
   for(const [id,label,browser] of [['chrome','Chrome','Google/Chrome'],['brave','Brave','BraveSoftware/Brave-Browser']]) {
     let file;
     try {

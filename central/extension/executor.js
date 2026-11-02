@@ -1,5 +1,5 @@
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
-const fresh=()=>({version:1,instanceId:null,sessionId:null,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
+const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
 const deliveryCodes=new Set(['MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
 const deliveryStatuses=new Set(['uncertain','draft-retained','blocked','deferred','confirmed','failed','no_response','reconcile_inconclusive','executor_result']);
 const safeReason=code=>deliveryCodes.has(code)||deliveryStatuses.has(code)?code:undefined;
@@ -15,11 +15,11 @@ function deliveryEvidence(value) {
 }
 const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
 const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
-export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
+export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,lookupChannelName,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),commandJobs=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
-  const request=async message=>transport.request({...message,sessionId:state.sessionId},state.instanceId);
+  const request=async message=>{if(state.resetPending)throw Error('초기화된 연결 정보를 저장하는 중입니다.');return transport.request({...message,sessionId:state.sessionId,resetEpoch:state.resetEpoch},state.instanceId);};
   const ack=(c,status,extra={})=>request({type:'ACK',commandId:c.id,status,...extra});
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
   const delivery=a=>({id:a.attemptId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??5,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
@@ -28,7 +28,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
   function inputAllowed(message,tabId){
     const a=state?.attempts?.[message?.id];
-    if(!state||maintenance||!transport.connected||state.emergencyStopped||!a||a.tabId!==tabId||a.sessionId!==state.sessionId||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))return false;
+    if(!state||state.resetPending||maintenance||!transport.connected||state.emergencyStopped||!a||a.tabId!==tabId||a.sessionId!==state.sessionId||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))return false;
     const config=state.bindings[a.bindingId];if(!config||config.configVersion!==a.configVersion)return false;
     return message.phase==='prepare'?a.phase==='preparing':a.phase==='executing'&&Boolean(a.permitId)&&a.enterRequested===true;
   }
@@ -135,7 +135,12 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     }
     if(maintenance&&c.type!=='CONTROL')throw Object.assign(Error('확장 업데이트 적용 중입니다.'),{code:'UPDATE_IN_PROGRESS'});
     await ack(c,'received');
-    if(c.type==='MANAGE_WINDOW') {
+    if(c.sessionId!==state.sessionId||c.instanceId!==state.instanceId)return;
+    if(c.type==='LOOKUP_CHANNEL_NAME') {
+      const name=typeof lookupChannelName==='function'?await lookupChannelName(p):null;
+      if(c.sessionId!==state.sessionId||c.instanceId!==state.instanceId)return;
+      await ack(c,'applied',typeof name==='string'&&name.trim()&&name.length<=100?{channelName:name.trim()}:{});
+    } else if(c.type==='MANAGE_WINDOW') {
       if(typeof manageChannelWindow!=='function')throw Object.assign(Error('전송 창 관리를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
       if(!['reveal','hide','consolidate','separate'].includes(p.action))throw Object.assign(Error('지원하지 않는 창 관리 요청입니다.'),{code:'INVALID_WINDOW_ACTION'});
       if(['consolidate','separate'].includes(p.action)&&(inFlight>1||Object.values(state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase))))throw Object.assign(Error('발송을 중지하고 미확인 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
@@ -258,5 +263,21 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     void job.finally(()=>{if(commandJobs.get(commandKey)===job)commandJobs.delete(commandKey);}).catch(()=>{});
     return job;
   }
-  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,inputAllowed,preEnterWait,retryWait,cooldownSample,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
+  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,inputAllowed,preEnterWait,retryWait,cooldownSample,async setSession(s){
+      await load();const resetEpoch=s.resetEpoch??0;
+      if(!Number.isSafeInteger(resetEpoch)||resetEpoch<0)throw Error('초기화 세대가 올바르지 않습니다.');
+      const reset=state.resetPending===true||s.resetRequired===true||resetEpoch!==state.resetEpoch;
+      if(reset){
+        // Remove automation assignments, never Discord tabs or composer text.
+        // Central reset only succeeds after active delivery results are resolved.
+        state={...fresh(),legacyDeclaration:state.legacyDeclaration,emergencyStopped:state.emergencyStopped,draftBackups:state.draftBackups};
+        volatileStops.clear();volatileStoppedRuns.clear();pendingCooldownSamples.clear();
+      }
+      state.instanceId=s.instanceId;state.sessionId=s.sessionId;state.resetEpoch=resetEpoch;state.resetPending=reset;
+      if(reset){
+        const snapshot={...structuredClone(state),resetPending:false};
+        const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot,dicoCentralTabs:[],dicoCentralAccount:null,dicoCentralWindowId:null}));writes=task.catch(()=>{});await task;state.resetPending=false;
+      }else await save();
+      return{reset};
+    },async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
 }

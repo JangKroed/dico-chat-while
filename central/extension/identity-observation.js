@@ -3,7 +3,27 @@
 export function pageIdentityObservation() {
   if(location.origin!=='https://discord.com')return {verified:false,reason:'NOT_DISCORD'};
   const match=location.pathname.match(/^\/channels\/(\d+)\/(\d+)(?:\/\d+)?\/?$/);
-  const base={guildId:match?.[1]||null,channelId:match?.[2]||null,name:document.title};
+  const channelText=value=>{
+    if(typeof value!=='string')return undefined;
+    const name=value.replace(/[\u200b-\u200d\ufeff]/g,'').replace(/^\s*#\s*/,'').trim();
+    return name&&name.length<=100&&!/[\u0000-\u001f\u007f]/.test(name)?name:undefined;
+  };
+  let channelName;
+  if(match){
+    const heading=document.querySelector('main [class*="titleWrapper"] h1, main [class*="titleWrapper"] h2, main [class*="titleWrapper"] h3, main [class*="titleWrapper"] [role="heading"], main [class*="titleWrapper"] [class*="title_"], [class*="chat"] [class*="titleWrapper"] h1, [class*="chat"] [class*="titleWrapper"] h2, [class*="chat"] [class*="titleWrapper"] h3, [class*="chat"] [class*="titleWrapper"] [role="heading"], [class*="chat"] [class*="titleWrapper"] [class*="title_"], main header h1, main header h2, main header h3, main header [role="heading"], [role="main"] header h1, [role="main"] header h2, [role="main"] header h3, [role="main"] header [role="heading"]');
+    channelName=channelText(heading?.textContent);
+    if(!channelName){
+      const link=document.querySelector(`a[href="/channels/${match[1]}/${match[2]}"]`);
+      const label=link?.querySelector?.('[class*="name"], [data-channel-name]');
+      channelName=channelText(label?.getAttribute?.('data-channel-name')||label?.textContent);
+    }
+    if(!channelName){
+      const title=String(document.title||'').replace(/^\s*\(\d+\)\s*/,'');
+      const titled=title.match(/^\s*Discord\s*[|｜]\s*#\s*([^|｜]+?)(?:\s*[|｜].*)?\s*$/i)||title.match(/^\s*#\s*(.+?)\s*(?:[|｜].*|[-–—]\s*Discord)\s*$/i);
+      if(titled)channelName=channelText(titled[1]);
+    }
+  }
+  const base={guildId:match?.[1]||null,channelId:match?.[2]||null,name:channelName,...(channelName?{channelName}:{})};
   const panel=document.querySelector('section[class*="panels"], div[class*="panels"], section[aria-label="User area"], section[aria-label="사용자 영역"]');
   if(!panel)return{...base,verified:false,reason:'ACCOUNT_PANEL_MISSING'};
   const select=(scope,selector)=>scope?.querySelector?.(selector)||null;
