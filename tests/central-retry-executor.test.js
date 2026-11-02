@@ -70,3 +70,34 @@ test('실제 코어의 미발송 확인 재시도는 정기 heartbeat 전에 같
  assert.equal(snapshot.groups[0].cursor,1);assert.equal(snapshot.channels.find(c=>c.id===owner.channel.id).playlistIndex,1);
  assert.equal(owner.deliveries,2);assert.equal(clients[1].deliveries,0);
 });
+
+test('same-attempt retry crosses the real executor and core without advancing the turn twice',async t=>{
+ const time=1_800_000_000_000,manager=createCentralManager({now:()=>time,monotonicNow:()=>time});t.after(()=>manager.close());
+ const guildId='11111111111111111',channelId='22222222222222222',accountId='33333333333333333',tabId=7;
+ manager.execute('settings.update',{maxSendRetries:1});
+ const hello=manager.bridge({type:'HELLO',protocolVersion:1,name:'retry integration'});
+ manager.bridge({type:'OBSERVATION',sessionId:hello.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId,guildId,channelId,tabId,verified:true}]},hello.instanceId);
+ const channel=manager.snapshot().channels[0],first=manager.execute('message.create',{name:'First',body:'First'}),second=manager.execute('message.create',{name:'Second',body:'Second'});
+ manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:first.id},{messageId:second.id}]});
+ let stored,executor;
+ const transport={connected:true,request:async message=>manager.bridge(message,hello.instanceId)};
+ const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async value=>{stored=structuredClone(value.dicoCentral);}}},tabs:{get:async()=>({id:tabId,url:`https://discord.com/channels/${guildId}/${channelId}`}),sendMessage:async(id,message)=>{
+  if(message.type==='DICO_DRAFT_INSPECT')return{ok:true,draftText:'',draftMatches:false,unsupported:false,attachmentOrReply:false};
+  if(message.type==='DICO_INSPECT')return{ok:true,draftMatches:true,cooldownMs:0,cooldownKnown:true};
+  if(message.type==='DICO_PREPARE')return{status:'prepared'};
+  assert.equal(message.delivery.maxSendRetries,1);
+  assert.equal(await executor.canSend({id:message.delivery.id,phase:'commit',retryCount:0},id),true);
+  assert.equal(await executor.retryWait({id:message.delivery.id,phase:'commit',retryCount:1,cooldownMs:0,elapsedMs:0},id),true);
+  assert.equal(manager.snapshot().groups[0].cursor,0);
+  assert.equal(await executor.canSend({id:message.delivery.id,phase:'commit',retryCount:1},id),true);
+  assert.equal(await executor.retryWait({id:message.delivery.id,phase:'commit',retryCount:2,cooldownMs:0,elapsedMs:0},id),false);
+  return{status:'confirmed',messageId:'44444444444444444',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,retryCount:1,maxSendRetries:1}};
+ }}};
+ executor=createCentralExecutor({chrome,transport,now:()=>time,monotonicNow:()=>time});await executor.load();await executor.setSession(hello);
+ for(const command of manager.commands(hello.instanceId))await executor.handleCommand(command);
+ const group=manager.execute('group.create',{name:'Retry',members:[channel.id],intervalMs:0});manager.execute('group.start',{id:group.id});manager.tick();
+ for(const type of ['PREPARE','COMMIT_PERMIT']){
+  const command=manager.commands(hello.instanceId).find(x=>x.type===type);assert.ok(command);await executor.handleCommand(command);
+ }
+ const snapshot=manager.snapshot();assert.equal(snapshot.attempts.length,1);assert.equal(snapshot.attempts[0].status,'confirmed');assert.equal(snapshot.attempts[0].sendRetryCount,1);assert.equal(snapshot.attempts[0].deliveryEvidence.retryCount,1);assert.equal(snapshot.groups[0].cursor,0);assert.equal(snapshot.channels[0].playlistIndex,1);
+});

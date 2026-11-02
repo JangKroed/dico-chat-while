@@ -5,6 +5,7 @@ export { CentralError } from './validation.js';
 
 const ACTIVE = new Set(['preparing','permitted','unknown']);
 const MAX_PRE_ENTER_WAIT_MS=21_630_000;
+const MAX_SEND_RETRY_ELAPSED_MS=23_400_000;
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
@@ -13,17 +14,19 @@ const clone = value => structuredClone(value);
 function deliveryEvidence(value){
   if(!value||typeof value!=='object'||!['prepare','commit','send'].includes(value.phase)||!['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage)||typeof value.enterAttempted!=='boolean')return undefined;
   const result={phase:value.phase,stage:value.stage,enterAttempted:value.enterAttempted};
-  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'])if(typeof value[key]==='boolean')result[key]=value[key];
+  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused'])if(typeof value[key]==='boolean')result[key]=value[key];
+  if(['keyboard','button'].includes(value.submitMethod))result.submitMethod=value.submitMethod;
+  for(const key of ['retryCount','maxSendRetries'])if(Number.isInteger(value[key])&&value[key]>=0&&value[key]<=5)result[key]=value[key];
   return result;
 }
 const minimumInterval = c => (c.slowmodeMs||0)+3000;
 const effectiveInterval = c => Math.max(c.intervalMs,minimumInterval(c));
-const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
+const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:5,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
   const store = new CentralStore(databasePath), listeners=new Set();
   let state=store.read(), closed=false, storageFailure=null, lastWall=now(), lastMono=monotonicNow();
-  const loaded=!!state;state??=initial(now());state.intervals??=[];state.accounts??=[];state.targets??=[];for(const c of state.channels)initializeChannelInterval(c);
+  const loaded=!!state;state??=initial(now());state.settings.maxSendRetries??=5;state.intervals??=[];state.accounts??=[];state.targets??=[];for(const c of state.channels)initializeChannelInterval(c);
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
   let pending=[];
@@ -449,6 +452,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(p.retentionDays!==undefined){ensure([30,90,180].includes(p.retentionDays),'VALIDATION','Choose 30, 90 or 180 retention days.');state.settings.retentionDays=p.retentionDays;}
     if(p.onboardingStep!==undefined){ensure(Number.isInteger(p.onboardingStep)&&p.onboardingStep>=0&&p.onboardingStep<=10,'VALIDATION','Invalid onboarding step.');state.settings.onboardingStep=p.onboardingStep;}
     if(p.cooldownMs!==undefined){ensure(Number.isInteger(p.cooldownMs)&&p.cooldownMs>=300000&&p.cooldownMs<=86400000,'VALIDATION','Notification cooldown must be between 5 minutes and 24 hours.');state.settings.cooldownMs=p.cooldownMs;}
+    if(p.maxSendRetries!==undefined){ensure(Number.isInteger(p.maxSendRetries)&&p.maxSendRetries>=0&&p.maxSendRetries<=5,'VALIDATION','Send retry count must be between 0 and 5.');state.settings.maxSendRetries=p.maxSendRetries;}
     if(p.notificationTypes!==undefined){const allowed=['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure','permit_delay'];ensure(Array.isArray(p.notificationTypes)&&p.notificationTypes.every(x=>allowed.includes(x)),'VALIDATION','Unknown notification type.');state.settings.notificationTypes=[...new Set(p.notificationTypes)];}
     if(p.quietHours!==undefined){const q=p.quietHours,hhmm=/^(?:[01]\d|2[0-3]):[0-5]\d$/;ensure(q&&typeof q.enabled==='boolean'&&hhmm.test(q.start)&&hhmm.test(q.end),'VALIDATION','Quiet hours require enabled and HH:mm start/end.');state.settings.quietHours={enabled:q.enabled,start:q.start,end:q.end};}
   }
@@ -503,11 +507,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.messages=messages;state.instances=instances;state.channels=channels;state.groups=[];state.accounts=accounts;state.targets=targets;
     for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    state.locks=[];state.service.status='resume_required';state.service.reasonCode='backup_restored';if(backup.settings)updateSettings(backup.settings);
+    state.locks=[];state.service.status='resume_required';state.service.reasonCode='backup_restored';state.settings.maxSendRetries=5;if(backup.settings)updateSettings(backup.settings);
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
   }
   function importBackup(backup){return transact(()=>restore(backup));}
-  function attemptPayload(a){return{attemptId:a.id,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId};}
+  function attemptPayload(a){return{attemptId:a.id,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:a.maxSendRetries??5};}
   function bridge(message,instanceId){
     ensure(message&&typeof message==='object'&&!Array.isArray(message),'VALIDATION','Bridge message must be an object.');
     return transact(()=>{
@@ -543,12 +547,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
         if(!a||a.status!=='permitted'||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return{allowed:false};
         const g=get('groups',a.groupId),c=get('channels',a.bindingId);
-        if(state.service.status!=='ready'||g.status!=='running'||g.controlIntent||g.activeAttemptId!==a.id||g.runId!==a.runId||c.configVersion!==a.configVersion||c.tabId!==a.tabId||now()-a.permittedAt>MAX_PRE_ENTER_WAIT_MS)return{allowed:false};
+        if(state.service.status!=='ready'||g.status!=='running'||g.controlIntent||g.activeAttemptId!==a.id||g.runId!==a.runId||c.configVersion!==a.configVersion||c.tabId!==a.tabId||now()-a.permittedAt>(message.retryPhase===true?MAX_SEND_RETRY_ELAPSED_MS:MAX_PRE_ENTER_WAIT_MS))return{allowed:false};
         try{eligibleChannel(c);}catch{return{allowed:false};}
+        if(message.retryPhase===true){
+          const count=message.retryCount,current=a.sendRetryCount??0;
+          if(!Number.isInteger(count)||count<1||count>(a.maxSendRetries??5)||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.elapsedMs>MAX_SEND_RETRY_ELAPSED_MS||count<current||count>current+1||count===current+1&&a.authorizedRetryCount!==count-1||count===current&&a.authorizedRetryCount!==count-1&&a.authorizedRetryCount!==count)return{allowed:false};
+          a.sendRetryCount=count;a.retryObservedAt=now();
+        }else if(message.retryPhase!==undefined&&message.retryPhase!==false||a.sendRetryCount>0)return{allowed:false};
         const waiting=message.cooldownMs>0,changed=Boolean(a.preEnterWaiting)!==waiting;
         a.preEnterWaiting=waiting;a.preEnterWaitObservedAt=now();
         if(!waiting)a.enterReadyAt=now();
-        g.waitReason=waiting?'discord_cooldown':'awaiting_result';
+        g.waitReason=waiting?'discord_cooldown':message.retryPhase===true?'send_retry':'awaiting_result';
         if(changed)event('delivery.pre_enter_wait',{attemptId:a.id,groupId:g.id,instanceId:i.id,waiting,cooldownMs:message.cooldownMs});
         return{allowed:true};
       }
@@ -556,11 +565,13 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(clockGap()){suspendForClockGap();lastWall=now();lastMono=monotonicNow();return{allowed:false};}
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
         if(!a||a.status!=='permitted'||a.preEnterWaiting||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion)return{allowed:false};
+        const retryCount=message.retryCount??0;
+        if(!Number.isInteger(retryCount)||retryCount<0||retryCount>(a.maxSendRetries??5)||retryCount!==(a.sendRetryCount??0)||retryCount>0&&(!a.retryObservedAt||now()-a.retryObservedAt>30000||now()-a.permittedAt>MAX_SEND_RETRY_ELAPSED_MS))return{allowed:false};
         const g=state.groups.find(g=>g.id===a.groupId),c=state.channels.find(c=>c.id===a.bindingId);
         if(state.service.status!=='ready'||!g||g.status!=='running'||g.controlIntent||g.runId!==a.runId||g.activeAttemptId!==a.id||!c||c.configVersion!==a.configVersion||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||c.tabId!==a.tabId)return{allowed:false};
         try{eligibleChannel(c);}catch{return{allowed:false};}
         if(monotonicNow()<Math.max(g.nextMono||0,c.nextMono||0))return{allowed:false};
-        return{allowed:true};
+        a.authorizedRetryCount=retryCount;return{allowed:true};
       }
 
       if(message.type==='HEARTBEAT'){
@@ -741,7 +752,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
     }
     for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status))){
-      const stale=a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preparedObservedAt||a.createdAt)>30000:a.preEnterWaiting?wall-a.permittedAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preEnterWaitObservedAt||a.permittedAt)>30000:wall-(a.enterReadyAt||a.permittedAt||a.createdAt)>30000;
+      const absoluteWait=a.sendRetryCount?MAX_SEND_RETRY_ELAPSED_MS:MAX_PRE_ENTER_WAIT_MS;
+      const stale=a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preparedObservedAt||a.createdAt)>30000:a.preEnterWaiting?wall-a.permittedAt>absoluteWait||wall-(a.preEnterWaitObservedAt||a.permittedAt)>30000:wall-a.permittedAt>absoluteWait||wall-(a.retryObservedAt||a.enterReadyAt||a.permittedAt||a.createdAt)>30000;
       if(stale)markUnknown(a,'result_timeout');
     }
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
@@ -752,7 +764,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       const due=Math.max(g.nextMono||0,c.nextMono||0),earlyPrepare=get('instances',c.instanceId).capabilities?.includes('early-prepare-v1')===true;
       if(mono<due-(earlyPrepare?5000:0)){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
       const item=c.playlist[c.playlistIndex%c.playlist.length],m=get('messages',item.messageId),revision=m.revisions.find(r=>r.id===item.revisionId);
-      const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false};
+      const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false,maxSendRetries:state.settings.maxSendRetries};
       state.attempts.push(a);g.activeAttemptId=a.id;g.waitReason='preparing';g.nextEligibleAt=null;command('PREPARE',c.instanceId,attemptPayload(a));event('delivery.preparing',{attemptId:a.id,groupId:g.id,instanceId:c.instanceId,accountId:c.accountId,channelId:c.channelId});
     }
     return{ok:true};

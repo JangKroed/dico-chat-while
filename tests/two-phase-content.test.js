@@ -3,26 +3,28 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
+import {createCentralManager} from '../central/core/index.js';
+import {createCentralExecutor} from '../central/extension/executor.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,throwAfterEnter=false,prepareDelay=0,lateCooldown=null,attachment=false,unsupported=false}={}) {
+function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,lateCooldown=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
- const nodes=[],events=[],traces=[],requests=[];let waitHook=null,authorizationHook=null;
+ const nodes=[],events=[],traces=[],requests=[];let waitHook=null,authorizationHook=null,retryHook=null,runtimeHook=null,tickHook=null;
  const form={querySelector:()=>attachment?{}:null,querySelectorAll:()=>{const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=editor;this.focusNode=editor;this.isCollapsed=range.collapsed}};
  const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>unsupported?{}:null,closest:()=>form,contains:n=>n===editor,focus(){document.activeElement=editor},dispatchEvent(event){
   events.push({type:event.type,at:clock,selectionCollapsed:selection.isCollapsed});
   if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;if(prepareDelay)nextDelay=prepareDelay;}
   if(event.type==='keydown'){
-   if(ignoreEnter)return true;
+   if(ignoreEnter||events.filter(e=>e.type==='keydown').length<=ignoreFirstEnters)return true;
    assert.equal(editor.innerText.trim(),convertAliases?delivery.text.replaceAll(emojiName,emojiValue):delivery.text);event.defaultPrevented=true;editor.innerText='';
    nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:renderMessage(delivery.text),closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
   }
   if(event.type==='keyup'&&throwAfterEnter)throw Error('Synthetic post-Enter DOM failure');
  }};
  const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:[editor],querySelector:sel=>sel.includes('panels')?{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(){},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
- const tick=ms=>{clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
+ const tick=ms=>{if(tickHook){let remaining=ms;while(remaining>0){const step=Math.min(500,remaining);clock+=step;remaining-=step;tickHook();}}else clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
  if(fault==='text_mismatch')editor.innerText='WRONG';
  if(fault==='focus_lost')document.activeElement=null;
  if(fault==='foreign_focus')document.activeElement={};
@@ -42,15 +44,15 @@ function rig({lag=0,fault=null,managed=false,structured=false,message='A',emojiN
   }});
   editor.nodeType=1;editor.tagName='DIV';
  }
- const target={managed,guildId:'123',channelId:'456',ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)&&!confirmation};
+ const target={managed,guildId,channelId,ownUserId:'123456789012345678',messages:[message,'B'],expectedText:message,skipConfirmation:Boolean(emojiName)&&!confirmation};
  const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
- runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:'/channels/123/456'},Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT'){waitHook?.(m);return{allowed};}const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
+ runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`},Date:DateMock,
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{listener(message,{id:'ext'},resolve);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
@@ -228,9 +230,9 @@ test('두 번째 순환의 긴 Markdown·이모지는 실제 작성자와 새 �
  assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.equal(r.events.filter(e=>e.type==='paste').length,2);
 });
 
-test('Enter가 무시되어 긴 초안이 남으면 증거만 반환하고 Enter를 다시 누르지 않는다',async()=>{
+test('재시도 0회 설정이면 남은 초안의 증거만 반환하고 중복 요청을 차단한다',async()=>{
  const message='### 제목 💰\n- __설명__ **1600** '.repeat(8).trim();
- const r=rig({managed:true,message,ignoreEnter:true});await r.request('DICO_PREPARE');r.tick(3000);
+ const r=rig({managed:true,message,ignoreEnter:true});r.delivery.maxSendRetries=0;await r.request('DICO_PREPARE');r.tick(3000);
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'draft-retained');assert.equal(result.code,'DELIVERY_DRAFT_RETAINED');
  assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(result.deliveryEvidence.composerRetained,true);assert.equal(result.deliveryEvidence.newMessage,false);
  assert.equal(r.editor.innerText,message);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
@@ -355,4 +357,111 @@ test('an unchanged backed-up draft is fully selected again if the cursor moved d
  const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;r.editor.innerText='backed-up draft';r.delivery.replaceExpectedDraft='backed-up draft';
  let calls=0;r.onAuthorization(()=>{if(++calls===2)r.selection.isCollapsed=true;});
  assert.equal((await r.request('DICO_PREPARE')).status,'prepared');assert.equal(r.events.find(e=>e.type==='paste').selectionCollapsed,false);assert.equal(r.editor.innerText,'A');
+});
+
+
+test('무시된 첫 Enter만 재시도하고 실제 성공 뒤에는 Enter를 추가하지 않는다',async()=>{
+ for(const ignored of [0,1,3]){
+  const r=rig({ignoreFirstEnters:ignored});r.delivery.maxSendRetries=5;r.delivery.strictAuthorization=true;
+  await r.request('DICO_PREPARE');r.tick(3000);
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+  assert.equal(r.events.filter(e=>e.type==='keydown').length,ignored+1);
+  assert.equal(result.deliveryEvidence.retryCount,ignored);assert.equal(result.deliveryEvidence.maxSendRetries,5);
+  assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+  assert.equal(r.requests.filter(m=>m.type==='DICO_RETRY_WAIT').length,ignored);
+  assert.equal((await r.request('DICO_DELIVER')).status,'uncertain');
+  assert.equal(r.events.filter(e=>e.type==='keydown').length,ignored+1);
+ }
+});
+test('재시도는 설정한 횟수만 수행하며 기본값과 최대값은 5회이다',async()=>{
+ for(const maximum of [undefined,0,2,5,99]){
+  const r=rig({ignoreEnter:true});if(maximum!==undefined)r.delivery.maxSendRetries=maximum;
+  await r.request('DICO_PREPARE');r.tick(3000);const result=await r.request('DICO_DELIVER');
+  const expected=maximum===undefined?5:Math.min(5,maximum);
+  assert.equal(result.status,'draft-retained');assert.equal(r.events.filter(e=>e.type==='keydown').length,expected+1);
+  assert.equal(result.deliveryEvidence.retryCount,expected);assert.equal(result.deliveryEvidence.maxSendRetries,expected);
+ }
+});
+test('재시도 중지와 초안·계정 변경은 이전 Enter를 미발송으로 단정하지 않는다',async()=>{
+ for(const change of ['stop','draft','account','composition','detach']){
+  const r=rig({ignoreEnter:true,loggedUser:'123456789012345678'});r.target.coordinated=true;
+  await r.request('DICO_PREPARE');r.tick(3000);
+  r.onRetry(()=>{if(change==='stop')r.stop();if(change==='draft')r.editor.innerText='다른 초안';if(change==='account')r.account('999999999999999999');if(change==='composition')r.compose();if(change==='detach')r.editor.isConnected=false;});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain',change);
+  assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(r.events.filter(e=>e.type==='keydown').length,1,change);
+ }
+});
+test('재시도 전에 새 게시·전송 중·실패·작성자 불명 증거가 생기면 추가 Enter를 막는다',async()=>{
+ for(const post of [{text:'other'},{sending:true},{failed:true},{author:null},{author:'999999999999999999'},{}]){
+  const r=rig({ignoreEnter:true});await r.request('DICO_PREPARE');r.tick(3000);
+  r.onRetry(()=>r.post(post));const result=await r.request('DICO_DELIVER');
+  assert.equal(result.status,'uncertain');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ }
+});
+test('재시도 승인 응답 사이에 늦은 성공이 도착하면 원래 관찰 기준으로 성공 처리한다',async()=>{
+ const r=rig({ignoreEnter:true});await r.request('DICO_PREPARE');r.tick(3000);
+ r.onAuthorization(m=>{if(m.retryCount===1)r.post({clear:true});});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+test('재시도마다 실제 쿨다운을 새로 기다리고 재시도 하트비트만 보낸다',async()=>{
+ const r=rig({ignoreFirstEnters:1});await r.request('DICO_PREPARE');r.tick(3000);let until;
+ r.onRetry(m=>{if(until===undefined){until=r.now()+4000;r.cooldown(now=>now<until?'00:01':'');}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+ const enters=r.events.filter(e=>e.type==='keydown');assert.equal(enters.length,2);assert.ok(enters[1].at>=until);
+ assert.ok(r.requests.some(m=>m.type==='DICO_RETRY_WAIT'&&m.cooldownMs>0));
+ assert.equal(r.requests.some(m=>m.type==='DICO_PRE_ENTER_WAIT'),false);
+});
+
+test('재시도 최종 승인 뒤 새 쿨다운이 생기면 해제 후 다시 승인받는다',async()=>{
+ const r=rig({ignoreFirstEnters:1});r.delivery.strictAuthorization=true;
+ await r.request('DICO_PREPARE');r.tick(3000);let until,authorizations=0;
+ r.onAuthorization(m=>{if(m.retryCount===1){authorizations++;if(until===undefined){until=r.now()+4000;r.cooldown(now=>now<until?'00:01':'');}}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.ok(r.events.filter(e=>e.type==='keydown')[1].at>=until);assert.equal(authorizations,2);
+});
+test('재시도 승인 지연·중지·불명 쿨다운이면 이미 시도한 Enter를 반복하지 않는다',async()=>{
+ for(const mode of ['late','stop','unreadable']){
+  const r=rig({ignoreFirstEnters:1});r.delivery.strictAuthorization=true;
+  await r.request('DICO_PREPARE');r.tick(3000);
+  r.onAuthorization(m=>{if(m.retryCount===1){if(mode==='late')r.tick(3001);if(mode==='stop')r.stop();if(mode==='unreadable')r.cooldown('알 수 없음');}});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain',mode);assert.equal(r.events.filter(e=>e.type==='keydown').length,1,mode);
+ }
+});
+test('재시도 쿨다운 중 늦은 성공·모호한 게시·중지는 추가 Enter 없이 종료한다',async()=>{
+ for(const mode of ['success','ambiguous','stop']){
+  const r=rig({ignoreFirstEnters:1});await r.request('DICO_PREPARE');r.tick(3000);let initialized=false;
+  r.onRetry(m=>{if(!initialized){initialized=true;r.cooldown('00:01');return;}if(m.cooldownMs>0){if(mode==='stop')r.stop();else r.post({clear:mode==='success',text:mode==='success'?'A':'other'});}});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,mode==='success'?'confirmed':'uncertain',mode);assert.equal(r.events.filter(e=>e.type==='keydown').length,1,mode);
+ }
+});
+
+test('실제 content·실행기·코어가 같은 시도에서 쿨다운 후 재시도하고 성공 시 한 번만 차례를 넘긴다',async t=>{
+ const guildId='11111111111111111',channelId='22222222222222222',accountId='123456789012345678',tabId=7;
+ const r=rig({guildId,channelId,ignoreFirstEnters:1,loggedUser:accountId});
+ const manager=createCentralManager({now:r.now,monotonicNow:r.now});t.after(()=>manager.close());
+ manager.execute('settings.update',{maxSendRetries:1});
+ const hello=manager.bridge({type:'HELLO',protocolVersion:1,name:'real content integration'});
+ manager.bridge({type:'OBSERVATION',sessionId:hello.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId,guildId,channelId,tabId,verified:true}]},hello.instanceId);
+ const channel=manager.snapshot().channels[0];
+ const first=manager.execute('message.create',{name:'A',body:'A'}),second=manager.execute('message.create',{name:'B',body:'B'});
+ manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:first.id},{messageId:second.id}]});
+ let stored,executor,until;const transport={connected:true,request:async message=>manager.bridge(message,hello.instanceId)};
+ const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async value=>{stored=structuredClone(value.dicoCentral);}}},tabs:{get:async()=>({id:tabId,url:`https://discord.com/channels/${guildId}/${channelId}`}),sendMessage:async(_id,message)=>{if(message.delivery)Object.assign(r.delivery,message.delivery);return r.requestMessage(message);}}};
+ executor=createCentralExecutor({chrome,transport,now:r.now,monotonicNow:r.now});await executor.load();await executor.setSession(hello);
+ r.onRuntime(async m=>({allowed:m.type==='DICO_CAN_SEND'?await executor.canSend(m,tabId):m.type==='DICO_RETRY_WAIT'?await executor.retryWait(m,tabId):await executor.preEnterWait(m,tabId),authorizedAt:r.now(),maxAgeMs:2000}));
+ r.onRetry(()=>{assert.equal(manager.snapshot().channels[0].playlistIndex,0);if(until===undefined){until=r.now()+4000;r.cooldown(now=>now<until?'00:01':'');}});
+ r.onTick(()=>{manager.bridge({type:'HEARTBEAT',sessionId:hello.sessionId},hello.instanceId);manager.tick();});
+ for(const command of manager.commands(hello.instanceId))await executor.handleCommand(command);
+ const group=manager.execute('group.create',{name:'Actual content',members:[channel.id],intervalMs:0});manager.execute('group.start',{id:group.id});manager.tick();
+ for(const type of ['PREPARE','COMMIT_PERMIT']){const command=manager.commands(hello.instanceId).find(x=>x.type===type);assert.ok(command);await executor.handleCommand(command);}
+ const state=manager.snapshot();assert.equal(state.attempts.length,1);assert.equal(state.attempts[0].status,'confirmed');assert.equal(state.attempts[0].sendRetryCount,1);assert.equal(state.channels[0].playlistIndex,1);
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.ok(r.events.filter(e=>e.type==='keydown')[1].at>=until);
+});
+
+test('재시도 시작 응답 중 쿨다운이 사라져도 대기 해제를 알리고 최종 승인받는다',async()=>{
+ const r=rig({ignoreFirstEnters:1});await r.request('DICO_PREPARE');r.tick(3000);let injected=false,started=false;
+ r.onTick(()=>{if(!injected&&r.events.some(e=>e.type==='keydown')){injected=true;r.cooldown('00:01');}});
+ r.onRetry(m=>{if(!started){started=true;assert.equal(m.cooldownMs,1000);r.cooldown('');}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+ assert.deepEqual(r.requests.filter(m=>m.type==='DICO_RETRY_WAIT').map(m=>m.cooldownMs),[1000,0]);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);
 });

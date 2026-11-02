@@ -129,3 +129,11 @@ Channel DTO: `intervalMode: auto|custom`, `minimumIntervalMs`, 실제 `intervalM
 The result is `{status:'started'|'already_started',attemptId,groupId,runId}` or `{status:'waiting',reasonCode:'CONTROL_PENDING',attemptId,groupId}`. Waiting records the non-delivery outcome but does **not** schedule a restart. After outstanding stop acknowledgements arrive, a fresh explicit request may continue the same latest not-sent attempt.
 
 The executor reports unknown-result blocking proof only after a final commit observation response has returned with `enterAttempted:true`. This revokes future execution without claiming the earlier Enter did not post. Before a retry PREPARE, authenticated HEARTBEAT terminal reconciliation durably updates prior nonterminal local records; session and stop checks run again after this asynchronous boundary.
+
+### Bounded same-attempt retries (0.4.12)
+
+`settings.update {maxSendRetries}` accepts integers 0–5, default 5. Each PREPARE snapshots this value on the attempt and carries it through COMMIT_PERMIT; changing settings does not expand an in-flight attempt's budget.
+
+The executor sends `DELIVERY_WAIT {retryPhase:true,retryCount,cooldownMs,elapsedMs,attemptId,runId,configVersion}` for same-attempt retry progress. The count stays unchanged for cooldown heartbeats and advances one step for a subsequent retry; it cannot skip, rewind, or exceed the snapshotted budget. `AUTHORIZE_ENTER` includes that count and remains idempotent for repeated current-count preflight checks. Session, group/run, config, service, stop and live channel gates still apply.
+
+Retry progress keeps the current attempt alive without advancing either cursor. Only confirmed posting starts the next group's spacing and advances the account/playlist. A retained-draft retry uses a continuous message-observation baseline so a late post or sending indicator stops further retries. Final evidence includes the retry count and optional bounded key-event/page-state diagnostics; none proves delivery by itself.

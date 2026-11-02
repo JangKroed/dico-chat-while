@@ -977,6 +977,26 @@ test('delivery evidence stores only fixed stage and booleans without changing un
   f.manager.close();
 });
 
+test('delivery result persists bounded event and focus observations without changing outcome',()=>{
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'unknown',{reasonCode:'draft-retained',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:false,keyupDefaultPrevented:true,documentHidden:false,documentFocused:true,submitMethod:'button',retryCount:2,maxSendRetries:5,nativeInputObserved:'private',body:'private body'}});
+  const saved=f.manager.snapshot().attempts[0];
+  assert.deepEqual(saved.deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:false,keyupDefaultPrevented:true,documentHidden:false,documentFocused:true,submitMethod:'button',retryCount:2,maxSendRetries:5});
+  assert.equal(saved.status,'unknown');
+  assert.equal(JSON.stringify(f.manager.snapshot()).includes('private'),false);
+  f.manager.close();
+});
+
+test('delivery result discards malformed event diagnostics and arbitrary submit method',()=>{
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+  const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'unknown',{reasonCode:'draft-retained',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:'false',keyupDefaultPrevented:0,documentHidden:'no',documentFocused:{private:'secret'},submitMethod:'private',retryCount:-1,maxSendRetries:6}});
+  assert.deepEqual(f.manager.snapshot().attempts[0].deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true});
+  assert.equal(JSON.stringify(f.manager.snapshot()).includes('private'),false);
+  f.manager.close();
+});
+
 test('new executors prepare five seconds early but permit only after due and live cooldown clears',()=>{
   const f=fixture(),c=f.connect('A','channel',['central-v1','early-prepare-v1']);f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
   const first=f.manager.snapshot().attempts[0];f.manager.bridge({type:'PREPARED',sessionId:c.sessionId,attemptId:first.id,accountId:'A',channelId:'channel',configVersion:first.configVersion,draftClear:true,cooldownMs:0},c.instanceId);f.result(c,first);
@@ -1074,6 +1094,55 @@ test('live pre-Enter cooldown holds the same attempt and turn beyond thirty seco
  assert.equal(f.manager.snapshot().attempts[0].status,'permitted');
  assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion},c.instanceId).allowed,true);
  f.result(c,a);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);f.manager.close();
+});
+
+test('send retry setting snapshots each attempt and rejects invalid limits',()=>{
+ const f=fixture();assert.equal(f.manager.snapshot().settings.maxSendRetries,5);
+ for(const value of [-1,6,1.5,'3',null])assert.throws(()=>f.manager.execute('settings.update',{maxSendRetries:value}),{code:'VALIDATION'});
+ f.manager.execute('settings.update',{maxSendRetries:2});const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+ const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,2);
+ assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE').payload.maxSendRetries,2);
+ f.manager.execute('settings.update',{maxSendRetries:0});f.prepared(c,a);
+ assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='COMMIT_PERMIT').payload.maxSendRetries,2);
+ f.manager.close();
+});
+
+test('older backups without retry settings restore the default retry limit',()=>{
+ const f=fixture(),backup=f.manager.exportBackup();delete backup.settings.maxSendRetries;
+ f.manager.execute('settings.update',{maxSendRetries:0});f.manager.importBackup(backup);
+ assert.equal(f.manager.snapshot().settings.maxSendRetries,5);f.manager.close();
+});
+
+test('authorized retries refresh the same permitted attempt without advancing its cursor',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message('One'),f.message('Two')]);const g=f.group([c]);f.start(g);
+ const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+ const authorize=retryCount=>f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryCount},c.instanceId);
+ const wait=(retryCount,cooldownMs=0)=>f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount,cooldownMs,elapsedMs:0},c.instanceId);
+ assert.equal(wait(1).allowed,false,'first Enter must be authorized before retry');
+ assert.equal(authorize(0).allowed,true);assert.equal(authorize(0).allowed,true,'the final pre-Enter recheck uses the same count');
+ for(let n=0;n<5;n++){f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();}
+ assert.equal(wait(1,20000).allowed,true);assert.equal(authorize(1).allowed,false);
+ for(let n=0;n<3;n++){f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();}
+ assert.equal(wait(1,5000).allowed,true);assert.equal(wait(3,0).allowed,false,'cannot skip retry');
+ assert.equal(wait(1,0).allowed,true);assert.equal(authorize(1).allowed,true);assert.equal(authorize(1).allowed,true);
+ assert.equal(wait(1,5000).allowed,true,'a newly observed cooldown may pause the same authorized retry');
+ assert.equal(authorize(1).allowed,false);
+ assert.equal(wait(1,0).allowed,true);assert.equal(authorize(1).allowed,true);
+ assert.equal(f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,cooldownMs:0},c.instanceId).allowed,false,'a delayed pre-Enter wait cannot alter retry state');
+ const snapshot=f.manager.snapshot();assert.equal(snapshot.attempts.length,1);assert.equal(snapshot.attempts[0].status,'permitted');assert.equal(snapshot.attempts[0].sendRetryCount,1);assert.equal(snapshot.groups[0].cursor,0);assert.equal(snapshot.channels[0].playlistIndex,0);
+ f.result(c,a);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);f.manager.close();
+});
+
+test('retry count limit and active run gates deny stale or unauthorized waits',()=>{
+ const f=fixture();f.manager.execute('settings.update',{maxSendRetries:1});const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+ const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+ const wait=(retryCount,extra={})=>f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount,cooldownMs:0,elapsedMs:0,...extra},c.instanceId);
+ assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryCount:0},c.instanceId).allowed,true);
+ for(const count of [0,2,1.2,'1',100])assert.equal(wait(count).allowed,false);
+ assert.equal(wait(1,{runId:'wrong'}).allowed,false);assert.equal(wait(1,{configVersion:100}).allowed,false);
+ assert.equal(wait(1).allowed,true);assert.equal(wait(2).allowed,false);
+ f.manager.execute('group.pause',{id:g.id});assert.equal(wait(1).allowed,false);
+ f.manager.close();
 });
 
 test('automatic recovery respects durable central attempts even if the executor lost local history',()=>{

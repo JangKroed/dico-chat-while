@@ -57,3 +57,10 @@ test('input countdown uses group deadline minus supported five-second preparatio
  assert.equal(preparationDeadline(null,5),null);
  assert.equal(secondsUntil(preparationDeadline(163000,5),100000,0,true),58);
 });
+
+test('same-attempt retry shows progress instead of a following-turn countdown',()=>{
+ const group={status:'running',waitReason:'send_retry',activeAttemptId:'attempt',members:['current','next'],cursor:0};
+ assert.equal(groupTimingState(group,60),'현재 계정 전송 재시도 중');
+ assert.equal(accountTimingState({id:'current'},group,{status:'permitted'},60),'전송 재시도 중');
+ assert.equal(accountTimingState({id:'next'},group,undefined,60),'차례 대기');
+});

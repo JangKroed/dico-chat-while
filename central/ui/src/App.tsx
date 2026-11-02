@@ -365,7 +365,7 @@ function Groups({s,run,busy,go,registerGuard}:Common) {
 function AttemptDiagnostics({attempt}:{attempt:Attempt}) {
   const evidence=attempt.deliveryEvidence
   if(!evidence&&attempt.status!=='unknown')return null
-  return <section className="attempt-diagnostics" aria-label="입력·게시 관측 진단"><h3>Enter 요청 · 게시 관측</h3>{attempt.status==='unknown'&&<p>{unknownDeliveryCause(attempt.reasonCode)}</p>}<p>{enterEvidenceText(evidence)}</p>{evidence&&<dl><dt>진행 단계</dt><dd>{evidence.phase?({prepare:'입력 준비',commit:'전송 허가',send:'전송 진행'} as Record<string,string>)[evidence.phase]||'기록 없음':'기록 없음'} · {evidence.stage?evidenceStages[evidence.stage]||'기록 없음':'상세 단계 기록 없음'}</dd>{evidenceFlags.filter(flag=>typeof evidence[flag.key]==='boolean').map(flag=><div className="diagnostic-pair" key={flag.key}><dt>{flag.label}</dt><dd>{evidence[flag.key]?'관측됨':'관측되지 않음'}</dd></div>)}</dl>}<small>진단은 확인 지점에서 관측한 사실입니다. 실제 게시 확정 상태와 구분해서 읽어 주세요. 미확인 시도는 실제 Discord 게시 내역을 확인하기 전까지 다시 보내지 마세요.</small></section>
+  return <section className="attempt-diagnostics" aria-label="입력·게시 관측 진단"><h3>Enter 요청 · 게시 관측</h3>{typeof evidence?.retryCount==='number'&&<p>재시도 {evidence.retryCount} / {typeof evidence.maxSendRetries==='number'?evidence.maxSendRetries:5}회 · 최초 요청 제외</p>}{attempt.status==='unknown'&&<p>{unknownDeliveryCause(attempt.reasonCode)}</p>}<p>{enterEvidenceText(evidence)}</p>{evidence&&<dl><dt>진행 단계</dt><dd>{evidence.phase?({prepare:'입력 준비',commit:'전송 허가',send:'전송 진행'} as Record<string,string>)[evidence.phase]||'기록 없음':'기록 없음'} · {evidence.stage?evidenceStages[evidence.stage]||'기록 없음':'상세 단계 기록 없음'}</dd>{evidenceFlags.filter(flag=>typeof evidence[flag.key]==='boolean').map(flag=><div className="diagnostic-pair" key={flag.key}><dt>{flag.label}</dt><dd>{evidence[flag.key]?'관측됨':'관측되지 않음'}</dd></div>)}</dl>}<small>진단은 확인 지점에서 관측한 사실입니다. 실제 게시 확정 상태와 구분해서 읽어 주세요. 미확인 시도는 실제 Discord 게시 내역을 확인하기 전까지 다시 보내지 마세요.</small></section>
 }
 
 function History({s,go,run,busy,retryNotSent,retryWaitingId}:Common&RetryAction&{retryWaitingId:string|null}) {
@@ -485,7 +485,7 @@ function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard}:Co
   const preferences=synced?.values
   const retention=preferences?String(preferences.retentionDays):''
   const notificationsEnabled=preferences?.notificationsEnabled??false,hideNames=preferences?.hideNotificationNames??false
-  const notificationChanges=settingsPayload(synced,'notifications'),retentionChanges=settingsPayload(synced,'retention')
+  const notificationChanges=settingsPayload(synced,'notifications'),retentionChanges=settingsPayload(synced,'retention'),deliveryChanges=settingsPayload(synced,'delivery')
   draftStatus.current=settingsDirty(synced)
   useEffect(()=>{registerGuard?.(()=>!settingsDirty(synced)||confirm('저장하지 않은 설정 변경을 버리고 이동할까요?'));return()=>registerGuard?.(null)},[synced,registerGuard])
   useEffect(()=>()=>{draftStatus.current=false},[draftStatus])
@@ -520,6 +520,10 @@ function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard}:Co
       <div className="setting-row"><div><strong>테스트 알림</strong><p>Discord에는 메시지를 보내지 않습니다.</p></div><button className="outline small" onClick={()=>void notify()}>테스트 요청</button></div>
       <div className="setting-row"><div><strong>화면 알림</strong><p>미해결 문제는 상단 알림 센터에 계속 표시됩니다.</p></div><span>{s.incidents.filter(isIncidentOpen).length}건</span></div>
       <button className="outline small" disabled={busy||!notificationChanges||!Object.keys(notificationChanges).length} onClick={()=>{if(notificationChanges&&Object.keys(notificationChanges).length)void run('settings.update',notificationChanges)}}>알림 설정 저장</button>
+    </Section><Section title="발송 재시도" subtitle="다음에 준비하는 발송부터 적용됩니다.">
+      <div className="setting-row"><div><strong>최대 재시도 횟수</strong><p>같은 문구가 남고 게시·전송 흔적이 없을 때만 다시 시도합니다. 매번 실제 슬로우 제한을 확인하며, 재시도 중에는 다음 계정으로 넘어가지 않습니다.</p></div><select aria-label="최대 발송 재시도 횟수" disabled={!preferences} value={preferences?.maxSendRetries??5} onChange={e=>setDraft(d=>editSettingsDraft(d,'maxSendRetries',Number(e.target.value)))}>{[0,1,2,3,4,5].map(value=><option key={value} value={value}>{value===0?'사용 안 함':`${value}회`}</option>)}</select></div>
+      <p className="secondary">기본 5회 · 최초 요청을 포함하면 최대 6회입니다. 게시 여부가 불확실한 흔적이 있으면 자동 재시도를 중단합니다.</p>
+      <button className="outline small" disabled={busy||!deliveryChanges||!Object.keys(deliveryChanges).length} onClick={()=>{if(deliveryChanges&&Object.keys(deliveryChanges).length)void run('settings.update',deliveryChanges)}}>재시도 설정 저장</button>
     </Section><Section title="기록 보존" subtitle="종료된 운영 기록의 보존 기간">
       <div className="setting-row"><div><strong>보존 기간</strong><p>진행 중·미확인 발송 정보는 정리 대상에서 제외됩니다.</p></div><select aria-label="기록 보존 기간" disabled={!preferences} value={retention} onChange={e=>setDraft(d=>editSettingsDraft(d,'retentionDays',Number(e.target.value)))}>{!preferences&&<option value="">설정 불러오는 중</option>}<option value="30">30일</option><option value="90">90일</option><option value="180">180일</option></select></div>
       <button className="outline small" disabled={busy||!retentionChanges||!Object.keys(retentionChanges).length} onClick={()=>{if(retentionChanges&&Object.keys(retentionChanges).length)void run('settings.update',retentionChanges)}}>설정 저장</button>

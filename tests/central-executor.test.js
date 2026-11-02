@@ -39,6 +39,16 @@ test('전송 중 응답 유실은 시도 흔적을 보존하고 같은 허가를
   assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);
   assert.equal(r.state.attempts.attempt.phase,'unknown');
 });
+
+test('retry wait is bound to the executing tab and forwards a bounded existing wait message',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.transport.request=async m=>{r.reports.push(m);return m.type==='DELIVERY_WAIT'?{allowed:true}:{ok:true};};
+ r.chrome.tabs.sendMessage=async(id,m)=>{if(m.type==='DICO_DELIVER')return r.client.retryWait({id:'attempt',phase:'commit',retryCount:1,cooldownMs:0,elapsedMs:0},7).then(allowed=>({status:allowed?'blocked':'uncertain'}));return m.type==='DICO_DRAFT_INSPECT'?emptyDraft():m.type==='DICO_INSPECT'?{ok:true,cooldownKnown:true,draftMatches:true,cooldownMs:0}:{status:'prepared'};};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.deepEqual(r.reports.filter(m=>m.type==='DELIVERY_WAIT').map(({retryPhase,retryCount,cooldownMs})=>({retryPhase,retryCount,cooldownMs})),[{retryPhase:true,retryCount:1,cooldownMs:0}]);
+ assert.equal(r.state.attempts.attempt.sendRetryCount,1);
+ assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:2,cooldownMs:0,elapsedMs:0},7),false);
+});
 test('중지 게이트는 즉시 닫고 실제 적용 ACK를 구분한다',async()=>{
   const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
   await r.client.handleCommand({id:'stop',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{action:'stop',groupId:'group',runId:'run',attemptId:'attempt'}});
@@ -133,6 +143,22 @@ test('알 수 없는 코드와 진단 문자열은 외부로 보내지 않으며
  assert.deepEqual(report.deliveryEvidence,{enterAttempted:false});
  assert.equal(JSON.stringify(report).includes('private'),false);
  assert.equal(JSON.stringify(report).includes('PRIVATE_MESSAGE_TEXT'),false);
+});
+
+test('입력 이벤트·화면 상태 진단은 허용된 타입만 중앙으로 전달한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async()=>({status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:false,keyupDefaultPrevented:true,documentHidden:false,documentFocused:true,submitMethod:'keyboard',retryCount:2,maxSendRetries:5,nativeInputObserved:'private event',body:'private draft'}});
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.deepEqual(r.reports.find(x=>x.type==='DELIVERY_RESULT').deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:false,keyupDefaultPrevented:true,documentHidden:false,documentFocused:true,submitMethod:'keyboard',retryCount:2,maxSendRetries:5});
+ assert.equal(JSON.stringify(r.reports).includes('private'),false);
+});
+
+test('잘못된 입력 진단 타입과 전송 방식은 보고하지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async()=>({status:'uncertain',code:'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true,enterDefaultPrevented:'true',keyupDefaultPrevented:1,documentHidden:null,documentFocused:{secret:'private'},submitMethod:'private click',retryCount:6,maxSendRetries:'5'}});
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.deepEqual(r.reports.find(x=>x.type==='DELIVERY_RESULT').deliveryEvidence,{phase:'commit',stage:'observe',enterAttempted:true});
+ assert.equal(JSON.stringify(r.reports).includes('private'),false);
 });
 
 test('실제 차단 응답은 미발송 판정을 유지하면서 고정 코드와 진단을 보존한다',async()=>{

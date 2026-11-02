@@ -11,8 +11,15 @@ test('an Enter request is distinct from Discord processing or confirmed posting'
   assert.match(enterEvidenceText(),/추정하지 않습니다/);
 });
 test('diagnostic display accepts only the agreed observation flags',()=>{
-  assert.deepEqual(evidenceFlags.map(x=>x.key),['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch']);
+  assert.deepEqual(evidenceFlags.map(x=>x.key),['enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch']);
   assert.match(unknownDeliveryCause('reconcile_inconclusive'),/재확인했지만/);
+});
+test('key event and document observations have labels, and method stays separate from posting',()=>{
+  const labels=Object.fromEntries(evidenceFlags.map(x=>[x.key,x.label]));
+  for(const key of ['enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused'])assert.ok(labels[key],key);
+  assert.match(enterEvidenceText({enterAttempted:true,submitMethod:'keyboard'}),/키보드/);
+  assert.match(enterEvidenceText({enterAttempted:true,submitMethod:'button'}),/버튼/);
+  assert.match(enterEvidenceText({enterAttempted:true,submitMethod:'button'}),/게시했다는 뜻은 아닙니다/);
 });
 test('fixed content codes have Korean causes while preserving delivery uncertainty',()=>{
   assert.equal(unknownDeliveryCause('DELIVERY_DRAFT_RETAINED'),unknownDeliveryCause('draft-retained'));

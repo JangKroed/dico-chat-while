@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {createCentralManager} from '../central/core/index.js';
 import {createSettingsDraft,syncSettingsDraft,editSettingsDraft,settingsPayload} from '../central/ui/src/settings-draft.ts';
 
-const saved={retentionDays:180,notificationsEnabled:true,hideNotificationNames:false};
+const saved={maxSendRetries:5,retentionDays:180,notificationsEnabled:true,hideNotificationNames:false};
 test('settings initialize from the saved snapshot without presenting defaults',()=>{
   assert.deepEqual(createSettingsDraft(saved).values,saved);
   assert.equal(createSettingsDraft(undefined),null);
@@ -18,7 +18,7 @@ test('saving notifications preserves an unsaved retention edit and follows other
   draft=editSettingsDraft(draft,'notificationsEnabled',false);
   assert.deepEqual(settingsPayload(draft,'notifications'),{notificationsEnabled:false});
   draft=syncSettingsDraft(draft,{...saved,notificationsEnabled:false,hideNotificationNames:true});
-  assert.deepEqual(draft.values,{retentionDays:30,notificationsEnabled:false,hideNotificationNames:true});
+  assert.deepEqual(draft.values,{maxSendRetries:5,retentionDays:30,notificationsEnabled:false,hideNotificationNames:true});
   assert.deepEqual(settingsPayload(draft,'notifications'),{});
   assert.deepEqual(settingsPayload(draft,'retention'),{retentionDays:30});
 });
@@ -44,4 +44,13 @@ test('notification and retention preferences survive partial saves and a disk re
     const actual=manager.snapshot().settings;
     assert.equal(actual.retentionDays,180);assert.equal(actual.notificationsEnabled,true);assert.equal(actual.hideNotificationNames,true);
   }finally{manager?.close();rmSync(directory,{recursive:true,force:true});}
+});
+
+test('retry setting edits survive unrelated saves and emit only the delivery preference',()=>{
+ let draft=editSettingsDraft(createSettingsDraft(saved),'maxSendRetries',2);
+ draft=syncSettingsDraft(draft,{...saved,notificationsEnabled:false});
+ assert.equal(draft.values.maxSendRetries,2);
+ assert.deepEqual(settingsPayload(draft,'delivery'),{maxSendRetries:2});
+ assert.deepEqual(settingsPayload(draft,'notifications'),{});
+ assert.equal(createSettingsDraft({...saved,maxSendRetries:undefined}).values.maxSendRetries,5);
 });
