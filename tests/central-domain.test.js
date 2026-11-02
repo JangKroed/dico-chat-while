@@ -472,7 +472,7 @@ test('rejected PREPARE keeps a bounded diagnostic code without recording raw err
    const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const cmd=f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE');
    f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'rejected',rejectionCode,error:'private raw failure'},c.instanceId);
    const valid=rejectionCode==='DRAFT_MISMATCH',s=f.manager.snapshot();
-   assert.equal(s.attempts[0].reasonCode,valid?'DRAFT_MISMATCH':'command_rejected');
+   assert.equal(s.attempts[0].reasonCode,valid?'DRAFT_MISMATCH':'PREPARE_REJECTED');
    assert.equal(s.commands.find(x=>x.id===cmd.id).rejectionCode,valid?'DRAFT_MISMATCH':undefined);
    assert.equal(f.manager.events().findLast(x=>x.type==='command.ack').rejectionCode,valid?'DRAFT_MISMATCH':undefined);
    assert.equal(JSON.stringify(s).includes('private raw failure'),false);assert.equal(JSON.stringify(s).includes('private body'),false);
@@ -654,14 +654,14 @@ test('HELLO validates bounded capability names and replaces previous session cap
   f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});assert.deepEqual(f.manager.snapshot().instances[0].capabilities,[]);f.manager.close();
 });
 
-test('command rejection incidents expose bounded remediation fields and refresh their latest rejection', () => {
+test('command rejection incidents preserve the first bounded cause across duplicate acknowledgments', () => {
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));
   const attempt=f.manager.snapshot().attempts[0],command=f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE');
   const reject=rejectionCode=>f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode,error:'private body must not leak'},c.instanceId);
   reject('DRAFT_MISMATCH');let problem=f.manager.snapshot().incidents.find(i=>i.code==='command_rejected');
   assert.equal(problem.commandType,'PREPARE');assert.equal(problem.commandId,command.id);assert.equal(problem.attemptId,attempt.id);assert.equal(problem.rejectionCode,'DRAFT_MISMATCH');
-  reject('TAB_MISSING');problem=f.manager.snapshot().incidents.find(i=>i.id===problem.id);assert.equal(problem.count,2);assert.equal(problem.rejectionCode,'TAB_MISSING');
-  reject('private raw diagnostic');problem=f.manager.snapshot().incidents.find(i=>i.id===problem.id);assert.equal(problem.rejectionCode,undefined);assert.equal(JSON.stringify(f.manager.snapshot().incidents).includes('private'),false);f.manager.close();
+  reject('TAB_MISSING');problem=f.manager.snapshot().incidents.find(i=>i.id===problem.id);assert.equal(problem.count,1);assert.equal(problem.rejectionCode,'DRAFT_MISMATCH');
+  reject('private raw diagnostic');problem=f.manager.snapshot().incidents.find(i=>i.id===problem.id);assert.equal(problem.rejectionCode,'DRAFT_MISMATCH');assert.equal(JSON.stringify(f.manager.snapshot().incidents).includes('private'),false);f.manager.close();
 });
 
 test('legacy command rejection alerts resolve when their referenced attempt reaches a terminal result', () => {
@@ -816,10 +816,10 @@ test('OPEN_CHANNEL recheck does not accept another account, guild, channel or br
   }
 });
 
-test('OPEN_CHANNEL recheck rejects stale heartbeat and verification older than the latest rejection', () => {
+test('OPEN_CHANNEL duplicate rejection preserves fresh verification but stale heartbeat still blocks recovery', () => {
   const f=fixture(),opened=rejectedChannelOpen(f);opened.observe();f.advance(1);opened.reject();
-  let result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_STALE');
-  opened.observe();f.advance(16000);result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_STALE');
+  assert.equal(f.manager.snapshot().incidents.find(i=>i.id===opened.problem.id).count,1);
+  f.advance(16000);let result=f.manager.execute('incident.recheck',{id:opened.problem.id});assert.equal(result.resolved,0);assert.equal(result.blocked[0].reasonCode,'CONNECTION_STALE');
   f.manager.bridge({type:'HEARTBEAT',sessionId:opened.connection.sessionId},opened.connection.instanceId);
   assert.equal(f.manager.execute('incident.recheck',{id:opened.problem.id}).resolved,1);f.manager.close();
 });
@@ -1149,4 +1149,48 @@ test('automatic recovery respects durable central attempts even if the executor 
  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];
  assert.equal(f.manager.bridge({type:'RECOVERY_STATUS',sessionId:c.sessionId},c.instanceId).allowed,false);
  f.result(c,a,'not_sent',{executionBlocked:true});assert.equal(f.manager.bridge({type:'RECOVERY_STATUS',sessionId:c.sessionId},c.instanceId).allowed,true);f.manager.close();
+});
+
+
+test('separate windows requires new capability and fences starts until applied ACK',()=>{
+ const old=fixture(),legacy=old.connect('a','channel',['managed-window-v1']);
+ assert.throws(()=>old.manager.execute('channel.separate',{id:legacy.channel.id}),{code:'EXTENSION_UPDATE_REQUIRED'});old.manager.close();
+ const f=fixture(),c=f.connect('a','channel',['managed-window-v1','managed-window-separation-v1']);f.apply(c,[f.message()]);const g=f.group([c]);
+ const result=f.manager.execute('channel.separate',{id:c.channel.id});
+ assert.equal(f.manager.commands(c.instanceId).find(cmd=>cmd.id===result.commandId).payload.action,'separate');
+ assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'WINDOW_MANAGEMENT_PENDING'});
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:result.commandId,status:'received'},c.instanceId);
+ assert.throws(()=>f.manager.execute('group.start',{id:g.id}),{code:'WINDOW_MANAGEMENT_PENDING'});
+ f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:result.commandId,status:'applied'},c.instanceId);
+ f.manager.execute('group.start',{id:g.id});
+ assert.throws(()=>f.manager.execute('channel.separate',{id:c.channel.id}),{code:'GROUP_RUNNING'});f.manager.close();
+});
+
+test('pre-permit preparation timeout safely retries the same turn with bounded backoff and never reports delivery unknown',()=>{
+ const f=fixture(),c=f.connect('A','channel',['central-v1','early-prepare-v1']);f.apply(c,[f.message('A'),f.message('B')]);
+ f.manager.execute('settings.update',{maxSendRetries:1});const g=f.group([c]);f.start(g);
+ const heartbeat=()=>f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);
+ const advance=ms=>{for(let remaining=ms;remaining>0;){const step=Math.min(1000,remaining);f.advance(step);heartbeat();f.manager.tick();remaining-=step;}};
+ const first=f.manager.snapshot().attempts[0];advance(31000);
+ let s=f.manager.snapshot();assert.equal(s.attempts[0].status,'not_sent');assert.equal(s.attempts[0].reasonCode,'PREPARE_TIMEOUT');assert.equal(s.groups[0].status,'running');assert.equal(s.groups[0].cursor,0);assert.equal(s.channels[0].playlistIndex,0);assert.equal(s.attempts.length,1);
+ assert.throws(()=>f.prepared(c,first),{code:'ATTEMPT_STATE'});
+ advance(5000);s=f.manager.snapshot();assert.equal(s.attempts.length,2);assert.equal(s.attempts[1].playlistIndex,0);
+ advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[1].status,'not_sent');assert.equal(s.groups[0].status,'paused');assert.equal(s.groups[0].activeAttemptId,null);
+ assert.equal(s.incidents.some(i=>i.code==='delivery_unknown'),false);assert.equal(s.incidents.filter(i=>i.status==='open').length,1);
+ advance(30000);assert.equal(f.manager.snapshot().attempts.length,2);f.manager.close();
+});
+
+test('preparation rejection before permit retries only transient errors and repeated ACK is idempotent',()=>{
+ for(const [reason,retry]of [['PREPARE_EDITOR_UNSTABLE',true],['DRAFT_MISMATCH',false]]){
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));
+  const command=f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE');const ack={type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode:reason};
+  f.manager.bridge(ack,c.instanceId);const before=f.manager.snapshot();f.manager.bridge(ack,c.instanceId);const s=f.manager.snapshot();
+  assert.equal(s.attempts[0].status,'not_sent');assert.equal(s.groups[0].status,retry?'running':'paused');assert.deepEqual(s.incidents,before.incidents);assert.equal(s.incidents.some(i=>i.code==='delivery_unknown'),false);f.manager.close();
+ }
+});
+
+test('preparation rejection after a permit stays unknown and is never automatically retried',()=>{
+ const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+ const command=f.manager.commands(c.instanceId).find(x=>x.type==='COMMIT_PERMIT');f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode:'PREPARE_TIMEOUT'},c.instanceId);
+ assert.equal(f.manager.snapshot().attempts[0].status,'unknown');assert.equal(f.manager.snapshot().groups[0].status,'needs_review');f.manager.close();
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {channelVerification,exactRecordedBinding,managedWindowAvailable} from '../central/ui/src/channel-window.ts';
+import {channelVerification,exactRecordedBinding,managedWindowAvailable,managedWindowSeparationAvailable} from '../central/ui/src/channel-window.ts';
 import {incidentAdvice} from '../central/ui/src/incident-advice.ts';
 
 const snapshot=()=>({
@@ -50,4 +50,10 @@ test('channel verification incidents explain their recorded cause even if the bi
   assert.equal(advice.knownReason,true);
   const loading=incidentAdvice({id:'loading',code:'channel_unverified',bindingId:'binding-a',verificationReason:'tab_loading'},s);
   assert.match(loading.title,/로딩 중/);
+});
+
+test('separation is offered only by connected extensions with the separation capability',()=>{
+ const s=snapshot(),channel=s.channels[0];assert.equal(managedWindowSeparationAvailable(s,channel),false);
+ s.instances[0].capabilities.push('managed-window-separation-v1');assert.equal(managedWindowSeparationAvailable(s,channel),true);
+ s.instances[0].connected=false;assert.equal(managedWindowSeparationAvailable(s,channel),false);
 });

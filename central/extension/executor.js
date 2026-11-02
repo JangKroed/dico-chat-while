@@ -1,6 +1,6 @@
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
-const deliveryCodes=new Set(['RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+const deliveryCodes=new Set(['MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
 const deliveryStatuses=new Set(['uncertain','draft-retained','blocked','deferred','confirmed','failed','no_response','reconcile_inconclusive','executor_result']);
 const safeReason=code=>deliveryCodes.has(code)||deliveryStatuses.has(code)?code:undefined;
 function deliveryEvidence(value) {
@@ -16,7 +16,7 @@ function deliveryEvidence(value) {
 const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
 const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
 export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
-  let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
+  let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),commandJobs=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
   const request=async message=>transport.request({...message,sessionId:state.sessionId},state.instanceId);
@@ -127,15 +127,19 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   async function perform(c) {
     const p=c.payload || {};
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
-    if(state.processed[c.id])return;
+    if(state.processed[c.id]){
+      const previous=state.processed[c.id];
+      if(previous?.status==='rejected')await ack(c,'rejected',{rejectionCode:previous.rejectionCode});
+      return;
+    }
     if(maintenance&&c.type!=='CONTROL')throw Object.assign(Error('확장 업데이트 적용 중입니다.'),{code:'UPDATE_IN_PROGRESS'});
     await ack(c,'received');
     if(c.type==='MANAGE_WINDOW') {
       if(typeof manageChannelWindow!=='function')throw Object.assign(Error('전송 창 관리를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
-      if(!['reveal','hide','consolidate'].includes(p.action))throw Object.assign(Error('지원하지 않는 창 관리 요청입니다.'),{code:'INVALID_WINDOW_ACTION'});
-      if(p.action==='consolidate'&&(inFlight>1||Object.values(state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase))))throw Object.assign(Error('발송을 중지하고 미확인 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
-      if(p.action==='consolidate')maintenance=true;
-      try{await manageChannelWindow(p);}finally{if(p.action==='consolidate')maintenance=false;}
+      if(!['reveal','hide','consolidate','separate'].includes(p.action))throw Object.assign(Error('지원하지 않는 창 관리 요청입니다.'),{code:'INVALID_WINDOW_ACTION'});
+      if(['consolidate','separate'].includes(p.action)&&(inFlight>1||Object.values(state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase))))throw Object.assign(Error('발송을 중지하고 미확인 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+      if(['consolidate','separate'].includes(p.action))maintenance=true;
+      try{await manageChannelWindow(p);}finally{if(['consolidate','separate'].includes(p.action))maintenance=false;}
       await ack(c,'applied');
     } else if(c.type==='OPEN_CHANNEL') {
       if(state.emergencyStopped)throw Object.assign(Error('긴급 중지를 해제하고 다시 연결하세요.'),{code:'EXECUTION_STOPPED'});
@@ -171,7 +175,18 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         if(plan.action==='replace'){recordDraftBackup(state,a,plan.backupText,now());await save();}
         if(!transport.connected||state.emergencyStopped||a.sessionId!==state.sessionId||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))throw Object.assign(Error('초안 확인 중 발송 준비가 중지되었습니다.'),{code:'EXECUTION_STOPPED'});
         let result;
-        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_PREPARE',target:target(a),delivery:{...delivery(a),...(plan.action==='replace'?{replaceExpectedDraft:plan.replaceExpectedDraft}:{})}});}catch{throw Object.assign(Error('전송용 Discord 탭의 확장 스크립트에 연결하지 못했습니다. 탭을 새로고침하고 연결을 확인하세요.'),{code:'CONTENT_UNAVAILABLE'});}
+        let prepareTimer;
+        try{
+          result=await Promise.race([
+            chrome.tabs.sendMessage(a.tabId,{type:'DICO_PREPARE',target:target(a),delivery:{...delivery(a),...(plan.action==='replace'?{replaceExpectedDraft:plan.replaceExpectedDraft}:{})}}),
+            new Promise((_,reject)=>{prepareTimer=setTimeout(()=>reject(Object.assign(Error('입력 준비 응답이 지연되어 초안을 보존하고 준비 권한을 취소했습니다.'),{code:'PREPARE_TIMEOUT'})),20000);})
+          ]);
+        }catch(error){
+          // PREPARE cannot press Enter. Revoke its local authorization before
+          // releasing the lane; a late response must never request a permit.
+          a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true};await save();
+          throw Object.assign(Error('전송용 Discord 탭의 입력 준비 응답을 확인하지 못했습니다. 초안을 보존합니다.'),{code:error?.code==='PREPARE_TIMEOUT'?'PREPARE_TIMEOUT':'CONTENT_UNAVAILABLE'});
+        }finally{clearTimeout(prepareTimer);}
         if(result?.status!=='prepared')throw Object.assign(Error(result?.error || '입력 준비 결과를 확인하지 못했습니다.'),{code:/^[A-Z][A-Z0-9_]{0,63}$/.test(result?.code||'')?result.code:'PREPARE_REJECTED'});
         a.phase='prepared';await save();
       }
@@ -220,14 +235,27 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     } else throw Error('지원하지 않는 중앙 명령입니다.');
     state.processed[c.id]=true;state.lastError=null;await save();
   }
-  async function handleCommand(c) {
+  function handleCommand(c) {
+    // Native push and heartbeat can deliver the same command while its content
+    // response is pending. Coalesce before enqueueing, including during load.
+    const commandKey=`${c?.sessionId}:${c?.id}`;
+    if(commandJobs.has(commandKey))return commandJobs.get(commandKey);
     if(c?.type==='CONTROL'){volatileStops.add(c.payload?.groupId);if(c.payload?.runId)volatileStoppedRuns.add(c.payload.runId);}
-    inFlight++;try {await load();const key=c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
-    const job=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
-      state.lastError=String(error.message || error).slice(0,250);await save();
-      if(c.sessionId===state.sessionId)try{await ack(c,'rejected',{rejectionCode:/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`});}catch{}
-    });lanes.set(key,job);await job;
-    }finally{inFlight--;} 
+    const job=(async()=>{
+      inFlight++;try {await load();const key=c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
+      const lane=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
+        state.lastError=String(error.message || error).slice(0,250);
+        // Rejection is terminal too. Persist before ACK so already queued or
+        // replayed commands cannot replace the original cause with PREPARE_FAILED.
+        const rejectionCode=/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`;
+        state.processed[c.id]={status:'rejected',rejectionCode};await save();
+        if(c.sessionId===state.sessionId)try{await ack(c,'rejected',{rejectionCode});}catch{}
+      });lanes.set(key,lane);await lane;
+      }finally{inFlight--;}
+    })();
+    commandJobs.set(commandKey,job);
+    void job.finally(()=>{if(commandJobs.get(commandKey)===job)commandJobs.delete(commandKey);}).catch(()=>{});
+    return job;
   }
   return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,preEnterWait,retryWait,cooldownSample,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
 }

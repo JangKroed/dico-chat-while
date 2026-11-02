@@ -10,6 +10,16 @@
   globalThis.__dicoWhileLoaded = true;
   let busy = false;
   const seenDeliveries = new Set();
+  const managedTiming=target=>target?.managed===true&&target?.coordinated===true;
+  async function deliveryDelay(target,durationMs){
+    if(!managedTiming(target))return new Promise(resolve=>setTimeout(resolve,durationMs));
+    // Hidden Chromium tabs can throttle chained page timers to once a minute.
+    // The extension worker supplies bounded wakeups; every resumed operation
+    // still checks the editor, clock, target and current send authorization.
+    const response=await chrome.runtime.sendMessage({type:'DICO_DELAY',durationMs});
+    if(response?.ok!==true)throw Object.assign(Error('전송 창의 대기 연결이 끊겼습니다.'),{code:'MANAGED_DELAY_UNAVAILABLE'});
+  }
+
   const normalize = text => text.replace(/\r\n/g, '\n').replace(/\u200b/g, '').replace(/(\p{Emoji})\uFE0F/gu, '$1').trim();
   // Support heading/list rendering without weakening author or freshness checks.
   const comparableLines = text => normalize(text).split('\n').map(line => line.trim()).filter(Boolean).join('\n');
@@ -226,7 +236,7 @@
       if(seconds!==null) break;
       try {
         icon.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));
-        await new Promise(resolve=>setTimeout(resolve,250));
+        await deliveryDelay(target,250);
         seconds=read(icon);
         if(seconds===null) for(const tooltip of document.querySelectorAll('[role="tooltip"]')) {
           if(tooltip.getClientRects().length>0) seconds=parseSlowmodeSetting(tooltip.textContent);
@@ -288,7 +298,10 @@
       } else if(!seen && elapsed>10000)return finish('inconclusive');
     };
     cooldownProbeCancel=()=>{done=true;clearInterval(timer);};
-    timer=setInterval(check,500);check();
+    if(managedTiming(target)){
+      void(async()=>{while(!done){await deliveryDelay(target,500);if(!done)check();}})().catch(()=>finish('inconclusive'));
+    }else timer=setInterval(check,500);
+    check();
   }
   function inspect(target) {
     if (!target || !matchesTarget(target)) return { ok: false, code:'TARGET_MISMATCH', error: '선택한 Discord 채널과 현재 페이지가 다릅니다.' };
@@ -368,7 +381,7 @@
       return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
-  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false) {
+  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false, managed = false) {
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
@@ -405,7 +418,7 @@
         if(matchesRenderedText(text,messageText(old)) && matchesRenderedText(text,messageText(fresh))){replacementNodes.add(fresh);evidence.linkedReplacementCount=(evidence.linkedReplacementCount || 0)+1;}
       }
     };
-    let observer, timer, poll, resolve, latest, finished = false;
+    let observer, timer, poll, resolve, latest, deadline=null, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
     let promise = new Promise(done => { resolve = done; });
@@ -417,7 +430,7 @@
       const deliveryEvidence=Object.fromEntries(fields.map(key=>[key,evidence[key]===true]));
       if(typeof value.deliveryEvidence?.composerRetained==='boolean')deliveryEvidence.composerRetained=value.deliveryEvidence.composerRetained;
       if(finished){observer?.disconnect();clearInterval(poll);}
-      clearTimeout(timer);latest={...value,deliveryEvidence};resolve(latest);
+      clearTimeout(timer);deadline=null;latest={...value,deliveryEvidence};resolve(latest);
     };
     const currentEditor = () => editor.isConnected ? editor : editors()[0];
     const check = () => {
@@ -477,8 +490,7 @@
     observer = new MutationObserver(records=>{linkReplacements(records);check();});
     observer.observe(document.querySelector('main') || document.body, {subtree:true,childList:true,characterData:true,attributes:true});
     // Read-only checks: no additional Enter, reload or retransmission.
-    poll = setInterval(check, 500);
-    const armTimeout = () => { timer = setTimeout(() => {
+    const expire = () => {
       check();
       const liveEditor = currentEditor();
       const retained = liveEditor && composerMatches(liveEditor,text);
@@ -486,8 +498,12 @@
       finish({status:retryDraft ? 'draft-retained' : 'uncertain',code:retryDraft?'DELIVERY_DRAFT_RETAINED':'DELIVERY_CONFIRMATION_TIMEOUT',deliveryEvidence:{composerRetained:Boolean(retained)},error:liveEditor && normalize(editorText(liveEditor))
         ? '전송 후 입력창에 문구가 남아 있습니다. 실제 게시 여부와 초안을 확인하세요.'
         : `25초 동안 발송 완료를 확인하지 못했습니다. ${detail} 실제 게시 여부를 확인하세요.`});
-    }, submissionOnly ? 3000 : 25000); };
+    };
+    const armTimeout=()=>{deadline=Date.now()+(submissionOnly?3000:25000);if(!managed)timer=setTimeout(expire,submissionOnly?3000:25000);};
     armTimeout();
+    if(managed){
+      void(async()=>{while(!finished){await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;if(deadline!==null&&Date.now()>=deadline)expire();else check();}})().catch(()=>finish({status:'uncertain',code:'MANAGED_DELAY_UNAVAILABLE',error:'관찰 연결이 끊겨 초안과 발송 기록을 보존합니다.'}));
+    }else poll=setInterval(check,500);
     return {
       get promise(){return promise;},
       // Preserve the original history baseline and observation across retry
@@ -599,13 +615,13 @@
         if(currentSelection){range.selectNodeContents(editor);range.collapse(false);currentSelection.removeAllRanges();currentSelection.addRange(range);}
         report('editor-recovered',{failedChecks:lastFailedChecks,failureCounts});
         stableSince=null;
-        await new Promise(resolve=>setTimeout(resolve,100));continue;
+        await deliveryDelay(target,100);continue;
       }
       if(!lastFailedChecks.length) {
         stableSince ??=Date.now();maxStableMs=Math.max(maxStableMs,Date.now()-stableSince);
         if(maxStableMs>=duration)return true;
       } else stableSince=null;
-      await new Promise(resolve=>setTimeout(resolve,100));
+      await deliveryDelay(target,100);
     }
     return fail();
   }
@@ -635,7 +651,7 @@
       // not authorize Enter; strict authorization is requested after waiting.
       const progress=await chrome.runtime.sendMessage({type:state.retryCount>0?'DICO_RETRY_WAIT':'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',retryCount:state.retryCount||0,elapsedMs:elapsed,cooldownMs:current.cooldownMs,maxWaitMs,enterAttempted:state.retryCount>0});
       if(progress?.allowed!==true)return{status:'blocked',code:'PRE_ENTER_WAIT_CANCELLED',error:'대기 중 발송이 중지되었거나 현재 시도의 연결이 만료되었습니다. 초안을 보존합니다.'};
-      await new Promise(resolve=>setTimeout(resolve,500));
+      await deliveryDelay(target,500);
     }
   }
   async function deliver(target, delivery) {
@@ -648,7 +664,7 @@
     return {...result,deliveryEvidence:{...evidence,...result.deliveryEvidence}};
   }
   async function performDelivery(target, delivery, evidence) {
-    if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
+    if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', ...(delivery?.phase==='prepare'?{code:'PREPARE_BUSY'}:{}), error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
     busy = true;
     let entered = false;
@@ -725,7 +741,7 @@
         selection.addRange(range);
         // Let Slate observe focus/selection before delivering a paste event.
         // Native DOM insertion can leave visible text outside Slate's model.
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await deliveryDelay(target,100);
         result = inspectForDelivery(target,delivery);
         if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
         if (!(await chrome.runtime.sendMessage({ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
@@ -763,7 +779,7 @@
             editorContent(editor).unsupported ? '입력창에 해석하지 못한 요소가 있습니다. 초안을 보존하고 중지합니다. 진단 로그를 확인해 주세요.' :
             !composerMatches(editor,delivery.text) ? '설정 문구와 입력창 내용이 다릅니다. 이모지 표현을 비교한 뒤에도 불일치하여 초안을 보존하고 중지합니다.' :
             '문구는 일치하지만 커서·포커스·조합 입력 상태가 안정되지 않았습니다. 초안을 보존하고 중지합니다.'};
-        } else await new Promise(resolve => setTimeout(resolve,150));
+        } else await deliveryDelay(target,150);
         trace('after-paste', {pastePrevented:paste.defaultPrevented});
         const currentEditors = editors();
         if (currentEditors.length !== 1 || !composerMatches(currentEditors[0],delivery.text)) {
@@ -817,7 +833,7 @@
         }
         cooldownProbeCancel?.();
         enterAt=Date.now();enterMono=globalThis.performance?.now() ?? enterAt;
-        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries>0);
+        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries>0,managedTiming(target));
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
         trace('before-enter');
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
@@ -844,7 +860,7 @@
     } catch(error) {
       trace('exception',{exception:{name:error?.name,message:error?.message,stack:error?.stack}});
       watcher?.cancel();
-      return { status: evidence.enterAttempted || entered ? 'uncertain' : 'blocked',code:evidence.enterAttempted?'CONTENT_EXCEPTION_AFTER_ENTER':'CONTENT_EXCEPTION_BEFORE_ENTER', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
+      return { status: evidence.enterAttempted || entered ? 'uncertain' : 'blocked',code:error?.code==='MANAGED_DELAY_UNAVAILABLE'?'MANAGED_DELAY_UNAVAILABLE':evidence.enterAttempted?'CONTENT_EXCEPTION_AFTER_ENTER':'CONTENT_EXCEPTION_BEFORE_ENTER', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
     } finally { watcher?.stop();busy = false; }
   }
   const messageListener=(message, sender, respond) => {
@@ -867,6 +883,7 @@
     isCurrent(){try{return Boolean(loadedRuntime?.id)&&loadedRuntime.id===chrome.runtime.id;}catch{return false;}},
     dispose(){
       if(busy)return false;
+      cooldownProbeCancel?.();
       try{loadedRuntime?.onMessage.removeListener?.(messageListener);}catch{}
       document.removeEventListener?.('compositionstart',compositionStart,true);
       document.removeEventListener?.('compositionend',compositionEnd,true);

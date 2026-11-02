@@ -21,6 +21,7 @@ export class ApiError extends Error {
   constructor(message:string,status:number,code?:string) { super(message);this.status=status;this.code=code }
 }
 const requestErrorGuidance:Record<string,string> = {
+  WINDOW_SEPARATION_PARTIAL:'창 분리를 완료하지 못했습니다. 이미 이동한 탭과 초안은 유지됩니다. 전송 창 상태를 확인한 뒤 다시 분리해 주세요.',
   WINDOW_MANAGEMENT_PENDING:'전송 창 정리가 끝난 뒤 실행해 주세요.',
   VERSION_CONFLICT:'다른 화면에서 변경되었습니다. 입력 내용은 유지됩니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.',
   ACCOUNT_UNVERIFIED:'이 브라우저의 계정 또는 채널 연결이 검증되지 않았습니다. 확장에서 현재 계정을 다시 등록하고, ‘채널 설정’에서 해당 계정·채널을 연결한 뒤 ‘검증됨’을 확인하세요. 계정 등록만으로 채널 연결이 완료되지는 않습니다.',
@@ -40,7 +41,7 @@ const requestErrorGuidance:Record<string,string> = {
   TAB_NOT_FOUND:'연결된 전송 탭을 찾지 못했습니다. 채널 설정에서 해당 계정을 다시 연결해 주세요.',
   MANAGED_TAB_MISSING:'연결된 전송 탭을 찾지 못했습니다. 채널 설정에서 해당 계정을 다시 연결해 주세요.',
   MANAGED_WINDOW_NOT_FOUND:'연결된 전송 창을 찾지 못했습니다. 채널 설정에서 해당 계정을 다시 연결해 주세요.',
-  WINDOW_NOT_DEDICATED:'전송용 창인지 확인할 수 없습니다. 브라우저의 일반 탭은 이동하지 않았습니다. 채널 설정에서 전송 연결을 다시 확인해 주세요.',
+  WINDOW_NOT_DEDICATED:'여러 탭이 있거나 전송용 창인지 확인할 수 없습니다. 계정·브라우저에서 채널별 창 분리를 먼저 실행해 주세요.',
   GROUP_RUNNING:'해당 브라우저에서 실행 중인 그룹을 중지하고 적용 응답을 확인한 뒤 전송 창을 모아 주세요.',
   EXTENSION_UPDATE_REQUIRED:'이 기능을 사용하려면 관리 프로그램과 모든 브라우저의 확장을 같은 최신 버전으로 업데이트한 뒤 다시 연결하세요.'
 }

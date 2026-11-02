@@ -1,3 +1,4 @@
+import {managedPageDelay} from './managed-delay.js';
 import {recoverConnections} from './connection-recovery.js';
 import {BUILD_ID} from './build-info.js';
 import {createExtensionUpdater,ensureManagedContent} from './update.js';
@@ -7,7 +8,7 @@ import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
 import {createCentralExecutor} from './executor.js';
 import {channelTabContext} from './panel-context.js';
-import {createManagedWindow,createManagedWindowController} from './managed-windows.js';
+import {createManagedWindow,createManagedWindowController,ensureSeparateManagedWindow} from './managed-windows.js';
 import {createObservationQueue,createSingleFlight,observeManagedChannel,observeRegisteredAccount} from './observation-queue.js';
 
 const windowController=createManagedWindowController({chrome});
@@ -82,7 +83,7 @@ async function publishObservation(snapshot){
 }
 async function restoreSavedConnections(){
   const sessionId=executor.state.sessionId;
-  await recoverConnections({chrome,state:executor.state,findAccount:currentAccount,openChannel:openManagedChannel,
+  await recoverConnections({chrome,state:executor.state,findAccount:currentAccount,openChannel:openManagedChannel,ensureSeparate:separateRecoveredChannel,
     canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
@@ -110,7 +111,7 @@ async function connect() {
       // Same-ID developer upgrades must never reactivate an older scheduler.
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
       const browser=await detectConnectedBrowser(chrome,navigator);
-      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','managed-window-v1','managed-update-v1','early-prepare-v1']});
+      const response=await transport.request({type:'HELLO',protocolVersion:1,instanceId:executor.state.instanceId || undefined,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1']});
       await executor.setSession(response);
       for(const command of response.commands || [])void executor.handleCommand(command);
       await refreshManagedContent();
@@ -123,8 +124,15 @@ async function connect() {
 function openManagedChannel(p){
   const next=channelOpening.then(()=>openManagedChannelNow(p));channelOpening=next.catch(()=>{});return next;
 }
+async function separateRecoveredChannel(record){
+  const next=channelOpening.then(async()=>{
+    if(!transport.connected||executor.state?.emergencyStopped||!executor.beginMaintenance())throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 창을 분리하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    try{return await ensureSeparateManagedWindow(chrome,record);}finally{executor.endMaintenance();}
+  });
+  channelOpening=next.catch(()=>{});return next;
+}
 async function manageChannelWindow(p){
-  if(p.action!=='consolidate')return windowController(p);
+  if(!['consolidate','separate'].includes(p.action))return windowController(p);
   const next=channelOpening.then(async()=>{
     if(Object.values(executor.state.attempts).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 창을 정리하세요.'),{code:'ATTEMPT_UNRESOLVED'});
     return windowController(p);
@@ -170,6 +178,7 @@ async function bindActive(windowId) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id)return false;
+  if(message?.type==='DICO_DELAY'){void managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id}).then(respond).catch(()=>respond({ok:false}));return true;}
   if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.preEnterWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.retryWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){executor.canSend(message,sender.tab.id).then(allowed=>respond({allowed,authorizedAt:Date.now(),maxAgeMs:2000})).catch(()=>respond({allowed:false}));return true;}

@@ -170,6 +170,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(current&&Number.isFinite(binding.observedAt)&&binding.observedAt>=rejectedAt&&binding.observedAt<=now())reasonCode='connection_reverified';
           else{block='CONNECTION_STALE';message='거절 이후 현재 브라우저 세션에서 연결을 확인한 기록이 필요합니다. 전송용 Discord 창을 열고 채널 관리에서 다시 연결한 뒤 재확인하세요.';}
         }
+      }else if(i.code==='command_rejected'&&type==='MANAGE_WINDOW'){
+        const payload=c?.payload,action=payload?.action;
+        const label=({reveal:'전송 창 보기',hide:'전송 창 숨기기',consolidate:'전송 창 모으기',separate:'채널별 창 분리'})[action]||'전송 창 관리';
+        block='WINDOW_ACTION_REQUIRED';message=`채널 설정에서 해당 계정·채널의 ‘${label}’를 다시 요청하고 적용을 확인한 뒤 재검사하세요. 전송 탭을 찾지 못하면 해당 채널을 다시 연결하세요.`;page='channels';
+        const routed=c?.type==='MANAGE_WINDOW'&&['reveal','hide','consolidate','separate'].includes(action)&&[c.instanceId,payload?.bindingId,payload?.accountId,payload?.guildId,payload?.channelId].every(value=>typeof value==='string'&&value.length>0)&&(!i.instanceId||i.instanceId===c.instanceId);
+        const rejectedTimes=[i.createdAt,i.lastSeenAt,c?.rejectedAt].filter(Number.isFinite),rejectedAt=rejectedTimes.length?Math.max(...rejectedTimes):NaN;
+        // Channel verification and delivery success cannot prove a window action.
+        // Require a later applied request for this exact browser, action and target.
+        if(routed&&Number.isFinite(rejectedAt)&&state.commands.some(next=>next.id!==c.id&&next.type==='MANAGE_WINDOW'&&next.instanceId===c.instanceId&&next.status==='applied'&&next.createdAt>=rejectedAt&&Number.isFinite(next.appliedAt)&&next.appliedAt>=next.createdAt&&next.appliedAt<=now()&&['action','bindingId','accountId','guildId','channelId'].every(key=>next.payload?.[key]===payload[key])))reasonCode='window_action_applied';
       }else if(i.code==='command_rejected'&&type==='CONTROL'){
         const active=state.attempts.some(a=>a.groupId===groupId&&ACTIVE.has(a.status));
         if(active||g?.activeAttemptId){block='ATTEMPT_UNRESOLVED';message='그룹의 전송 결과 확인이 아직 필요합니다.';page='history';}
@@ -228,7 +237,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const key of keys)if(!state.locks.some(l=>l.key===key))state.locks.push({key,groupId:g.id});
   }
   function eligibleChannel(c){
-    ensure(!state.commands.some(cmd=>cmd.type==='MANAGE_WINDOW'&&cmd.instanceId===c.instanceId&&cmd.payload.action==='consolidate'&&['queued','received'].includes(cmd.status)),'WINDOW_MANAGEMENT_PENDING','전송 창 정리가 끝난 뒤 실행하세요.',409);
+    ensure(!state.commands.some(cmd=>cmd.type==='MANAGE_WINDOW'&&cmd.instanceId===c.instanceId&&['consolidate','separate'].includes(cmd.payload.action)&&['queued','received'].includes(cmd.status)),'WINDOW_MANAGEMENT_PENDING','전송 창 정리가 끝난 뒤 실행하세요.',409);
     const i=get('instances',c.instanceId);ensure(i.connected&&now()-i.lastSeenAt<=15000,'CONNECTION_LOST','Connect this browser before starting.',409);
     ensure(i.legacyFrozen===true&&i.legacyPending===false,'LEGACY_UNRESOLVED','Legacy execution must be frozen and pending attempts resolved.',409);
     ensure(c.verified&&c.sessionId===i.sessionId,'ACCOUNT_UNVERIFIED','Verify the account and channel in this browser.',409);
@@ -265,6 +274,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(Number.isFinite(confirmationMs)&&confirmationMs>=0)a.confirmationMs=Math.min(confirmationMs,86_400_000);
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
     if(outcome==='confirmed'){
+      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;
       g.cursor=(g.cursor+1)%g.members.length;g.lastConfirmedAt=now();g.nextMono=monotonicNow()+g.intervalMs;
       c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.lastConfirmedAttemptId=a.id;c.lastConfirmationMs=Number.isFinite(a.confirmationMs)&&a.confirmationMs<=30000?a.confirmationMs:0;c.nextMono=c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c);
     }
@@ -273,6 +283,27 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(c.pendingPlaylist){applyPlaylist(c,c.pendingPlaylist);delete c.pendingPlaylist;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
     if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){g.status='paused';release(g);}
     event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual});return a;
+  }
+  function failPreparation(a,reasonCode){
+    if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
+    const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
+    const transient=['MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
+    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&retryCount<(a.maxSendRetries??5);
+    // Only the service can issue a COMMIT permit. No permit means this attempt
+    // cannot press Enter, even if its PREPARE response arrives after timeout.
+    a.reasonCode=reasonCode;a.executionBlocked=true;finish(a,'not_sent');
+    if(canRetry){
+      g.prepareRetryCount=retryCount+1;g.prepareRetryAfterMono=monotonicNow()+5000;
+      g.waitReason='preparation_retry';g.nextEligibleAt=now()+5000;
+      event('delivery.prepare_retry',{attemptId:a.id,groupId:g.id,reasonCode,retryCount:g.prepareRetryCount},'warning');
+    }else if(wasRunning){
+      g.status='paused';g.waitReason='preparation_failed';g.nextEligibleAt=null;release(g);
+      const cmd=state.commands.find(c=>c.type==='PREPARE'&&c.payload.attemptId===a.id);
+      // This is a preparation failure with a known unsent outcome, not an
+      // unresolved delivery. One final incident is enough after bounded retry.
+      incident('command_rejected',{instanceId:a.instanceId,commandId:cmd?.id,commandType:'PREPARE',groupId:g.id,attemptId:a.id,rejectionCode:reasonCode});
+    }
+    return true;
   }
   function restoreConfirmedDeadlines(){
     const wall=now(),mono=monotonicNow();
@@ -294,7 +325,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       restoreConfirmedDeadlines();
     }
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
-    g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
+    delete g.prepareRetryCount;delete g.prepareRetryAfterMono;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
   }
   function execute(action,p={}){return transact(()=>{
     switch(action){
@@ -310,15 +341,16 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const [,guildId,channelId]=/^https:\/\/discord\.com\/channels\/(\d+)\/(\d+)\/?$/.exec(p.url);
         return upsertTarget(guildId,channelId,p.name===undefined?undefined:text(p.name,'name'));
       }
-      case 'channel.reveal':case 'channel.hide':case 'channel.consolidate':{
+      case 'channel.reveal':case 'channel.hide':case 'channel.consolidate':case 'channel.separate':{
         const channel=get('channels',p.id),instance=get('instances',channel.instanceId);
         ensure(instance.connected&&now()-instance.lastSeenAt<=15000,'CONNECTION_LOST','Connect this browser first.',409);
         ensure(instance.capabilities?.includes('managed-window-v1'),'EXTENSION_UPDATE_REQUIRED','전송 창 관리를 지원하는 확장으로 업데이트하세요.',409);
         ensure(Number.isInteger(channel.tabId)&&channel.sessionId===instance.sessionId,'MANAGED_TAB_MISSING','기존 전송용 탭을 찾지 못했습니다. 채널 연결 상태를 확인하세요.',409);
         const windowAction=action.slice('channel.'.length);
-        if(windowAction==='consolidate'){
-          ensure(!state.attempts.some(a=>a.instanceId===instance.id&&ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','발송을 중지하고 미확인 결과를 정리한 뒤 창을 모으세요.',409);
-          ensure(state.groups.filter(g=>g.members.some(member=>get('channels',member).instanceId===instance.id)).every(g=>['stopped','paused'].includes(g.status)&&!g.controlIntent),'GROUP_RUNNING','해당 브라우저의 그룹을 중지한 뒤 창을 모으세요.',409);
+        if(windowAction==='separate')ensure(instance.capabilities?.includes('managed-window-separation-v1'),'EXTENSION_UPDATE_REQUIRED','채널별 창 분리를 지원하는 확장으로 업데이트하세요.',409);
+        if(['consolidate','separate'].includes(windowAction)){
+          ensure(!state.attempts.some(a=>a.instanceId===instance.id&&ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','발송을 중지하고 미확인 결과를 정리한 뒤 전송 창을 정리하세요.',409);
+          ensure(state.groups.filter(g=>g.members.some(member=>get('channels',member).instanceId===instance.id)).every(g=>['stopped','paused'].includes(g.status)&&!g.controlIntent),'GROUP_RUNNING','해당 브라우저의 그룹을 중지한 뒤 전송 창을 정리하세요.',409);
         }
         const pending=state.commands.find(c=>c.type==='MANAGE_WINDOW'&&c.instanceId===instance.id&&c.sessionId===instance.sessionId&&c.payload.bindingId===channel.id&&c.payload.action===windowAction&&['queued','received'].includes(c.status));
         const queued=pending||command('MANAGE_WINDOW',instance.id,{action:windowAction,bindingId:channel.id,accountId:channel.accountId,guildId:channel.guildId,channelId:channel.channelId,tabId:channel.tabId});
@@ -671,7 +703,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(message.type==='ACK'){
         const c=get('commands',message.commandId);ensure(c.instanceId===i.id&&c.sessionId===i.sessionId,'STALE_COMMAND','Command belongs to a different instance or session.',409);
         ensure(['received','applied','rejected'].includes(message.status),'VALIDATION','Invalid command acknowledgment.');
-        if(['completed','superseded'].includes(c.status)||c.status==='applied'&&message.status==='received')return{ok:true};
+        if(['completed','superseded'].includes(c.status)||c.status==='rejected'&&message.status==='rejected'||c.status==='applied'&&message.status==='received')return{ok:true};
         ensure(!(c.status==='rejected'&&message.status!=='rejected'),'COMMAND_REJECTED','Rejected command cannot later be applied.',409);
         c.status=message.status;c[`${message.status}At`]=now();
         if(message.status==='applied'&&c.type==='CONFIG_SYNC'){
@@ -687,8 +719,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.status==='rejected'){
           const rejectionCode=typeof message.rejectionCode==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(message.rejectionCode)?message.rejectionCode:undefined;
           if(rejectionCode)c.rejectionCode=rejectionCode;else delete c.rejectionCode;
-          incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
-          if(c.payload.attemptId){const a=get('attempts',c.payload.attemptId);if(ACTIVE.has(a.status))markUnknown(a,rejectionCode||'command_rejected');}
+          const attempt=c.payload.attemptId?get('attempts',c.payload.attemptId):null;
+          if(!(c.type==='PREPARE'&&attempt&&failPreparation(attempt,rejectionCode||'PREPARE_REJECTED'))){
+            incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
+            if(attempt&&ACTIVE.has(attempt.status))markUnknown(attempt,rejectionCode||'command_rejected');
+          }
         }
         event('command.ack',{commandId:c.id,instanceId:i.id,status:c.status,...(c.rejectionCode?{rejectionCode:c.rejectionCode}:{})});return{ok:true};
       }
@@ -725,7 +760,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.executionBlocked===true)a.executionBlocked=true;
         if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
         if(message.outcome==='unknown'){
-          const allowedReasons=new Set(['draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+          const allowedReasons=new Set(['MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
@@ -774,13 +809,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const a of state.attempts.filter(a=>['preparing','permitted'].includes(a.status))){
       const absoluteWait=a.sendRetryCount?MAX_SEND_RETRY_ELAPSED_MS:MAX_PRE_ENTER_WAIT_MS;
       const stale=a.status==='preparing'&&a.earlyPrepare?wall-a.createdAt>MAX_PRE_ENTER_WAIT_MS||wall-(a.preparedObservedAt||a.createdAt)>30000:a.preEnterWaiting?wall-a.permittedAt>absoluteWait||wall-(a.preEnterWaitObservedAt||a.permittedAt)>30000:wall-a.permittedAt>absoluteWait||wall-(a.retryObservedAt||a.enterReadyAt||a.permittedAt||a.createdAt)>30000;
-      if(stale)markUnknown(a,'result_timeout');
+      if(stale&&!failPreparation(a,'PREPARE_TIMEOUT'))markUnknown(a,'result_timeout');
     }
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
     if(state.service.status!=='ready')return{ok:true};
     for(const g of state.groups.filter(g=>g.status==='running'&&!g.activeAttemptId&&!g.controlIntent)){
       const c=get('channels',g.members[g.cursor]);
       try{eligibleChannel(c);}catch(error){g.waitReason=error.code.toLowerCase();g.nextEligibleAt=null;continue;}
+      if(monotonicNow()<(g.prepareRetryAfterMono||0)){g.waitReason='preparation_retry';g.nextEligibleAt=wall+(g.prepareRetryAfterMono-mono);continue;}
       const due=Math.max(g.nextMono||0,c.nextMono||0),earlyPrepare=get('instances',c.instanceId).capabilities?.includes('early-prepare-v1')===true;
       if(mono<due-(earlyPrepare?5000:0)){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
       const item=c.playlist[c.playlistIndex%c.playlist.length],m=get('messages',item.messageId),revision=m.revisions.find(r=>r.id===item.revisionId);

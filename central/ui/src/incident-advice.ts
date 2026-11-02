@@ -35,6 +35,19 @@ remedies.DRAFT_BACKUP_INVALID={...remedies.DRAFT_MISMATCH,title:'기존 초안�
 remedies.COOLDOWN_WAIT_TIMEOUT={...remedies.COOLDOWN_UNVERIFIED,title:'Discord 제한 해제 대기가 만료됐습니다',cause:'지원하는 대기 시간을 넘겨 초안과 현재 차례를 보존하고 멈췄습니다.'}
 remedies.PRE_ENTER_WAIT_CANCELLED={...remedies.EXECUTION_STOPPED,title:'발송 대기 중 실행이 차단됐습니다',cause:'중지·연결·세션·설정 상태가 바뀌어 Enter 전에 실행을 차단했습니다.'}
 remedies.OPEN_CHANNEL_UNSUPPORTED=remedies.EXTENSION_UPDATE_REQUIRED
+remedies.PREPARE_FAILED={title:'Discord 입력 준비를 완료하지 못했습니다',cause:'확장이 입력 준비 중 오류를 보고했습니다. 이 코드에는 상세 내부 원인이 기록되지 않았습니다.',steps:['아래 대상의 ‘전송 창 보기’를 눌러 로그인 계정·채널과 입력창을 확인하세요.','다른 초안·첨부·답장이 있으면 필요한 내용을 보관한 뒤 정리하고, 채널 설정에서 메시지 적용 상태를 확인하세요.','실행 기록에서 해당 시도의 최종 결과를 확인하세요. 미확인 상태이면 실제 게시 내역 확인 전에는 다시 보내지 마세요.'],page:'channels',actionLabel:'입력 준비 상태 확인'}
+remedies.PREPARE_REJECTED={...remedies.PREPARE_FAILED,title:'Discord 입력 준비 확인이 거절됐습니다',cause:'전송용 탭에서 입력 준비 완료를 확인하지 못했습니다. 이 코드만으로 계정·초안·대기 상태 중 어느 항목이 원인인지는 알 수 없습니다.'}
+
+function windowAdvice(action:string|undefined,rejectionCode:string|undefined):Remedy {
+  const label=({reveal:'전송 창 보기',hide:'전송 창 숨기기',consolidate:'전송 창 모으기',separate:'채널별 창 분리'} as Record<string,string>)[action||'']||'전송 창 관리'
+  const missing=['WINDOW_NOT_FOUND','TAB_NOT_FOUND','MANAGED_TAB_MISSING','MANAGED_WINDOW_NOT_FOUND'].includes(rejectionCode||'')
+  return {title:`${label}를 완료하지 못했습니다`,cause:missing?'연결된 전송용 탭 또는 창을 찾지 못했습니다.':rejectionCode==='MANAGE_WINDOW_FAILED'?`브라우저가 ‘${label}’ 요청을 완료하지 못했습니다. 상세 내부 오류는 기록되지 않았습니다.`:'전송 창 관리 요청이 거절됐습니다. 상세 거절 사유가 기록되지 않았습니다.',steps:[
+    '아래 대상 브라우저가 켜져 있고 DICO 확장이 관리 프로그램에 연결되어 있는지 확인하세요.',
+    ...(['consolidate','separate'].includes(action||'')?['해당 브라우저의 그룹을 중지하고 적용 확인을 기다리세요. 미확인 발송은 실제 게시 내역을 확인한 뒤 실행 기록에서 처리하세요.']:[]),
+    `채널 설정에서 아래 계정·채널의 ‘${label}’를 다시 요청하세요. 전송 탭을 찾지 못하면 해당 계정·채널을 다시 연결하세요.`,
+    '요청이 적용된 뒤 이 알림의 ‘해결 상태 재검사’를 누르세요. 창 요청의 적용 응답으로 지난 오류를 정리합니다.'
+  ],page:'channels',actionLabel:'전송 창 상태 확인'}
+}
 
 export function isIncidentOpen(i:Incident) {return !i.resolvedAt&&!['resolved','closed'].includes(String(i.status||''))}
 export function incidentState(i:Incident) {return `${isIncidentOpen(i)?'미해결':'해결됨'} · ${i.readAt||i.read?'읽음':'읽지 않음'}`}
@@ -52,11 +65,12 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
   const target=s.targets?.find(t=>t.id===targetId||Boolean(guildId&&channelId&&t.guildId===guildId&&t.channelId===channelId))
   const accountId=text(i.accountId)||text(payload?.accountId)||binding?.accountId||attempt?.accountId
   const affected=[...(instance?['브라우저: '+instance.name]:instanceId?['브라우저: '+instanceId]:[]),...(accountId?['계정: '+accountLabel(s,{accountId,instanceId})]:[]),...(groups.length?groups.map(g=>'그룹: '+g.name):groupId?['그룹: '+groupId]:[]),...(target?['채널: #'+target.name]:binding?['채널: #'+binding.name]:channelId?['채널 ID: '+channelId]:[])]
-  const commandType=text(i.commandType)||text(command?.type),rejectionCode=text(i.rejectionCode)||text(command?.rejectionCode)
+  const commandType=text(i.commandType)||text(command?.type),rejectionCode=text(i.rejectionCode)||text(command?.rejectionCode)||(commandType==='PREPARE'&&attempt?.reasonCode&&remedies[attempt.reasonCode]?attempt.reasonCode:undefined)
   let remedy:Remedy,knownReason=false
   if(i.code==='command_rejected'){
     const known=rejectionCode?remedies[rejectionCode]:undefined
-    if(known){remedy={...known};knownReason=true;if(rejectionCode==='COOLDOWN_UNVERIFIED'&&binding&&typeof binding.slowmodeObservedAt==='number')remedy.cause+=` 마지막으로 감지한 슬로우 모드는 ${Math.ceil(binding.slowmodeMs/1000)}초이며, 현재 남은 대기 시간을 확인했다는 뜻은 아닙니다.`}
+    if(commandType==='MANAGE_WINDOW'&&!known){remedy=windowAdvice(text(payload?.action),rejectionCode);knownReason=['MANAGE_WINDOW_FAILED','WINDOW_NOT_FOUND','TAB_NOT_FOUND','MANAGED_TAB_MISSING','MANAGED_WINDOW_NOT_FOUND'].includes(rejectionCode||'')}
+    else if(known){remedy={...known};knownReason=true;if(rejectionCode==='COOLDOWN_UNVERIFIED'&&binding&&typeof binding.slowmodeObservedAt==='number')remedy.cause+=` 마지막으로 감지한 슬로우 모드는 ${Math.ceil(binding.slowmodeMs/1000)}초이며, 현재 남은 대기 시간을 확인했다는 뜻은 아닙니다.`}
     else if(commandType==='CONTROL')remedy={title:'중지·일시정지 적용을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 제어 명령이 적용되지 않았으므로 중지 완료로 판단할 수 없습니다.',steps:controlSteps,page:'groups',actionLabel:'그룹·중지 상태 확인'}
     else remedy={title:'확장 요청을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 현재 기록만으로 초안·계정·버전 등의 원인을 단정할 수 없습니다.',steps:['아래 대상 브라우저와 확장 상태를 확인하세요.','진행 중·미확인 시도가 있으면 전체 중지를 요청하고 실제 Discord 게시 내역을 확인하세요. 중지만으로 미발송 여부를 판단하지 마세요.','관리 프로그램과 모든 확장을 업데이트하고 필요한 초안을 보관한 뒤 Discord를 새로고침하세요. 같은 문제가 반복되면 새로 기록된 거절 사유를 확인하세요.'],page:attempt?.status==='unknown'?'history':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'channels':'connections',actionLabel:attempt?.status==='unknown'?'미확인 실행 기록 확인':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'채널·적용 상태 확인':'계정·브라우저 확인'}
   }else if(i.code==='delivery_unknown'){
@@ -77,6 +91,10 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
     remedy={title:'설정을 저장하는 데 문제가 있습니다',cause:'관리 프로그램이 로컬 데이터를 정상적으로 저장하지 못했습니다.',steps:['새 발송을 시작하지 말고 설정·도움말의 설치 진단을 확인하세요.','저장 공간과 데이터 폴더 접근 권한을 확인하세요.','진행 중·미확인 발송이 있으면 실제 Discord 게시 여부도 확인하세요.'],page:'settings',actionLabel:'설치·저장 환경 확인'};knownReason=true
   }else{
     remedy={title:i.title||'확인할 문제가 있습니다',cause:i.description||i.message||'서비스에 확인이 필요한 상태가 기록되었습니다. 상세 정보와 대상 상태를 확인하세요.',steps:['관련 브라우저·그룹 상태와 최근 로그를 확인하세요.','미확인 발송은 실제 Discord 게시 내역을 확인하기 전까지 다시 보내지 마세요.'],page:attemptId?'history':'settings',actionLabel:attemptId?'관련 실행 기록 확인':'설치·서비스 상태 확인'}
+  }
+  if(i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(commandType||'')&&['confirmed','not_sent','cancelled'].includes(attempt?.status||'')){
+    const outcome=attempt?.status==='confirmed'?'게시 확인':attempt?.status==='not_sent'?'미발송':'취소'
+    remedy={...remedy,cause:`${remedy.cause} 관련 시도는 현재 ${outcome}으로 확정되어 있습니다.`,steps:['‘해결 상태 재검사’를 눌러 확정된 시도의 지난 알림을 정리하세요.',...remedy.steps]}
   }
   return {...remedy,knownReason,affected,commandType,rejectionCode}
 }

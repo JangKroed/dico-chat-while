@@ -76,3 +76,31 @@ test('cooldown and prepare timeout rejections explain recovery without declaring
   assert.equal(timeout.knownReason,true);assert.equal(timeout.page,'groups');assert.match(timeout.cause,/대기.*시간 변화/);
   for(const advice of [cooldown,timeout])assert.ok(advice.steps.some(step=>step.includes('다시 보내지 마세요')));
 });
+
+test('failed window reveal uses the recorded operation and routes to the exact channel recovery',()=>{
+  const s=snapshot();s.channels=[{id:'binding',name:'모집방',instanceId:'browser',accountId:'123',guildId:'guild',channelId:'channel'}];
+  s.commands=[{id:'command',instanceId:'browser',type:'MANAGE_WINDOW',rejectionCode:'MANAGE_WINDOW_FAILED',payload:{action:'reveal',bindingId:'binding'}}];
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',commandId:'command'},s);
+  assert.equal(advice.page,'channels');assert.equal(advice.knownReason,true);assert.match(advice.title,/전송 창.*보기/);
+  assert.ok(advice.steps.some(step=>step.includes('전송 창 보기')));
+  assert.ok(advice.steps.some(step=>step.includes('해결 상태 재검사')));
+  assert.ok(advice.steps.every(step=>!step.includes('전체 중지')));
+  assert.ok(advice.affected.includes('채널: #모집방'));
+});
+
+test('window reorganization guidance requires stop while unknown reveal errors remain honest',()=>{
+  const s=snapshot();s.commands=[{id:'command',type:'MANAGE_WINDOW',payload:{action:'separate'}}];
+  const split=incidentAdvice({id:'incident',code:'command_rejected',commandId:'command'},s);
+  assert.equal(split.page,'channels');assert.match(split.title,/분리/);assert.equal(split.knownReason,false);
+  assert.ok(split.steps.some(step=>step.includes('중지')));
+  assert.match(split.cause,/상세.*기록되지/);
+});
+
+test('prepare failures retain phase-specific recovery and a recorded not-sent outcome',()=>{
+  const s=snapshot();s.commands=[{id:'command',type:'PREPARE',payload:{attemptId:'attempt'}}];s.attempts=[{id:'attempt',status:'not_sent',reasonCode:'PREPARE_FAILED'}];
+  const advice=incidentAdvice({id:'incident',code:'command_rejected',commandId:'command'},s);
+  assert.equal(advice.page,'channels');assert.equal(advice.rejectionCode,'PREPARE_FAILED');assert.match(advice.title,/입력 준비/);
+  assert.match(advice.cause,/미발송으로 확정/);assert.ok(advice.steps.some(step=>step.includes('해결 상태 재검사')));
+  s.attempts[0].status='unknown';const unknown=incidentAdvice({id:'incident',code:'command_rejected',commandId:'command'},s);
+  assert.doesNotMatch(unknown.cause,/미발송으로 확정/);
+});

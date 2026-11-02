@@ -477,3 +477,32 @@ test('미확인 전송 표본과 이전 세션·새 시도로 대체된 표본�
  delete r.client.state.attempts.newer;await r.client.setSession({instanceId:'instance',sessionId:'new-session'});
  assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},7),false);
 });
+
+test('duplicate in-flight PREPARE deliveries coalesce and a rejection is durably terminal',async()=>{
+ const r=rig();await configured(r);let release,started;
+ const began=new Promise(resolve=>{started=resolve;});
+ r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);if(m.type==='DICO_DRAFT_INSPECT')return emptyDraft();if(m.type==='DICO_PREPARE'){started();return new Promise(resolve=>{release=resolve;});}throw Error('unexpected message');};
+ const original=r.client.handleCommand(cmd('PREPARE'));await began;
+ const duplicates=Array.from({length:30},()=>r.client.handleCommand(cmd('PREPARE')));
+ release({status:'blocked',code:'PREPARE_EDITOR_UNSTABLE'});await Promise.all([original,...duplicates]);
+ assert.equal(r.reports.filter(x=>x.type==='ACK'&&x.commandId==='PREPARE'&&x.status==='received').length,1);
+ assert.equal(r.reports.filter(x=>x.type==='ACK'&&x.commandId==='PREPARE'&&x.status==='rejected').length,1);
+ assert.equal(r.messages.filter(x=>x.type==='DICO_PREPARE').length,1);
+ const restarted=createCentralExecutor({chrome:r.chrome,transport:r.transport});await restarted.handleCommand(cmd('PREPARE'));
+ assert.equal(r.messages.filter(x=>x.type==='DICO_PREPARE').length,1);
+});
+
+test('a suspended PREPARE response times out, revokes authorization and releases the command lane',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const r=rig();await configured(r);let started,release;
+ const began=new Promise(resolve=>{started=resolve;});
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():new Promise(resolve=>{release=resolve;started();});
+ const job=r.client.handleCommand(cmd('PREPARE'));await began;t.mock.timers.tick(20001);await job;
+ assert.equal(await r.client.canSend({id:'attempt',phase:'prepare'},7),false);
+ assert.equal(r.state.attempts.attempt.phase,'not_sent');
+ assert.equal(r.reports.find(x=>x.type==='ACK'&&x.status==='rejected').rejectionCode,'PREPARE_TIMEOUT');
+ release({status:'prepared'});await Promise.resolve();
+ assert.equal(r.reports.some(x=>x.type==='PREPARED'),false);
+ await r.client.handleCommand({id:'stop-after-timeout',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{action:'stop',groupId:'group',runId:'run',attemptId:'attempt'}});
+ assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='stop-after-timeout'&&x.status==='applied'));
+});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createManagedWindow,createManagedWindowController} from '../central/extension/managed-windows.js';
+import {createManagedWindow,createManagedWindowController,ensureSeparateManagedWindow} from '../central/extension/managed-windows.js';
 const target={accountId:'123456789012345678',guildId:'111',channelId:'222',tabId:7};
 function fixture({record={...target,windowId:8},tab={id:7,windowId:8,url:'https://discord.com/channels/111/222'},seen={...target,verified:true},otherTabs=[]}={}){
  const calls=[];
@@ -40,16 +40,48 @@ test('hide refuses legacy records, migrated tabs and windows shared with ordinar
 test('legacy records may be revealed after current target identity is verified',async()=>{
  const {manage,calls}=fixture({record:target});assert.equal((await manage({...target,action:'reveal'})).visible,true);assert.equal(calls.length,2);
 });
-test('additional channels open inactive tabs in the existing dedicated managed window',async()=>{
+test('additional channels always open their own minimized window',async()=>{
  const {chrome,calls}=fixture();chrome.storage.local.get=async()=>({dicoCentralTabs:[{...target,windowId:8}],dicoCentralWindowId:8});
- chrome.tabs.create=async info=>{calls.push(['createTab',info]);return{id:9,windowId:8};};
- const result=await createManagedWindow(chrome,{...target,channelId:'333'});
- assert.deepEqual(calls,[['createTab',{windowId:8,active:false,url:'https://discord.com/channels/111/333'}]]);assert.equal(result.tabs[0].id,9);
+ chrome.tabs.create=async()=>{throw Error('must not add an inactive sibling tab');};
+ await createManagedWindow(chrome,{...target,channelId:'333'});
+ assert.deepEqual(calls,[['create',{url:'https://discord.com/channels/111/333',type:'normal',focused:false,state:'minimized'}]]);
 });
-test('a dedicated window containing several recorded channel tabs can be hidden',async()=>{
+test('hide refuses shared managed windows until their channels are separated',async()=>{
  const {chrome,manage,calls}=fixture({otherTabs:[{id:9,windowId:8,url:'https://discord.com/channels/111/333'}]});
  chrome.storage.local.get=async()=>({dicoCentralTabs:[{...target,windowId:8},{...target,channelId:'333',tabId:9,windowId:8}]});
- await manage({...target,action:'hide'});assert.deepEqual(calls,[['window',8,{state:'minimized'}]]);
+ await assert.rejects(manage({...target,action:'hide'}),{code:'WINDOW_NOT_DEDICATED'});assert.deepEqual(calls,[]);
+});
+function separationFixture({failMove=false,missing=false,ordinary=false,separate=false}={}){
+ const records=[{...target,windowId:20},{...target,channelId:'333',tabId:9,windowId:20},{...target,channelId:'444',tabId:10,windowId:20}],calls=[];
+ const tabs=new Map(records.map((record,index)=>[record.tabId,{id:record.tabId,windowId:separate?20+index:20,url:`https://discord.com/channels/111/${record.channelId}`,draft:`draft-${record.tabId}`} ]));
+ if(missing)tabs.delete(10);
+ const saved={dicoCentralTabs:structuredClone(records),dicoCentralWindowId:20};let nextWindow=50;
+ const chrome={storage:{local:{get:async()=>structuredClone(saved),set:async data=>Object.assign(saved,structuredClone(data))}},tabs:{get:async id=>{if(!tabs.has(id))throw Error('missing');return {...tabs.get(id)};}},windows:{get:async id=>({id,type:'normal',tabs:[...tabs.values()].filter(tab=>tab.windowId===id).concat(ordinary&&id===20?[{id:99,url:'https://example.com'}]:[])}),create:async info=>{if(failMove&&info.tabId===9){failMove=false;throw Error('closed during move');}calls.push(['create',info]);const id=nextWindow++;tabs.get(info.tabId).windowId=id;return{id,type:'normal',tabs:[{...tabs.get(info.tabId)}]};},update:async(id,info)=>calls.push(['window',id,info])}};
+ return{chrome,saved,calls,tabs,manage:createManagedWindowController({chrome})};
+}
+test('separation moves existing shared tabs into individual windows while retaining tab IDs and drafts',async()=>{
+ const {manage,saved,calls,tabs}=separationFixture();const result=await manage({...target,action:'separate'});
+ assert.equal(result.managedTabs,3);assert.equal(result.windowId,50);
+ assert.deepEqual(calls,[['create',{tabId:7,type:'normal',state:'minimized',focused:false}],['create',{tabId:9,type:'normal',state:'minimized',focused:false}]]);
+ assert.deepEqual(saved.dicoCentralTabs.map(r=>r.windowId),[50,51,20]);
+ assert.deepEqual([...tabs.values()].map(t=>[t.id,t.draft]),[[7,'draft-7'],[9,'draft-9'],[10,'draft-10']]);
+});
+test('separation does not move or minimize ordinary tabs in a shared window',async()=>{
+ const {manage,saved,calls}=separationFixture({ordinary:true});await manage({...target,action:'separate'});
+ assert.deepEqual(saved.dicoCentralTabs.map(r=>r.windowId),[50,51,52]);assert.equal(calls.length,3);
+ assert.ok(calls.every(c=>c[0]==='create'&&c[1].tabId!==99));
+});
+test('separation refuses a missing tab before moving anything',async()=>{
+ const {manage,calls}=separationFixture({missing:true});await assert.rejects(manage({...target,action:'separate'}),{code:'MANAGED_TAB_MISSING'});assert.deepEqual(calls,[]);
+});
+test('partial separation persists each move and safely resumes without recreating moved tabs',async()=>{
+ const r=separationFixture({failMove:true});await assert.rejects(r.manage({...target,action:'separate'}),{code:'WINDOW_SEPARATION_PARTIAL'});
+ assert.deepEqual(r.saved.dicoCentralTabs.map(record=>record.windowId),[50,20,20]);assert.equal(r.calls.length,1);
+ await r.manage({...target,action:'separate'});assert.deepEqual(r.saved.dicoCentralTabs.map(record=>record.windowId),[50,51,20]);assert.equal(r.calls.length,2);
+});
+test('already separate windows remain in place and stale ownership is repaired without focus changes',async()=>{
+ const r=separationFixture({separate:true});await r.manage({...target,action:'separate'});
+ assert.deepEqual(r.calls,[]);assert.deepEqual(r.saved.dicoCentralTabs.map(record=>record.windowId),[20,21,22]);
 });
 function consolidationFixture({failMove=false,missing=false,ordinary=false}={}){
  const records=[{...target},{...target,channelId:'333',tabId:9},{...target,channelId:'444',tabId:10}],calls=[];
@@ -79,9 +111,14 @@ test('consolidation reuses an existing proven managed window without creating a 
  assert.equal(result.windowId,20);assert.deepEqual(calls,[['move',9,20],['move',10,20],['window',20,{state:'minimized'}]]);
  assert.ok(saved.dicoCentralTabs.every(record=>record.windowId===20));
 });
-test('opening a new channel does not reuse a window that now contains ordinary tabs',async()=>{
- const {chrome,calls}=fixture({otherTabs:[{id:99,url:'https://example.com'}]});
- chrome.storage.local.get=async()=>({dicoCentralTabs:[{...target,windowId:8}],dicoCentralWindowId:8});
- await createManagedWindow(chrome,{...target,channelId:'333'});
- assert.equal(calls.length,1);assert.equal(calls[0][0],'create');assert.equal(calls[0][1].state,'minimized');
+
+test('reconnecting a shared channel preserves its tab and only separates that channel',async()=>{
+ const r=separationFixture();assert.equal(await ensureSeparateManagedWindow(r.chrome,target),50);
+ assert.deepEqual(r.saved.dicoCentralTabs.map(record=>record.windowId),[50,20,20]);assert.equal(r.tabs.get(7).draft,'draft-7');
+ assert.equal(await ensureSeparateManagedWindow(r.chrome,target),50);assert.equal(r.calls.length,1);
+ await assert.rejects(ensureSeparateManagedWindow(r.chrome,{...target,channelId:'wrong'}),{code:'MANAGED_TAB_MISSING'});assert.equal(r.calls.length,1);
+});
+test('bulk separation refuses a navigated non-Discord tab before moving any channel',async()=>{
+ const r=separationFixture();r.tabs.get(10).url='https://example.com';
+ await assert.rejects(r.manage({...target,action:'separate'}),{code:'TARGET_MISMATCH'});assert.deepEqual(r.calls,[]);
 });

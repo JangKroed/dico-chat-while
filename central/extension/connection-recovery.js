@@ -1,5 +1,5 @@
 // Restore only previously saved destinations, never infer new channel URLs.
-export async function recoverConnections({chrome,state,findAccount,openChannel,report,canRecover=async()=>true}){
+export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureSeparate=async()=>{},canRecover=async()=>true}){
  const saved=await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']);
  const records=saved.dicoCentralTabs||[];
  const locallySafe=()=>!state.emergencyStopped&&!Object.values(state.attempts||{}).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase));
@@ -21,6 +21,8 @@ export async function recoverConnections({chrome,state,findAccount,openChannel,r
   if(tab){
    let matching=false;try{const url=new URL(tab.url);matching=url.origin==='https://discord.com'&&url.pathname===`/channels/${record.guildId}/${record.channelId}`;}catch{}
    if(!matching){await progress('blocked',completed,'TARGET_MISMATCH');return;}
+   if(!await safe()){await progress('blocked',completed,'ATTEMPT_UNRESOLVED');return;}
+   try{await ensureSeparate(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'WINDOW_SEPARATION_PARTIAL');return;}
   }else{
    if(!await safe()){await progress('blocked',completed,'ATTEMPT_UNRESOLVED');return;}
    try{await openChannel(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'CHANNEL_NOT_READY');return;}

@@ -64,3 +64,12 @@ test('same-attempt retry shows progress instead of a following-turn countdown',(
  assert.equal(accountTimingState({id:'current'},group,{status:'permitted'},60),'전송 재시도 중');
  assert.equal(accountTimingState({id:'next'},group,undefined,60),'차례 대기');
 });
+
+
+test('preparation recovery holds the current account and explains its automatic retry',()=>{
+ const group={status:'running',waitReason:'preparation_retry',members:['current','next'],cursor:0};
+ assert.equal(groupTimingState(group,5),'현재 계정 입력 준비 자동 재시도 중');
+ assert.equal(accountTimingState({id:'current'},group,undefined,5),'현재 계정 입력 준비 자동 재시도 중');
+ assert.equal(accountTimingState({id:'next'},group,undefined,5),'차례 대기');
+ assert.equal(waitReasonText('preparation_failed'),'입력 준비 실패 · 전송 창 확인 필요');
+});

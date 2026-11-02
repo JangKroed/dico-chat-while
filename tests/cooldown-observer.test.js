@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 const source=readFileSync(new URL('../content.js',import.meta.url),'utf8');
-const monitor=source.slice(source.indexOf('  let cooldownProbeCancel'),source.indexOf('  function inspect(target)'));
+const monitor=source.slice(source.indexOf('  const managedTiming='),source.indexOf('  const normalize ='))+source.slice(source.indexOf('  let cooldownProbeCancel'),source.indexOf('  function inspect(target)'));
 function rig(initialCooldown=60000) {
  let clock=0,poll,draft='',matching=true,account=true,cooldown=initialCooldown,known=true,visibleZero=false,wallOffset=0;let editor={};
  const samples=[];

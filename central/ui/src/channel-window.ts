@@ -25,6 +25,11 @@ export function managedWindowAvailable(s:Snapshot,channel:Channel|undefined):boo
   return Boolean(channel?.id&&Number.isInteger(channel.tabId)&&browserOnline(browser)&&Array.isArray(browser?.capabilities)&&browser.capabilities.includes('managed-window-v1'))
 }
 
+export function managedWindowSeparationAvailable(s:Snapshot,channel:Channel|undefined):boolean {
+  const capabilities=s.instances.find(instance=>instance.id===channel?.instanceId)?.capabilities
+  return managedWindowAvailable(s,channel)&&Array.isArray(capabilities)&&capabilities.includes('managed-window-separation-v1')
+}
+
 // Never guess a target window from a group, account, or channel ID. A record
 // can refer to an old or different binding that happens to share those values.
 export function exactRecordedBinding(s:Snapshot,record:{bindingId?:string;attemptId?:string}):Channel|undefined {

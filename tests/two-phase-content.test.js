@@ -6,7 +6,7 @@ import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 import {createCentralManager} from '../central/core/index.js';
 import {createCentralExecutor} from '../central/extension/executor.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,lateCooldown=null,attachment=false,unsupported=false}={}) {
+function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,authorizationLag=0,confirmation=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
@@ -48,9 +48,9 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const delivery={id:'attempt',index:0,text:message,startedAt:clock,scheduledAt:clock+3000};
  const DateMock=class extends Date {static now(){return clock}};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:{origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`},Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
- MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
+ MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
  return {onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{listener(message,{id:'ext'},resolve);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
@@ -438,7 +438,7 @@ test('재시도 쿨다운 중 늦은 성공·모호한 게시·중지는 추가 
 test('실제 content·실행기·코어가 같은 시도에서 쿨다운 후 재시도하고 성공 시 한 번만 차례를 넘긴다',async t=>{
  const guildId='11111111111111111',channelId='22222222222222222',accountId='123456789012345678',tabId=7;
  const r=rig({guildId,channelId,ignoreFirstEnters:1,loggedUser:accountId});
- const manager=createCentralManager({now:r.now,monotonicNow:r.now});t.after(()=>manager.close());
+ const manager=createCentralManager({now:r.now,monotonicNow:r.now});t.after(async()=>{r.onTick(null);await r.requestMessage({type:'DICO_CONTENT_DISPOSE'});manager.close();});
  manager.execute('settings.update',{maxSendRetries:1});
  const hello=manager.bridge({type:'HELLO',protocolVersion:1,name:'real content integration'});
  manager.bridge({type:'OBSERVATION',sessionId:hello.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId,guildId,channelId,tabId,verified:true}]},hello.instanceId);
@@ -464,4 +464,35 @@ test('재시도 시작 응답 중 쿨다운이 사라져도 대기 해제를 알
  r.onRetry(m=>{if(!started){started=true;assert.equal(m.cooldownMs,1000);r.cooldown('');}});
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
  assert.deepEqual(r.requests.filter(m=>m.type==='DICO_RETRY_WAIT').map(m=>m.cooldownMs),[1000,0]);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);
+});
+
+
+test('managed preparation and confirmation use worker wakeups when page timers are throttled to one minute',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',pageTimerDelay:60000});r.target.coordinated=true;
+ const began=r.now();assert.equal((await r.request('DICO_PREPARE')).status,'prepared');
+ assert.ok(r.now()-began<5000);assert.ok(r.requests.filter(m=>m.type==='DICO_DELAY').length>=10);
+ r.tick(Math.max(0,r.delivery.scheduledAt-r.now()));assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+test('managed retained draft retries on worker deadlines despite one-minute page timer throttling',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',pageTimerDelay:60000,ignoreFirstEnters:1});r.target.coordinated=true;r.delivery.maxSendRetries=1;
+ assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(3000);const began=r.now();
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(result.deliveryEvidence.retryCount,1);
+ assert.ok(r.now()-began<30000);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);
+});
+
+
+test('managed delay rejection preserves the draft and never presses Enter',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',workerDelayFails:true});r.target.coordinated=true;r.editor.innerText='A';
+ const result=await r.request('DICO_PREPARE');assert.equal(result.status,'blocked');assert.equal(result.code,'MANAGED_DELAY_UNAVAILABLE');
+ assert.equal(r.editor.innerText,'A');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+});
+
+test('disposing managed content stops calibration worker wakeups after the pending response drains',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
+ assert.equal((await r.requestMessage({type:'DICO_CONTENT_DISPOSE'})).disposed,true);
+ await new Promise(resolve=>setImmediate(resolve));const count=r.requests.filter(m=>m.type==='DICO_DELAY').length;
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(r.requests.filter(m=>m.type==='DICO_DELAY').length,count);
 });
