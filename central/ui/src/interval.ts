@@ -1,13 +1,15 @@
 import type { Channel } from './api'
 
-type IntervalChannel=Pick<Channel,'intervalMs'|'customIntervalMs'|'slowmodeMs'|'slowmodeObservedAt'|'intervalMode'|'effectiveIntervalMs'|'minimumIntervalMs'>
+type IntervalChannel=Pick<Channel,'intervalMs'|'customIntervalMs'|'slowmodeMs'|'slowmodeObservedAt'|'intervalMode'|'effectiveIntervalMs'|'minimumIntervalMs'|'correctedBaseIntervalMs'|'cooldownCorrectionMs'|'customExtraMs'|'cooldownCalibratedAt'>
 export type IntervalMode='auto'|'custom'
 export function intervalSettings(c:IntervalChannel) {
   const slowmodeMs=Number.isFinite(c.slowmodeMs)?Math.max(0,c.slowmodeMs):0
   const floorMs=Math.max(3000,slowmodeMs+3000,c.minimumIntervalMs??0)
   const mode=c.intervalMode??(c.intervalMs<=floorMs?'auto':'custom')
-  const effectiveMs=mode==='auto'?floorMs:Math.max(c.intervalMs,floorMs)
-  return {mode,observed:typeof c.slowmodeObservedAt==='number'&&Number.isFinite(c.slowmodeObservedAt),slowmodeSeconds:Math.ceil(slowmodeMs/1000),floorMs,floorSeconds:Math.ceil(floorMs/1000),effectiveSeconds:Math.ceil(effectiveMs/1000)}
+  const correctedBaseMs=Math.max(floorMs,Number.isFinite(c.correctedBaseIntervalMs)?c.correctedBaseIntervalMs!:floorMs)
+  const extraMs=mode==='custom'?Math.max(0,(c.customIntervalMs??c.intervalMs)-floorMs):0
+  const effectiveMs=Number.isFinite(c.effectiveIntervalMs)?Math.max(correctedBaseMs+extraMs,c.effectiveIntervalMs!):correctedBaseMs+extraMs
+  return {mode,correctedBaseSeconds:Math.ceil(correctedBaseMs/1000),correctionSeconds:Math.ceil((correctedBaseMs-floorMs)/1000),extraSeconds:Math.ceil(extraMs/1000),calibrated:typeof c.cooldownCalibratedAt==='number',observed:typeof c.slowmodeObservedAt==='number'&&Number.isFinite(c.slowmodeObservedAt),slowmodeSeconds:Math.ceil(slowmodeMs/1000),floorMs,floorSeconds:Math.ceil(floorMs/1000),effectiveSeconds:Math.ceil(effectiveMs/1000)}
 }
 export function customIntervalError(value:string,info:ReturnType<typeof intervalSettings>) {
   const seconds=Number(value)

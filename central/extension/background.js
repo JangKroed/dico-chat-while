@@ -173,7 +173,8 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.preEnterWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.retryWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){executor.canSend(message,sender.tab.id).then(allowed=>respond({allowed,authorizedAt:Date.now(),maxAgeMs:2000})).catch(()=>respond({allowed:false}));return true;}
-  if(sender.tab){if(['DICO_TRACE','DICO_TIMING_SAMPLE'].includes(message?.type)){respond({ok:true});return true;}return false;}
+  if(message?.type==='DICO_TIMING_SAMPLE'&&sender.tab){executor.cooldownSample(message,sender.tab.id).then(ok=>respond({ok})).catch(()=>respond({ok:false}));return true;}
+  if(sender.tab){if(message?.type==='DICO_TRACE'){respond({ok:true});return true;}return false;}
   if(!sender.url?.startsWith(chrome.runtime.getURL('')))return false;
   const action=async()=>{
     await executor.load();

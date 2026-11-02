@@ -449,3 +449,31 @@ test('중앙에서 종료된 재시작 전 실행 기록도 재시도 준비 전
   assert.equal(r.state.attempts.previous.phase,'not_sent');assert.equal(r.state.attempts.attempt.phase,'prepared');
  }
 });
+
+test('쿨다운 표본은 확인 완료 보고 뒤에만 전달하고 필드·탭·구성을 검증한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const sample={status:'remaining',elapsedMs:1000,remainingMs:67000,slowmodeMs:60000,maxGapMs:500,privateText:'private'};
+ r.chrome.tabs.sendMessage=async(id,m)=>{if(m.type==='DICO_DELIVER'){
+  assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},7),true);
+  assert.equal(r.reports.some(m=>m.type==='COOLDOWN_SAMPLE'),false);
+  return{status:'confirmed',messageId:'33333333333333333'};
+ }return m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0}:emptyDraft();};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ const forwarded=r.reports.find(m=>m.type==='COOLDOWN_SAMPLE');assert.ok(forwarded);
+ assert.ok(r.reports.findIndex(m=>m.type==='DELIVERY_RESULT')<r.reports.indexOf(forwarded));
+ assert.deepEqual(forwarded.sample,{status:'remaining',elapsedMs:1000,remainingMs:67000,slowmodeMs:60000,maxGapMs:500});assert.equal(forwarded.attemptId,'attempt');assert.equal(forwarded.runId,'run');
+ assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},99),false);
+ for(const bad of [{...sample,maxGapMs:8000},{...sample,remainingMs:0},{...sample,elapsedMs:16000},{...sample,status:'inconclusive'}])assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample:bad},7),false);
+ r.client.state.bindings.binding.configVersion=2;assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},7),false);
+});
+test('미확인 전송 표본과 이전 세션·새 시도로 대체된 표본은 적용하지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const sample={status:'remaining',elapsedMs:500,remainingMs:65000,maxGapMs:500};
+ r.chrome.tabs.sendMessage=async(_id,m)=>{if(m.type==='DICO_DELIVER'){await r.client.cooldownSample({deliveryId:'attempt',sample},7);return{status:'uncertain'};}return{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0};};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.reports.some(m=>m.type==='COOLDOWN_SAMPLE'),false);
+ assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},7),false);
+ r.client.state.attempts.attempt.phase='confirmed';r.client.state.attempts.attempt.reported=true;r.client.state.attempts.newer={...r.client.state.attempts.attempt,attemptId:'newer'};
+ assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},7),false);
+ delete r.client.state.attempts.newer;await r.client.setSession({instanceId:'instance',sessionId:'new-session'});
+ assert.equal(await r.client.cooldownSample({deliveryId:'attempt',sample},7),false);
+});

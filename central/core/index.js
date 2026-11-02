@@ -20,7 +20,11 @@ function deliveryEvidence(value){
   return result;
 }
 const minimumInterval = c => (c.slowmodeMs||0)+3000;
-const effectiveInterval = c => Math.max(c.intervalMs,minimumInterval(c));
+const cooldownCorrection = c => Number.isSafeInteger(c.cooldownCorrectionMs)&&c.cooldownCorrectionMs>=0?c.cooldownCorrectionMs:0;
+const correctedBaseInterval = c => minimumInterval(c)+cooldownCorrection(c);
+const customExtraInterval = c => c.intervalMode==='custom'?Math.max(0,(c.customIntervalMs??c.intervalMs)-minimumInterval(c)):0;
+const effectiveInterval = c => correctedBaseInterval(c)+customExtraInterval(c);
+const confirmationOffset = c => Number.isFinite(c.lastConfirmationMs)&&c.lastConfirmationMs>=0&&c.lastConfirmationMs<=30000?c.lastConfirmationMs:0;
 const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:5,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
@@ -247,7 +251,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       c.intervalSyncBaseMs??=previous;
       if(value===c.intervalSyncBaseMs){delete c.pendingIntervalSync;delete c.intervalSyncBaseMs;}else c.pendingIntervalSync=true;
     }else commitIntervalConfiguration(c);
-    if(c.lastConfirmedMono!==undefined)c.nextMono=Math.max(c.nextMono||0,c.lastConfirmedMono+effectiveInterval(c));
+    if(c.lastConfirmedMono!==undefined)c.nextMono=Math.max(c.nextMono||0,c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c));
     event('channel.interval_updated',{channelId:c.id,intervalMode:c.intervalMode,intervalMs:c.intervalMs,pending:!!c.pendingIntervalSync});return true;
   }
   function applyPlaylist(c,items){
@@ -262,7 +266,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
     if(outcome==='confirmed'){
       g.cursor=(g.cursor+1)%g.members.length;g.lastConfirmedAt=now();g.nextMono=monotonicNow()+g.intervalMs;
-      c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.nextMono=monotonicNow()+effectiveInterval(c);
+      c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.lastConfirmedAttemptId=a.id;c.lastConfirmationMs=Number.isFinite(a.confirmationMs)&&a.confirmationMs<=30000?a.confirmationMs:0;c.nextMono=c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c);
     }
     for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)))cmd.status='completed';
     resolveIncidents(a.id);
@@ -277,7 +281,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const elapsed=entity=>Number.isFinite(entity.lastConfirmedAt)?Math.max(0,wall-entity.lastConfirmedAt):null;
     for(const g of state.groups){const age=elapsed(g);g.nextMono=mono+(age===null?0:Math.max(0,g.intervalMs-age));}
     for(const c of state.channels){
-      const age=elapsed(c);c.nextMono=mono+(age===null?0:Math.max(0,effectiveInterval(c)-age));
+      const age=elapsed(c);c.nextMono=mono+(age===null?0:Math.max(0,effectiveInterval(c)-age-confirmationOffset(c)));
       if(age===null)delete c.lastConfirmedMono;else c.lastConfirmedMono=mono-age;
     }
   }
@@ -561,6 +565,21 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(changed)event('delivery.pre_enter_wait',{attemptId:a.id,groupId:g.id,instanceId:i.id,waiting,cooldownMs:message.cooldownMs});
         return{allowed:true};
       }
+      if(message.type==='COOLDOWN_SAMPLE'){
+        const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
+        const c=a&&state.channels.find(c=>c.id===a.bindingId),g=a&&state.groups.find(g=>g.id===a.groupId),sample=message.sample;
+        if(!a||!c||!g||a.status!=='confirmed'||a.manual||c.lastConfirmedAttemptId!==a.id||a.sessionId!==i.sessionId||c.sessionId!==i.sessionId||!i.connected||c.verified!==true||a.runId!==message.runId||g.runId!==a.runId||a.configVersion!==message.configVersion||c.configVersion!==a.configVersion||c.tabId!==a.tabId||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||g.activeAttemptId||state.attempts.some(other=>other.id!==a.id&&other.bindingId===c.id&&ACTIVE.has(other.status))||now()-a.finalizedAt<0||now()-a.finalizedAt>17000||!Number.isFinite(c.slowmodeObservedAt)||!Number.isFinite(a.confirmationMs)||a.confirmationMs<0||a.confirmationMs>30000||!sample||typeof sample!=='object'||Array.isArray(sample)||sample.status!=='remaining'||!Number.isFinite(sample.elapsedMs)||sample.elapsedMs<0||sample.elapsedMs>15000||!Number.isFinite(sample.maxGapMs)||sample.maxGapMs<0||sample.maxGapMs>1500||!Number.isSafeInteger(sample.remainingMs)||sample.remainingMs<=0||sample.remainingMs>21600000||sample.slowmodeMs!==undefined&&sample.slowmodeMs!==c.slowmodeMs)return{ok:false};
+        // The countdown starts at Enter. Its displayed seconds can omit a
+        // fraction, so round the inferred full cycle up to the next second.
+        const measuredFullCycle=Math.ceil((sample.elapsedMs+sample.remainingMs)/1000)*1000+3000;
+        const correction=Math.max(0,measuredFullCycle-minimumInterval(c));
+        const previous=c.cooldownCorrectionMs||0;
+        c.cooldownCorrectionMs=c.cooldownCalibratedAttemptId===a.id?Math.max(previous,correction):correction;
+        c.cooldownCalibratedAttemptId=a.id;c.cooldownCalibratedAt=now();
+        if(c.lastConfirmedMono!==undefined)c.nextMono=c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c);
+        if(c.cooldownCorrectionMs!==previous)event('channel.cooldown_calibrated',{channelId:c.id,attemptId:a.id,correctedBaseIntervalMs:correctedBaseInterval(c)});
+        return{ok:true};
+      }
       if(message.type==='AUTHORIZE_ENTER'){
         if(clockGap()){suspendForClockGap();lastWall=now();lastMono=monotonicNow();return{allowed:false};}
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
@@ -635,6 +654,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           }
           if(observed.slowmodeMs!==undefined){
             const previous=c.slowmodeMs;c.slowmodeMs=duration(observed.slowmodeMs,'slowmodeMs');c.slowmodeObservedAt=now();
+            if(previous!==c.slowmodeMs){delete c.cooldownCorrectionMs;delete c.cooldownCalibratedAttemptId;delete c.cooldownCalibratedAt;}
             const interval=c.intervalMode==='auto'?minimumInterval(c):Math.max(c.customIntervalMs??c.intervalMs,minimumInterval(c));
             if(setChannelInterval(c,interval))c.version++;
             if(previous!==c.slowmodeMs)event('channel.slowmode_observed',{channelId:c.id,slowmodeMs:c.slowmodeMs,effectiveIntervalMs:effectiveInterval(c)});
@@ -783,7 +803,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(clock.wall<instance.lastSeenAt||c.nextMono!==undefined&&!Number.isFinite(c.nextMono))return null;
     return clock.wall+Math.max(0,(c.nextMono??clock.mono)-clock.mono);
   }
-  function publicChannel(c,clock=deadlineClock()){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),minimumIntervalMs:minimumInterval(c),effectiveIntervalMs:effectiveInterval(c),nextEligibleAt:channelNextEligibleAt(c,clock)};}
+  function publicChannel(c,clock=deadlineClock()){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),minimumIntervalMs:minimumInterval(c),correctedBaseIntervalMs:correctedBaseInterval(c),cooldownCorrectionMs:cooldownCorrection(c),customExtraMs:customExtraInterval(c),effectiveIntervalMs:effectiveInterval(c),nextEligibleAt:channelNextEligibleAt(c,clock)};}
   function publicGroup(g,clock=deadlineClock()){
     const{nextMono,...dto}=g;let nextEligibleAt=null;
     if(g.status==='running'&&!g.activeAttemptId&&!g.controlIntent){

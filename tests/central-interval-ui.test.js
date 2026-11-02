@@ -54,3 +54,12 @@ test('mode selection can be saved without typing, but returning to the saved mod
   assert.equal(intervalDraftChanged({...channel,intervalMode:'auto'},'custom','123',false),true);
   assert.equal(intervalDraftChanged(channel,'custom','200',true),true);
 });
+
+test('measured correction plus the custom excess are displayed without hiding either component',()=>{
+ const base={slowmodeMs:60000,slowmodeObservedAt:1,intervalMs:63000,minimumIntervalMs:63000,correctedBaseIntervalMs:67000,cooldownCorrectionMs:4000,cooldownCalibratedAt:1000};
+ const automatic=intervalSettings({...base,intervalMode:'auto',effectiveIntervalMs:67000});
+ assert.equal(automatic.floorSeconds,63);assert.equal(automatic.correctedBaseSeconds,67);assert.equal(automatic.effectiveSeconds,67);assert.equal(automatic.extraSeconds,0);assert.equal(automatic.calibrated,true);
+ const custom=intervalSettings({...base,intervalMode:'custom',intervalMs:70000,customIntervalMs:70000,effectiveIntervalMs:74000});
+ assert.equal(custom.correctionSeconds,4);assert.equal(custom.extraSeconds,7);assert.equal(custom.effectiveSeconds,74);
+ assert.equal(customIntervalError('63',custom),'');
+});

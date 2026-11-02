@@ -256,24 +256,33 @@
   let cooldownProbeCancel = null;
   function observeCooldown(target, delivery, enterAt, enterMono) {
     cooldownProbeCancel?.();
-    const mono=()=>globalThis.performance?.now() ?? Date.now();
-    let timer,seen=false,last=mono(),maxGapMs=0,zeroSince=null,zeroAt=null,done=false;
+    const mono=()=>globalThis.performance?.now() ?? Date.now(),originalEditor=editors()[0];
+    let timer,seen=false,last=mono(),maxGapMs=0,zeroSince=null,zeroAt=null,done=false,remainingSamples=0;
+    const send=(status,elapsedMs,remainingMs,observedAt=Date.now())=>{
+      const seconds=slowmode(originalEditor).slowmodeSeconds;
+      chrome.runtime.sendMessage({type:'DICO_TIMING_SAMPLE',channelId:delivery.channelId,deliveryId:delivery.id,
+        sample:{status,enterAt,observedAt,elapsedMs,maxGapMs,...(remainingMs===undefined?{}:{remainingMs}),...(Number.isFinite(seconds)&&seconds>=0?{slowmodeMs:seconds*1000}:{})}}).catch(()=>{});
+    };
     const finish=status=>{
       if(done)return;done=true;clearInterval(timer);
-      const elapsedMs=(status==='observed'?zeroSince:mono())-enterMono;
-      chrome.runtime.sendMessage({type:'DICO_TIMING_SAMPLE',channelId:delivery.channelId,deliveryId:delivery.id,
-        sample:{status,enterAt,observedAt:status==='observed'?zeroAt:Date.now(),elapsedMs,maxGapMs}}).catch(()=>{});
+      send(status,(status==='observed'?zeroSince:mono())-enterMono,undefined,status==='observed'?zeroAt:Date.now());
     };
     const check=()=>{
-      const now=mono();maxGapMs=Math.max(maxGapMs,now-last);last=now;
-      // Navigation, missing editors, drafts and missed samples make an unlock
-      // observation ambiguous. Never send a test Enter to probe the server.
-      if(!matchesTarget(target) || editors().length!==1)return finish('inconclusive');
-      const editor=editors()[0],elapsed=now-enterMono;
+      const now=mono(),gap=now-last;maxGapMs=Math.max(maxGapMs,gap);last=now;
+      const elapsed=now-enterMono,wallElapsed=Date.now()-enterAt,found=editors();
+      // Read-only calibration belongs to this exact successful send. A changed
+      // account/editor, sleep or clock jump cannot shorten the next interval.
+      if(gap<0||maxGapMs>1500||elapsed<0||Math.abs(elapsed-wallElapsed)>1000||!matchesTarget(target)||!coordinatedAccountMatches(target)||found.length!==1||found[0]!==originalEditor)return finish('inconclusive');
+      const editor=found[0];
       if(normalize(editorText(editor)) || elapsed>Math.min(21720000,((slowmodeSetting.seconds || 60)+120)*1000))return finish('inconclusive');
       const cooldown=slowmode(editor);
-      if(cooldown.cooldownMs>0){seen=true;zeroSince=null;zeroAt=null;}
-      else if(seen && !cooldown.slowmodeDetected) {
+      if(cooldown.cooldownKnown!==true)return finish('inconclusive');
+      if(cooldown.cooldownMs>0){
+        seen=true;zeroSince=null;zeroAt=null;
+        // Early positive readings reach the scheduler before early preparation
+        // can replace the empty composer and end the full unlock observation.
+        if(target.coordinated&&remainingSamples<3&&elapsed<=15000){remainingSamples++;send('remaining',elapsed,cooldown.cooldownMs);}
+      } else if(seen && cooldown.cooldownKnown && cooldown.cooldownMs===0) {
         if(zeroSince===null){zeroSince=now;zeroAt=Date.now();}
         if(now-zeroSince>=500)return finish('observed');
       } else if(!seen && elapsed>10000)return finish('inconclusive');
@@ -780,7 +789,10 @@
         if(outcome.status==='confirmed'){
           const confirmedAt=Date.now(),confirmationMs=(globalThis.performance?.now() ?? confirmedAt)-enterMono;
           outcome.timing={enterAt,confirmedAt,confirmationMs,cooldownMs:slowmode(editors()[0]).cooldownMs};
-          observeCooldown(target,delivery,enterAt,enterMono);
+          const createdAt=/^\d{17,20}$/.test(outcome.messageId||'')?Number((BigInt(outcome.messageId)>>22n)+1420070400000n):0;
+          // A late receipt for an earlier retry has no reliable last-Enter
+          // anchor, so it confirms delivery without calibrating its duration.
+          if(createdAt>=enterAt)observeCooldown(target,delivery,enterAt,enterMono);
         }
         trace('finished',{result:outcome.status,messageId:outcome.messageId});return afterEnter(outcome);
       };

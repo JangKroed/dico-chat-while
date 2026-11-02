@@ -179,3 +179,59 @@ test('framed native recovery and cooldown messages reach the real runtime withou
   const final=runtime.manager.snapshot();
   assert.equal(final.instances[0].connected,true);assert.equal(final.accounts.length,1);assert.equal(final.channels[0].verified,true);assert.equal(final.channels[0].playlistIndex,0);
 });
+
+test('framed native cooldown calibration updates the real runtime without losing the session',{timeout:15000},async t=>{
+  // Disposable SQLite + loopback + framed native streams. No Discord tab exists.
+  const directory=await mkdtemp(join(tmpdir(),'dico-native-recovery-'));
+  const runtime=await startCentralRuntime({directory,port:0});
+  const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output);
+  const service=await connectService({dir:directory});
+  const running=runNativeHost({input,output,origin:'chrome-extension://abcdefghijklmnopabcdefghijklmnop/',ids:['abcdefghijklmnopabcdefghijklmnop'],service});
+  t.after(async()=>{input.end();await running;output.end();await runtime.close();await rm(directory,{recursive:true,force:true});});
+  let serial=0,hello;
+  const wire=async(message)=>{
+    const requestId=String(++serial);
+    input.write(encodePacket({requestId,message,...(hello?{instanceId:hello.instanceId}:{})}));
+    let timer;
+    try{return await Promise.race([(async()=>{for(;;){const next=await packets.next();assert.equal(next.done,false);if(next.value.type==='RESPONSE'&&next.value.requestId===requestId)return next.value;}})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Native response timed out: '+message.type)),4000);})]);}
+    finally{clearTimeout(timer);}
+  };
+  const accepted=async message=>{const response=await wire({...message,...(hello?{sessionId:hello.sessionId}:{})});assert.equal(response.ok,true,'Native request rejected: '+message.type);return response.result;};
+  hello=await accepted({type:'HELLO',protocolVersion:1,name:'Isolated native regression',capabilities:['central-executor-v1']});
+  await accepted({type:'CONNECTION_PROGRESS',stage:'account',total:1,completed:0});
+  assert.equal((await accepted({type:'RECOVERY_STATUS'})).allowed,true);
+  const accountId='11111111111111111',guildId='22222222222222222',channelId='33333333333333333';
+  await accepted({type:'ACCOUNT_OBSERVATION',accountId,verified:true,legacyFrozen:true,legacyPending:false});
+  await accepted({type:'OBSERVATION',legacyFrozen:true,legacyPending:false,channels:[{accountId,guildId,channelId,tabId:7,verified:true,slowmodeMs:60000}]});
+  const channel=runtime.manager.snapshot().channels[0];
+  const one=runtime.manager.execute('message.create',{name:'isolated one',body:'No actual Discord message'});
+  const two=runtime.manager.execute('message.create',{name:'isolated two',body:'Another isolated fixture'});
+  runtime.manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:one.id},{messageId:two.id}]});
+  const config=runtime.manager.commands(hello.instanceId).find(c=>c.type==='CONFIG_SYNC');
+  await accepted({type:'ACK',commandId:config.id,status:'applied'});
+  const group=runtime.manager.execute('group.create',{name:'Native fixture',members:[channel.id],intervalMs:0});
+  runtime.manager.execute('group.start',{id:group.id});runtime.manager.tick();
+  const attempt=runtime.manager.snapshot().attempts[0];
+  await accepted({type:'PREPARED',attemptId:attempt.id,accountId,channelId,configVersion:attempt.configVersion,draftClear:true});
+  const permit={attemptId:attempt.id,runId:attempt.runId,configVersion:attempt.configVersion};
+  assert.equal((await accepted({type:'DELIVERY_WAIT',...permit,cooldownMs:1000,elapsedMs:0})).allowed,true);
+  assert.equal((await accepted({type:'AUTHORIZE_ENTER',...permit})).allowed,false);
+  assert.equal((await accepted({type:'RECOVERY_STATUS'})).allowed,false);
+  const waiting=runtime.manager.snapshot();
+  assert.equal(waiting.instances[0].connected,true);assert.equal(waiting.attempts.length,1);assert.equal(waiting.groups[0].activeAttemptId,attempt.id);assert.equal(waiting.channels[0].playlistIndex,0);
+  assert.equal((await accepted({type:'DELIVERY_WAIT',...permit,cooldownMs:0,elapsedMs:1000})).allowed,true);
+  assert.equal((await accepted({type:'AUTHORIZE_ENTER',...permit})).allowed,true);
+  await accepted({type:'DELIVERY_RESULT',attemptId:attempt.id,outcome:'confirmed',messageId:'44444444444444444',confirmationMs:0});
+  const calibrated=await accepted({type:'COOLDOWN_SAMPLE',...permit,sample:{status:'remaining',elapsedMs:0,remainingMs:65000,slowmodeMs:60000,maxGapMs:0}});
+  assert.equal(calibrated.ok,true);
+  assert.equal(runtime.manager.snapshot().channels[0].correctedBaseIntervalMs,68000);
+  assert.equal(runtime.manager.snapshot().channels[0].cooldownCorrectionMs,5000);
+  runtime.manager.execute('group.stop',{id:group.id});
+  const control=runtime.manager.commands(hello.instanceId).find(c=>c.type==='CONTROL');
+  await accepted({type:'ACK',commandId:control.id,status:'applied',executionBlocked:true});
+  await accepted({type:'CONNECTION_PROGRESS',stage:'configuration',total:1,completed:1});
+  assert.equal((await wire({type:'NOT_A_PROTOCOL_MESSAGE'})).ok,false);
+  await accepted({type:'HEARTBEAT'});
+  const final=runtime.manager.snapshot();
+  assert.equal(final.instances[0].connected,true);assert.equal(final.accounts.length,1);assert.equal(final.channels[0].verified,true);assert.equal(final.channels[0].playlistIndex,1);
+});

@@ -137,3 +137,10 @@ The executor reports unknown-result blocking proof only after a final commit obs
 The executor sends `DELIVERY_WAIT {retryPhase:true,retryCount,cooldownMs,elapsedMs,attemptId,runId,configVersion}` for same-attempt retry progress. The count stays unchanged for cooldown heartbeats and advances one step for a subsequent retry; it cannot skip, rewind, or exceed the snapshotted budget. `AUTHORIZE_ENTER` includes that count and remains idempotent for repeated current-count preflight checks. Session, group/run, config, service, stop and live channel gates still apply.
 
 Retry progress keeps the current attempt alive without advancing either cursor. Only confirmed posting starts the next group's spacing and advances the account/playlist. A retained-draft retry uses a continuous message-observation baseline so a late post or sending indicator stops further retries. Final evidence includes the retry count and optional bounded key-event/page-state diagnostics; none proves delivery by itself.
+
+
+### Post-send cooldown calibration (0.4.13)
+
+Authenticated `COOLDOWN_SAMPLE {attemptId,runId,configVersion,sample}` carries bounded scalar durations from the confirmed attempt's content clock. Central calibration accepts fresh positive samples `{status:'remaining',elapsedMs,remainingMs,maxGapMs,slowmodeMs}` within 17 seconds after confirmation. The legacy final-unlock `observed` probe may still run in content, but is not used to alter the central schedule. No client wall-clock timestamp is used as network latency. The latest confirmed binding/configuration/session owns the sample; stale or ambiguous observations are ignored.
+
+Channel DTOs expose nominal `minimumIntervalMs`, `correctedBaseIntervalMs`, `cooldownCorrectionMs`, `customExtraMs`, `effectiveIntervalMs`, and optional `cooldownCalibratedAt`. User excess is measured above the nominal floor, then added to the corrected base. Calibration updates schedule metadata without emitting CONFIG_SYNC or changing the account cursor. The estimated Enter anchor avoids counting confirmation delay twice and is reconstructed conservatively on restart.

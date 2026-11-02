@@ -16,7 +16,7 @@ function deliveryEvidence(value) {
 const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
 const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
 export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
-  let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set();
+  let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
   const request=async message=>transport.request({...message,sessionId:state.sessionId},state.instanceId);
@@ -50,6 +50,8 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
     await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
+    const samples=pendingCooldownSamples.get(a.attemptId)||[];pendingCooldownSamples.delete(a.attemptId);
+    if(a.phase==='confirmed')for(const sample of samples)await cooldownSample({deliveryId:a.attemptId,sample},a.tabId);
   }
   async function synchronizePreviousAttempts(p) {
     const knownAttemptIds=Object.values(state.attempts).filter(a=>a.attemptId!==p.attemptId&&a.bindingId===p.bindingId&&['preparing','prepared','executing','unknown'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
@@ -90,6 +92,19 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(response?.allowed!==true||elapsed<0||elapsed>2000||monoElapsed<0||monoElapsed>2000||Math.abs(elapsed-monoElapsed)>1000||!allowed())return false;
       a.sendRetryCount=message.retryCount;await save();return allowed();
     }catch{return false;}
+  }
+  async function cooldownSample(message,tabId){
+    await load();const a=state.attempts[message?.deliveryId],value=message?.sample;
+    if(!value||!['remaining','observed'].includes(value.status)||!Number.isFinite(value.elapsedMs)||value.elapsedMs<0||value.elapsedMs>21720000||!Number.isFinite(value.maxGapMs)||value.maxGapMs<0||value.maxGapMs>1500)return false;
+    if(value.status==='remaining'&&(!Number.isSafeInteger(value.remainingMs)||value.remainingMs<=0||value.remainingMs>21600000||value.elapsedMs>15000))return false;
+    if(value.slowmodeMs!==undefined&&(!Number.isSafeInteger(value.slowmodeMs)||value.slowmodeMs<0||value.slowmodeMs>21600000))return false;
+    const valid=()=>Boolean(a&&transport.connected&&!state.emergencyStopped&&a.tabId===tabId&&a.sessionId===state.sessionId&&['executing','confirmed'].includes(a.phase)&&state.bindings[a.bindingId]?.configVersion===a.configVersion&&Object.values(state.attempts).filter(other=>other.bindingId===a.bindingId).at(-1)===a);
+    if(!valid()||!await tabMatches(a)||!valid())return false;
+    const sample={status:value.status,elapsedMs:value.elapsedMs,maxGapMs:value.maxGapMs,...(value.status==='remaining'?{remainingMs:value.remainingMs}:{}),...(value.slowmodeMs===undefined?{}:{slowmodeMs:value.slowmodeMs})};
+    // The first DOM reading can arrive before DICO_DELIVER returns. Hold only
+    // bounded scalar evidence until DELIVERY_RESULT has confirmed this attempt.
+    if(a.phase!=='confirmed'||!a.reported){const queued=pendingCooldownSamples.get(a.attemptId)||[];if(queued.length>=4)return false;queued.push(sample);pendingCooldownSamples.set(a.attemptId,queued);return true;}
+    try{return(await request({type:'COOLDOWN_SAMPLE',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,sample}))?.ok===true;}catch{return false;}
   }
   async function awaitPrepared(a) {
     const started=now(),monoStarted=monotonicNow();
@@ -214,5 +229,5 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     });lanes.set(key,job);await job;
     }finally{inFlight--;} 
   }
-  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,preEnterWait,retryWait,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
+  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,preEnterWait,retryWait,cooldownSample,async setSession(s){await load();state.instanceId=s.instanceId;state.sessionId=s.sessionId;await save();},async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
 }
