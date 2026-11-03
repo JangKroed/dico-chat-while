@@ -47,6 +47,6 @@ assert.ok(history.includes('발송 처리')&&history.includes('게시 확인'),'
 assert.ok(history.includes('전송 요청 후 입력창이 비워지면'),'History explains the active completion criterion');
 console.log('PASS production React SSR: operational hierarchy, compact ready state, account aliases, semantic progress, loading/error analytics');
 `;
-const result=await build({stdin:{contents,resolveDir:join(root,'central/ui'),sourcefile:'ux-check.tsx',loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'dashboard-test-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {Dashboard,History};\n',loader:'tsx'}));}}]});
+const result=await build({stdin:{contents,resolveDir:join(root,'central/ui'),sourcefile:'ux-check.tsx',loader:'tsx'},bundle:true,loader:{'.css':'empty'},platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'dashboard-test-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {Dashboard,History};\n',loader:'tsx'}));}}]});
 const directory=await mkdtemp(join(tmpdir(),'dico-ux-ssr-'));
 try{const file=join(directory,'check.cjs');await writeFile(file,result.outputFiles[0].contents);require(file);}finally{await rm(directory,{recursive:true,force:true});}

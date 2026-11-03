@@ -66,3 +66,21 @@ test('an update reconnect preserves unsaved settings instead of reloading them a
   assert.equal(versionReloadDecision('0.4.6','0.4.7',true,'/settings',true),'banner');
   assert.equal(versionReloadDecision('0.4.6','0.4.7',true,'/settings',false),'reload');
 });
+
+test('network recovery rearms an exhausted burst without clicks but not an expired session',async()=>{
+ const {createReconnectWake}=await import('../central/ui/src/reconnect.ts');
+ let time=0,phase='offline',calls=0;const target=new EventTarget();
+ const dispose=createReconnectWake({target,phase:()=>phase,visible:()=>true,now:()=>time,restart:()=>calls++});
+ target.dispatchEvent(new Event('online'));assert.equal(calls,1);
+ target.dispatchEvent(new Event('online'));assert.equal(calls,1);
+ time=30000;phase='expired';target.dispatchEvent(new Event('online'));assert.equal(calls,1);
+ phase='offline';target.dispatchEvent(new Event('visibilitychange'));assert.equal(calls,2);
+ dispose();time=60000;target.dispatchEvent(new Event('online'));assert.equal(calls,2);
+});
+test('hidden or already connecting views do not create parallel reconnect bursts',async()=>{
+ const {createReconnectWake}=await import('../central/ui/src/reconnect.ts');
+ let phase='reconnecting',visible=false,calls=0;const target=new EventTarget();
+ const dispose=createReconnectWake({target,phase:()=>phase,visible:()=>visible,restart:()=>calls++});
+ target.dispatchEvent(new Event('online'));phase='offline';target.dispatchEvent(new Event('visibilitychange'));assert.equal(calls,0);
+ visible=true;target.dispatchEvent(new Event('visibilitychange'));assert.equal(calls,1);dispose();
+});

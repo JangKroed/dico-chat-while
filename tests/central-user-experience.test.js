@@ -40,7 +40,9 @@ test('App routes, navigation and diagnostic-only pages share the preference boun
  assert.match(app,/<AutomaticSupport diagnostic=\{diagnostic\}/);
  const dashboard=app.slice(app.indexOf('function UserDashboard('),app.indexOf('function DashboardGroupControls('));
  assert.doesNotMatch(dashboard,/go\('history'\)|go\('logs'\)|RetryNotSentButton|s\.events|incident\.recheck/);
- assert.match(dashboard,/disabled=\{controls.stop.disabled\}/);
+ assert.match(dashboard,/<OperationalDashboard \{...props\}/);
+ const operating=await readFile(new URL('../central/ui/src/OperationalDashboard.tsx',import.meta.url),'utf8');
+ assert.match(operating,/disabled=\{controls.stop.disabled\}/);
 });
 
 test('historical unrelated incident does not turn a running operation into a current failure',()=>{

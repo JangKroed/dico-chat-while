@@ -13,7 +13,7 @@ export function RemovalAction({kind,id,version,name,busy,run,onRemoved}:{kind:Ki
   const disabled=busy||version===undefined||id.startsWith('legacy:')
   const remove=async()=>{
     if(disabled||!confirm(`${name}\n\n${effects[kind]}\n관련 그룹에서 연결을 제외하며, 빈 그룹은 삭제됩니다. 진행 중·미확인 발송이 있으면 삭제할 수 없습니다. 오프라인 브라우저의 탭은 다음 연결 때 닫습니다.\n\n계속할까요?`))return
-    if(await run(`${kind}.delete`,{id,expectedVersion:version},'연결을 해제했습니다. 해당 전송 탭 닫기를 요청했습니다.'))onRemoved?.()
+    if(await run(`${kind}.delete`,{id,expectedVersion:version},kind==='channel'?'연결을 해제했습니다.':'삭제했습니다.'))onRemoved?.()
   }
   return <button type="button" className="text-action" disabled={disabled} aria-label={`${name} ${labels[kind]}`} onClick={()=>void remove()}>{labels[kind]}</button>
 }
@@ -23,9 +23,11 @@ export function RenameTargetAction({target,busy,run}:{target:Target;busy:boolean
   return <button type="button" className="text-action" disabled={disabled} onClick={()=>{if(disabled)return;const name=prompt('채널 표시 이름',target.name);if(name?.trim()&&name.trim()!==target.name)void run('target.update',{id:target.id,expectedVersion:target.version,name:name.trim()},'채널 표시 이름을 저장했습니다.')}}>채널 이름 변경</button>
 }
 
+// 삭제 트랜잭션은 이미 완료됐습니다. 브라우저의 물리적 탭 정리 기록은
+// 진단 화면에서만 표시하며 재연결/수동 탭 닫기를 사용자에게 요구하지 않습니다.
 export function PendingTabCloses({s}:{s:Snapshot}){
   const pending=s.pendingTabCloses||[]
   if(!pending.length)return null
-  const labels:Record<string,string>={offline:'브라우저 재연결 대기',queued:'탭 닫기 요청 대기',received:'탭 닫기 처리 중',rejected:'탭 닫기 확인 필요'}
-  return <section className="panel" aria-label="전송 탭 닫기 대기"><div className="panel-head"><div><h2>전송 탭 닫기 대기 · {pending.length}개</h2><p>연결 삭제는 완료됐습니다. 브라우저가 탭 닫기를 확인하면 이 목록에서 사라집니다.</p></div></div><ul>{pending.map(item=><li key={item.removalId}><strong>{item.accountName||item.accountId} · #{item.channelName||item.channelId}</strong><p>{labels[item.status]||'탭 닫기 확인 대기'}{item.status==='offline'?' — 해당 브라우저의 DICO 확장에서 관리 프로그램 연결을 눌러 주세요.':item.status==='rejected'?' — 자동 재시도 후에도 남으면 해당 전송 탭을 직접 닫고 확장에서 관리 프로그램 연결을 눌러 주세요.':''}{item.rejectionCode&&<small> 사유: {item.rejectionCode}</small>}</p></li>)}</ul></section>
+  const labels:Record<string,string>={offline:'브라우저 오프라인 · 후속 정리 보관',queued:'후속 정리 예약됨',received:'후속 정리 처리 중',rejected:'후속 정리 미완료'}
+  return <section className="panel" aria-label="삭제 후 정리 기록"><div className="panel-head"><div><h2>삭제 완료 · 후속 정리 기록 · {pending.length}개</h2><p>계정·연결 삭제는 완료됐습니다. 이 기록은 남은 탭을 안전하게 정리하기 위한 내부 기록이며 재연결할 필요가 없습니다.</p></div></div><ul>{pending.map(item=><li key={item.removalId}><strong>{item.accountName||item.accountId} · #{item.channelName||item.channelId}</strong><p>{labels[item.status]||'탭 닫기 확인 대기'}{item.rejectionCode&&<small> 사유: {item.rejectionCode}</small>}</p></li>)}</ul></section>
 }

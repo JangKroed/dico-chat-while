@@ -87,9 +87,16 @@ try {
     if(packet.method==='Log.entryAdded' && packet.params.entry.level==='error')errors.push(packet.params.entry.text+' '+(packet.params.entry.url||''));
   });
   await cmd('Page.enable');await cmd('Runtime.enable');await cmd('Log.enable');
+  // 최초 연결 9회 실패로 재시도 한도를 소진시킨 뒤 online 이벤트만으로 복구합니다.
+  // 실제 장애 대기 시간을 줄이는 주입은 이 격리 프로필에만 적용하며 복구 전에 복원합니다.
+  await cmd('Page.addScriptToEvaluateOnNewDocument',{source:`if(!sessionStorage.getItem('dico-reconnect-smoke')){sessionStorage.setItem('dico-reconnect-smoke','1');window.__offline=true;window.__failures=0;window.__nativeTimeout=window.setTimeout.bind(window);window.setTimeout=(fn,ms,...args)=>window.__nativeTimeout(fn,ms>=1000&&ms<=10000?1:ms,...args);const original=window.fetch.bind(window);window.fetch=(url,...args)=>{if(window.__offline&&String(url).includes('/api/access-mode')){window.__failures++;return Promise.reject(new TypeError('simulated offline'))}return original(url,...args)}}`});
   const url=`${runtime.url}/#bootstrap=${runtime.app.issueBootstrap()}`;
   await cmd('Page.navigate',{url});
+  await visible('연결을 기다리고 있습니다.');
+  assert.equal(await evalJS('window.__failures'),9);
+  await evalJS("window.setTimeout=window.__nativeTimeout;window.__offline=false;window.dispatchEvent(new Event('online'))");
   await visible('발송 작업을 준비하세요');
+  console.log('PASS exhausted reconnect recovers on online event without a user click');
   assert.equal(await evalJS('location.hash'),'','Bootstrap fragment must be removed');
   await screenshot('desktop-empty.png');
   console.log('PASS bootstrap and empty dashboard');
@@ -158,6 +165,51 @@ try {
   await until(async()=>await evalJS('document.querySelector(".sidebar")?.classList.contains("open")'));
   await screenshot('narrow-menu.png');
   console.log('PASS narrow layout and menu');
+  // 실제 Discord·브라우저 확장 연결 없이 API 응답만 교체합니다. UI의 실제 렌더링,
+  // 카운트다운과 반응형 배치를 검증하며 발송 명령은 이 단계에서 호출하지 않습니다.
+  const populatedSource=`(() => {
+    const original=window.fetch.bind(window);
+    window.fetch=async(url,...args)=>{
+      const path=new URL(String(url),location.href).pathname;
+      if(path!=='/api/snapshot')return original(url,...args);
+      const now=Date.now(),channels=[],accounts=[],instances=[],groups=[],attempts=[],messages=[];
+      for(let n=0;n<3;n++){
+        const instanceId='fixture-browser-'+n,groupId='fixture-group-'+n;
+        instances.push({id:instanceId,name:['공지 운영 Chrome 프로필','채용 운영 Brave 프로필','커뮤니티 Chrome 프로필'][n],browser:n===1?'Brave':'Chrome',connected:true,lastSeenAt:now,version:1,extensionVersion:n===1?'0.4.20':'0.4.34',legacyFrozen:true,legacyPending:false,capabilities:['early-prepare-v1']});
+        const members=[];
+        for(let a=0;a<2;a++){
+          const accountId='100000000000'+n+a,id='fixture-channel-'+n+a,messageId='fixture-message-'+n+a;
+          accounts.push({id:'fixture-account-'+n+a,instanceId,accountId,name:['운영 담당','공지 담당'][a]+' '+(n+1),verified:true,connected:true,version:1,lastVerifiedAt:now});
+          channels.push({id,instanceId,accountId,guildId:'200000000000'+n,channelId:'300000000000'+n,name:['프로젝트 공지','개발자 채용 정보','커뮤니티 소식'][n],verified:true,version:1,configVersion:1,appliedVersion:1,playlist:[{messageId,revisionId:'revision-'+messageId}],playlistIndex:0,intervalMs:60000,slowmodeMs:30000,slowmodeObservedAt:now});
+          messages.push({id:messageId,name:['이번 주 프로젝트 안내','백엔드 개발자 모집','정기 모임 안내'][n],body:'브라우저 배치 검사용. 실제 발송하지 않습니다.',version:1,revisionId:'revision-'+messageId,revisions:[{id:'revision-'+messageId}],tags:[]});members.push(id);
+          attempts.push({id:'fixture-result-'+n+a,groupId,instanceId,accountId,bindingId:id,status:'confirmed',confirmationBasis:a?'composer_cleared':'message_observed',messageName:messages.at(-1).name,finalizedAt:now-(n*2+a+1)*60000});
+        }
+        groups.push({id:groupId,name:['프로젝트 공지 순환','채용 정보 순환','커뮤니티 소식 순환'][n],guildId:'200000000000'+n,channelId:'300000000000'+n,members,cursor:n%2,status:'running',version:1,intervalMs:60000,nextEligibleAt:now+(n+1)*45000,nextPreparationAt:now+(n+1)*45000-5000,waitReason:'group_interval'});
+      }
+      return new Response(JSON.stringify({schemaVersion:1,stateVersion:999,serverNow:now,service:{status:'ready'},settings:{retentionDays:90,notificationsEnabled:false,hideNotificationNames:false,maxSendRetries:3},messages,channels,accounts,instances,groups,attempts,incidents:[],events:[],commands:[]}),{status:200,headers:{'content-type':'application/json'}});
+    };
+  })()`;
+  const fixtureScript=await cmd('Page.addScriptToEvaluateOnNewDocument',{source:populatedSource});
+  for(const width of [1440,1000,390]){
+    await cmd('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
+    await cmd('Page.navigate',{url:runtime.url+'/'});
+    await visible('프로젝트 공지 순환');
+    await until(async()=>await evalJS('document.querySelectorAll(".op-group").length===3'));
+    const dashboardLayout=await evalJS(`(() => ({overflow:document.documentElement.scrollWidth-innerWidth,rows:[...document.querySelectorAll('.op-group')].map(el=>({height:el.getBoundingClientRect().height,right:el.getBoundingClientRect().right})),stats:document.querySelectorAll('.op-stats>div').length,results:document.querySelectorAll('.op-result').length,browsers:document.querySelectorAll('.op-browser').length,bottomTop:document.querySelector('.op-bottom').getBoundingClientRect().top}))()`);
+    assert.ok(dashboardLayout.overflow<=2,JSON.stringify({width,dashboardLayout}));assert.equal(dashboardLayout.stats,4);assert.equal(dashboardLayout.results,6);assert.equal(dashboardLayout.browsers,3);
+    console.log('LAYOUT '+width+' '+JSON.stringify(dashboardLayout));await screenshot(`populated-dashboard-${width}.png`);
+    if(width===1440){assert.ok(dashboardLayout.rows.every(row=>row.height<115),'Desktop group rows must remain compact');assert.ok(dashboardLayout.bottomTop<700,'Recent results and connections should start within the first screen');}
+    await screenshot(`populated-dashboard-${width}.png`);
+    await cmd('Page.navigate',{url:runtime.url+'/settings'});await visible('개발자 진단 모드');
+    await until(async()=>await evalJS('document.querySelectorAll(".update-browser").length===3'));
+    const settingsLayout=await evalJS(`(() => ({overflow:document.documentElement.scrollWidth-innerWidth,rows:[...document.querySelectorAll('.update-browser')].map(el=>({height:el.getBoundingClientRect().height,overflow:el.scrollWidth-el.clientWidth}))}))()`);
+    assert.ok(settingsLayout.overflow<=2,JSON.stringify({width,settingsLayout}));assert.ok(settingsLayout.rows.every(row=>row.overflow<=2),JSON.stringify({width,settingsLayout}));
+    await screenshot(`populated-settings-${width}.png`);
+    await evalJS("document.querySelector('.update-browsers').scrollIntoView({block:'start'})");
+    await screenshot(`populated-settings-browsers-${width}.png`);
+    console.log('PASS populated dashboard/settings '+width+'px '+JSON.stringify({dashboardLayout,settingsLayout}));
+  }
+  await cmd('Page.removeScriptToEvaluateOnNewDocument',{identifier:fixtureScript.identifier});
   assert.deepEqual(errors,[],'Browser console/runtime errors');
   console.log(`PASS no console errors; screenshots in ${screenshots}`);
 } finally {

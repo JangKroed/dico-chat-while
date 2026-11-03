@@ -8,10 +8,6 @@
  */
 (() => {
   const CONTENT_BUILD_ID = 'unmanaged';
-  // 이 파일은 Discord에 주입되는 classic script라 ESM 정책 모듈을 import할 수 없다.
-  // central/extension/retry-policy.js와 동일하게 기본 3회·최대 10회를 적용한다.
-  // 구형 null(무제한), 누락, 잘못된 타입은 유한한 기본값으로 바꾸고 큰 정수만 상한으로 자른다.
-  const boundedSendRetries=value=>Number.isSafeInteger(value)&&value>=0?Math.min(10,value):3;
   const loadedRuntime=typeof chrome!=='undefined'?chrome.runtime:null;
   if (globalThis.__dicoWhileLoaded) {
     const previous=globalThis.__dicoWhileLifecycle;
@@ -902,7 +898,10 @@
   async function deliver(target, delivery) {
     const evidence={phase:delivery?.phase==='prepare'?'prepare':delivery?.phase==='commit'?'commit':'send',stage:'inspect',enterAttempted:false};
     evidence.retryCount=0;
-    evidence.maxSendRetries=delivery?.phase==='commit'?boundedSendRetries(delivery.maxSendRetries):0;
+    // 정상 미발송은 사용자 횟수 설정으로 종료하지 않는다. 구형 유한 값도 무시한다.
+    // null은 같은 초안의 안전한 재시도만 계속한다는 내부 표현이다. 중지·실제 오류·
+    // 발송 여부 불확실은 아래 관찰/승인 보호 장치가 즉시 추가 Enter를 차단한다.
+    evidence.maxSendRetries=delivery?.phase==='commit'?null:0;
     await refreshOwnIdentity(target);
     const result=await performDelivery(target,delivery,evidence);
     // Final-response metadata survives even when optional tracing is unavailable.
@@ -1111,7 +1110,7 @@
         cooldownProbeCancel?.();
         enterAt=Date.now();enterMono=globalThis.performance?.now() ?? enterAt;
         assertOperationActive();
-        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null,()=>requestDeliveryPermission(target,delivery,{type:'DICO_OBSERVE_WAIT',id:delivery.id,phase:'commit',retryCount,elapsedMs:Math.max(0,Date.now()-enterAt)}));
+        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries===null||evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null,()=>requestDeliveryPermission(target,delivery,{type:'DICO_OBSERVE_WAIT',id:delivery.id,phase:'commit',retryCount,elapsedMs:Math.max(0,Date.now()-enterAt)}));
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
         trace('before-enter');
         operation.cancel=()=>watcher?.cancel('EXECUTION_STOPPED');
@@ -1133,7 +1132,7 @@
         evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;
         const flags=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if(outcome.status!=='draft-retained'||retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingSeen===true||outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
+        if(outcome.status!=='draft-retained'||evidence.maxSendRetries!==null&&retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingSeen===true||outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
         const observed=await retryObservation();if(observed)return finishOutcome(observed);
         retryCount++;
       }

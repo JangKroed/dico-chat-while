@@ -1096,21 +1096,25 @@ test('live pre-Enter cooldown holds the same attempt and turn beyond thirty seco
  f.result(c,a);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);f.manager.close();
 });
 
-test('send retry setting snapshots each attempt and rejects invalid limits',()=>{
- const f=fixture();assert.equal(f.manager.snapshot().settings.maxSendRetries,3);
- for(const value of [null,-1,11,Number.MAX_SAFE_INTEGER+1,Infinity,1.5,'3'])assert.throws(()=>f.manager.execute('settings.update',{maxSendRetries:value}),{code:'VALIDATION'});
- f.manager.execute('settings.update',{maxSendRetries:2});const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
- const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,2);
- assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE').payload.maxSendRetries,2);
+test('legacy retry preferences are ignored and every new command continues without a count option',()=>{
+ const f=fixture();assert.equal(Object.hasOwn(f.manager.snapshot().settings,'maxSendRetries'),false);
+ for(const value of [null,0,3,10,27]){
+  f.manager.execute('settings.update',{maxSendRetries:value});
+  assert.equal(Object.hasOwn(f.manager.snapshot().settings,'maxSendRetries'),false);
+ }
+ const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
+ const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,null);
+ assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE').payload.maxSendRetries,null);
  f.manager.execute('settings.update',{maxSendRetries:0});f.prepared(c,a);
- assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='COMMIT_PERMIT').payload.maxSendRetries,2);
+ assert.equal(f.manager.commands(c.instanceId).find(x=>x.type==='COMMIT_PERMIT').payload.maxSendRetries,null);
  f.manager.close();
 });
 
-test('older backups without retry settings restore the default retry limit',()=>{
- const f=fixture(),backup=f.manager.exportBackup();delete backup.settings.maxSendRetries;
- f.manager.execute('settings.update',{maxSendRetries:0});f.manager.importBackup(backup);
- assert.equal(f.manager.snapshot().settings.maxSendRetries,3);f.manager.close();
+test('older backups do not restore a retry preference',()=>{
+ const f=fixture(),backup=f.manager.exportBackup();backup.settings.maxSendRetries=0;
+ f.manager.importBackup(backup);
+ assert.equal(Object.hasOwn(f.manager.snapshot().settings,'maxSendRetries'),false);
+ assert.equal(Object.hasOwn(f.manager.exportBackup().settings,'maxSendRetries'),false);f.manager.close();
 });
 
 test('authorized retries refresh the same permitted attempt without advancing its cursor',()=>{
@@ -1133,7 +1137,7 @@ test('authorized retries refresh the same permitted attempt without advancing it
  f.result(c,a);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);f.manager.close();
 });
 
-test('retry count limit and active run gates deny stale or unauthorized waits',()=>{
+test('retry sequence and active run gates deny stale or unauthorized waits',()=>{
  const f=fixture();f.manager.execute('settings.update',{maxSendRetries:1});const c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);
  const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
  const wait=(retryCount,extra={})=>f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount,cooldownMs:0,elapsedMs:0,...extra},c.instanceId);
@@ -1175,9 +1179,10 @@ test('pre-permit preparation timeout safely retries the same turn with bounded b
  let s=f.manager.snapshot();assert.equal(s.attempts[0].status,'not_sent');assert.equal(s.attempts[0].reasonCode,'PREPARE_TIMEOUT');assert.equal(s.groups[0].status,'running');assert.equal(s.groups[0].cursor,0);assert.equal(s.channels[0].playlistIndex,0);assert.equal(s.attempts.length,1);
  assert.throws(()=>f.prepared(c,first),{code:'ATTEMPT_STATE'});
  advance(5000);s=f.manager.snapshot();assert.equal(s.attempts.length,2);assert.equal(s.attempts[1].playlistIndex,0);
- advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[1].status,'not_sent');assert.equal(s.groups[0].status,'paused');assert.equal(s.groups[0].activeAttemptId,null);
+ advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[1].status,'not_sent');assert.equal(s.groups[0].status,'running');
+ advance(5000);advance(31000);advance(5000);advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[3].status,'not_sent');assert.equal(s.groups[0].status,'paused');assert.equal(s.groups[0].activeAttemptId,null);
  assert.equal(s.incidents.some(i=>i.code==='delivery_unknown'),false);assert.equal(s.incidents.filter(i=>i.status==='open').length,1);
- advance(30000);assert.equal(f.manager.snapshot().attempts.length,2);f.manager.close();
+ advance(30000);assert.equal(f.manager.snapshot().attempts.length,4);f.manager.close();
 });
 
 test('preparation rejection before permit retries only transient errors and repeated ACK is idempotent',()=>{
@@ -1286,18 +1291,17 @@ test('보존기간 정리와 재시작 이후에도 입력창 비움 근거를 �
  }finally{manager?.close();rmSync(directory,{recursive:true,force:true});}
 });
 
-test('장시간 제한 대기에도 같은 차례를 유지하되 기본 재시도 3회 상한은 넘지 않는다',()=>{
+test('정상 미발송 진행은 기존 상한 10회를 넘어 계속하되 사용자 중지는 즉시 차단한다',()=>{
  const f=fixture();try{
-  const c=f.connect();f.apply(c,[f.message('A'),f.message('B')]);const group=f.group([c]);f.start(group);const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,3);f.prepared(c,a);
+  const c=f.connect();f.apply(c,[f.message('A'),f.message('B')]);const group=f.group([c]);f.start(group);const a=f.manager.snapshot().attempts[0];assert.equal(a.maxSendRetries,null);f.prepared(c,a);
   const authorize=retryCount=>f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryCount},c.instanceId);
   const progress=(retryCount,cooldownMs=0,elapsedMs=0)=>f.manager.bridge({type:'DELIVERY_WAIT',sessionId:c.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount,cooldownMs,elapsedMs},c.instanceId);
   assert.equal(authorize(0).allowed,true);assert.equal(progress(1,60000).allowed,true);
   for(let elapsed=10000;elapsed<=23_410_000;elapsed+=10000){f.advance(10000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();assert.equal(progress(1,60000,elapsed).allowed,true);}
   assert.equal(progress(1,0,23_410_000).allowed,true);assert.equal(authorize(1).allowed,true);
-  for(let retry=2;retry<=3;retry++){assert.equal(progress(retry).allowed,true);assert.equal(authorize(retry).allowed,true);}
-  const state=f.manager.snapshot();assert.equal(state.attempts[0].status,'permitted');assert.equal(state.attempts[0].sendRetryCount,3);assert.equal(state.channels[0].playlistIndex,0);
-  assert.equal(progress(4).allowed,false);assert.equal(authorize(4).allowed,false);
-  f.manager.execute('group.stop',{id:group.id});assert.equal(progress(4).allowed,false);assert.equal(authorize(3).allowed,false);
+  for(let retry=2;retry<=12;retry++){assert.equal(progress(retry).allowed,true);assert.equal(authorize(retry).allowed,true);}
+  const state=f.manager.snapshot();assert.equal(state.attempts[0].status,'permitted');assert.equal(state.attempts[0].sendRetryCount,12);assert.equal(state.channels[0].playlistIndex,0);
+  f.manager.execute('group.stop',{id:group.id});assert.equal(progress(13).allowed,false);assert.equal(authorize(12).allowed,false);
  }finally{f.manager.close();}
 });
 test('입력 상태별 종료 사유와 과거 무제한 재시도 진단은 원문 없이 그대로 보존한다',()=>{

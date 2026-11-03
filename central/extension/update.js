@@ -1,8 +1,10 @@
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
-export function extensionReloadDecision({loadedBuildId,status,idle,lastRequested}) {
+export function extensionReloadDecision({loadedBuildId,status,idle,lastRequested,reloadFailures=0}) {
   if(!hash(status?.buildId)||status.buildId===loadedBuildId)return{action:'none'};
   if(!idle||status.reloadSafe!==true)return{action:'defer'};
-  if(lastRequested===status.buildId)return{action:'manual'};
+  // 런타임 재시작 자체의 실패는 최대 3회만 자동 복구한다. 실제 폴더 교체가
+  // 검증된 경우에는 과거 잘못된 폴더에서 남긴 1회 제한 표식만 해제한다.
+  if(reloadFailures>=3||lastRequested===status.buildId&&!(Number.isSafeInteger(status.repairedCopies)&&status.repairedCopies>0))return{action:'manual'};
   return{action:'reload',buildId:status.buildId};
 }
 export async function ensureManagedContent(chrome,records,buildId) {
@@ -35,18 +37,25 @@ export function createExtensionUpdater({chrome,executor,transport,loadedBuildId,
     try {
       const status=await transport.request({type:'EXTENSION_STATUS'});
       const saved=(await chrome.storage.local.get('dicoUpdateReload')).dicoUpdateReload;
-      const decision=extensionReloadDecision({loadedBuildId,status,idle:executor.isIdle,lastRequested:saved?.buildId});
+      const reloadFailures=saved?.buildId===status?.buildId&&Number.isSafeInteger(saved?.failures)?saved.failures:0;
+      const decision=extensionReloadDecision({loadedBuildId,status,idle:executor.isMaintenanceIdle??executor.isIdle,lastRequested:saved?.failed?undefined:saved?.buildId,reloadFailures});
       // A busy configuration lane is transient. Recheck on the next scheduled
       // heartbeat instead of losing the entire pre-start reload window to the
       // ordinary 30-second update backoff. This creates no polling loop.
       if(decision.action==='defer'){lastCheck=-Infinity;return;}
-      if(decision.action==='manual'){onIssue('확장 로드 폴더가 관리 폴더와 다를 수 있습니다. 설정·도움말의 최초 전환 안내를 확인하세요. 같은 버전의 자동 재시작은 반복하지 않습니다.');return;}
-      if(decision.action!=='reload'||!executor.beginMaintenance())return;
+      if(decision.action==='manual'){onIssue(reloadFailures>=3?'확장 자동 재시작이 3회 실패하여 중단되었습니다. 기존 설정은 보존되며 자동 진단 대상입니다.':'확장 로드 폴더가 관리 폴더와 다를 수 있습니다. 검증 가능한 배포 폴더는 자동 동기화하며 같은 버전의 무한 재시작은 차단합니다.');return;}
+      if(decision.action!=='reload'||!executor.beginMaintenance({allowBlocked:true}))return;
       try {
-        await chrome.storage.local.set({dicoUpdateReload:{buildId:decision.buildId,requestedAt:now()}});
+        await chrome.storage.local.set({dicoUpdateReload:{buildId:decision.buildId,requestedAt:now(),failures:reloadFailures}});
         // Maintenance blocks new commands and Enter during the asynchronous write.
-        chrome.runtime.reload();
-      }catch(error){executor.endMaintenance();onIssue('확장 자동 재시작을 완료하지 못했습니다. 확장 관리 화면에서 한 번 새로고침하세요.');}
+        await chrome.runtime.reload();
+      }catch(error){
+        executor.endMaintenance();
+        // 호출 전에 저장한 표식을 성공한 재시작으로 오인하지 않는다. 실패 횟수는
+        // 워커 재시작에도 유지하여 다음 30초 검사에서 제한된 횟수만 재시도한다.
+        try{await chrome.storage.local.set({dicoUpdateReload:{buildId:decision.buildId,requestedAt:now(),failed:true,failures:reloadFailures+1}});}catch{}
+        onIssue('확장 자동 재시작을 완료하지 못했습니다. 기존 설정을 보존하고 제한된 횟수 안에서 자동으로 다시 시도합니다.');
+      }
     }catch{/* Old native hosts do not support update status until first migration. */}
     finally{checking=false;}
   }};

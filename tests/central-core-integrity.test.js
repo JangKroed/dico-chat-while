@@ -115,7 +115,7 @@ test('기본 입력 준비 복구는 최초 시도와 3회 재시도 후 종료�
   }
   const snapshot=f.manager.snapshot();assert.equal(snapshot.groups[0].status,'paused');
   assert.equal(snapshot.groups[0].waitReason,'preparation_failed');assert.equal(snapshot.attempts.length,4);
-  assert.ok(snapshot.attempts.every(a=>a.status==='not_sent'&&a.maxSendRetries===3));
+  assert.ok(snapshot.attempts.every(a=>a.status==='not_sent'&&a.maxSendRetries===null));
   assert.equal(snapshot.groups[0].cursor,0);assert.equal(snapshot.channels[0].playlistIndex,0);
   assert.ok(snapshot.incidents.some(i=>i.status==='open'&&i.rejectionCode==='CONTENT_UNAVAILABLE'));
 });

@@ -1,7 +1,7 @@
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {readFile,realpath} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
-import {safeToUpdate} from './updater.mjs';
+import {safeToUpdate,safeToReloadExtension} from './updater.mjs';
 import {normalizeSessions,UI_SESSION_TTL} from './ui-state.mjs';
 import {createSupportReport,inspectSupportReport,SUPPORT_REPORT_MAX_BYTES} from './support-report.mjs';
 
@@ -63,8 +63,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         // Only the native host reads this credential from the private descriptor.
         if (req.headers.origin || !equal(req.headers.authorization,`Bearer ${bridgeToken}`))throw fail(req.headers.origin?403:401,'브리지 인증이 필요합니다.');
         if (path==='/api/bridge/status' && req.method==='GET') {
-          const snapshot=manager.snapshot(),updatePhase=(await updates?.status?.())?.phase;
-          return json(res,200,{ok:true,protocolVersion:1,pid:process.pid,serviceStatus:snapshot.service?.status,reloadSafe:safeToUpdate(snapshot)&&!['preparing','ready','applying'].includes(updatePhase),busy:(snapshot.attempts || []).some(a=>['preparing','permitted','unknown'].includes(a.status)) || (snapshot.groups || []).some(g=>['running','stop_pending','pause_pending','needs_review'].includes(g.status))});
+          // 업데이트 상태 조회가 디스크 I/O를 기다리는 동안 새 발송이 시작될 수 있다.
+          // 비동기 조회 뒤 최신 실행 상태를 읽어 과거의 유휴 상태로 reload를 승인하지 않는다.
+          const updatePhase=(await updates?.status?.())?.phase,snapshot=manager.snapshot();
+          return json(res,200,{ok:true,protocolVersion:1,pid:process.pid,serviceStatus:snapshot.service?.status,reloadSafe:safeToReloadExtension(snapshot)&&!['preparing','ready','applying'].includes(updatePhase),busy:(snapshot.attempts || []).some(a=>['preparing','permitted','unknown'].includes(a.status)) || (snapshot.groups || []).some(g=>['running','stop_pending','pause_pending','needs_review'].includes(g.status))});
         }
         if (path==='/api/bridge/update/apply' && req.method==='POST') {
           if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');

@@ -8,7 +8,7 @@ const root=resolve(import.meta.dirname,'..'),require=createRequire(join(root,'ce
 let loaded;
 function components(){return loaded??=(async()=>{
   const {build}=require('esbuild');
-  const result=await build({stdin:{contents:"export * from './src/RemovalActions.tsx';export {AccountConnections,ChannelSetup,BrowserConsolidateAction} from './src/App.tsx';export {createElement} from 'react';export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'expose-components',setup(b){b.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {AccountConnections,ChannelSetup,BrowserConsolidateAction};',loader:'tsx'}));}}]});
+  const result=await build({stdin:{contents:"export * from './src/RemovalActions.tsx';export {AccountConnections,ChannelSetup,BrowserConsolidateAction} from './src/App.tsx';export {createElement} from 'react';export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,loader:{'.css':'empty'},plugins:[{name:'expose-components',setup(b){b.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {AccountConnections,ChannelSetup,BrowserConsolidateAction};',loader:'tsx'}));}}]});
   const dir=await mkdtemp(join(tmpdir(),'dico-removal-ui-'));try{const file=join(dir,'component.cjs');await writeFile(file,result.outputFiles[0].contents);return require(file);}finally{await rm(dir,{recursive:true,force:true});}
 })();}
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -39,12 +39,15 @@ test('target rename preserves version and ignores cancellation',async()=>{
   try{const button=RenameTargetAction({target:fixture().targets[0],busy:false,run:async(...args)=>calls.push(args)});globalThis.prompt=()=>null;button.props.onClick();assert.equal(calls.length,0);globalThis.prompt=()=>' 새 공지 ';button.props.onClick();assert.deepEqual(calls[0].slice(0,2),['target.update',{id:'target',expectedVersion:5,name:'새 공지'}]);}finally{globalThis.prompt=before;}
 });
 
-test('account and channel pages expose deletion controls and durable close status after binding removal',async()=>{
-  const {AccountConnections,ChannelSetup,createElement,renderToStaticMarkup}=await components(),s=fixture();s.pendingTabCloses=[{removalId:'removed',instanceId:'gone',accountId:'444',guildId:'222',channelId:'555',accountName:'삭제 계정',channelName:'이전 채널',status:'rejected',rejectionCode:'TARGET_MISMATCH',createdAt:1}];
+test('deleted targets disappear from account and channel pages while cleanup remains diagnostic',async()=>{
+  const {AccountConnections,ChannelSetup,PendingTabCloses,createElement,renderToStaticMarkup}=await components(),s=fixture();s.pendingTabCloses=[{removalId:'removed',instanceId:'gone',accountId:'444',guildId:'222',channelId:'555',accountName:'삭제 계정',channelName:'이전 채널',status:'rejected',rejectionCode:'TARGET_MISMATCH',createdAt:1}];
   const props={s,run:async()=>true,busy:false,go:()=>{}};
   const account=renderToStaticMarkup(createElement(AccountConnections,props));assert.match(account,/계정 삭제/);assert.match(account,/브라우저 삭제/);assert.match(account,/전송 창 하나로 모으기/);
   const channel=renderToStaticMarkup(createElement(ChannelSetup,props));assert.match(channel,/채널 이름 변경/);assert.match(channel,/채널 삭제/);assert.match(channel,/연결 해제/);assert.match(channel,/프로필마다 하나의 최소화된 창/);
-  for(const html of [account,channel]){assert.match(html,/삭제 계정/);assert.match(html,/이전 채널/);assert.match(html,/TARGET_MISMATCH/);assert.match(html,/직접 닫고/);}
+  for(const html of [account,channel])assert.doesNotMatch(html,/삭제 계정|이전 채널|TARGET_MISMATCH|전송 탭 닫기 대기/);
+  const diagnostic=renderToStaticMarkup(createElement(PendingTabCloses,{s}));
+  assert.match(diagnostic,/삭제 완료/);assert.match(diagnostic,/이전 채널/);
+  assert.doesNotMatch(diagnostic,/눌러 주세요|직접 닫고|재연결 대기/);
 });
 
 test('consolidation uses existing managed-window capability and refuses active groups',async()=>{

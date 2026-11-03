@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {createCentralManager} from '../central/core/index.js';
 import {createSettingsDraft,syncSettingsDraft,editSettingsDraft,settingsPayload} from '../central/ui/src/settings-draft.ts';
 
-const saved={maxSendRetries:5,retentionDays:180,notificationsEnabled:true,hideNotificationNames:false};
+const saved={retentionDays:180,notificationsEnabled:true,hideNotificationNames:false};
 test('settings initialize from the saved snapshot without presenting defaults',()=>{
   assert.deepEqual(createSettingsDraft(saved).values,saved);
   assert.equal(createSettingsDraft(undefined),null);
@@ -18,7 +18,7 @@ test('saving notifications preserves an unsaved retention edit and follows other
   draft=editSettingsDraft(draft,'notificationsEnabled',false);
   assert.deepEqual(settingsPayload(draft,'notifications'),{notificationsEnabled:false});
   draft=syncSettingsDraft(draft,{...saved,notificationsEnabled:false,hideNotificationNames:true});
-  assert.deepEqual(draft.values,{maxSendRetries:5,retentionDays:30,notificationsEnabled:false,hideNotificationNames:true});
+  assert.deepEqual(draft.values,{retentionDays:30,notificationsEnabled:false,hideNotificationNames:true});
   assert.deepEqual(settingsPayload(draft,'notifications'),{});
   assert.deepEqual(settingsPayload(draft,'retention'),{retentionDays:30});
 });
@@ -46,19 +46,13 @@ test('notification and retention preferences survive partial saves and a disk re
   }finally{manager?.close();rmSync(directory,{recursive:true,force:true});}
 });
 
-test('retry setting edits survive unrelated saves and emit only the delivery preference',()=>{
- let draft=editSettingsDraft(createSettingsDraft(saved),'maxSendRetries',2);
- draft=syncSettingsDraft(draft,{...saved,notificationsEnabled:false});
- assert.equal(draft.values.maxSendRetries,2);
- assert.deepEqual(settingsPayload(draft,'delivery'),{maxSendRetries:2});
- assert.deepEqual(settingsPayload(draft,'notifications'),{});
- assert.equal(createSettingsDraft({...saved,maxSendRetries:undefined}).values.maxSendRetries,3);
-});
-
-test('retry preferences bound retries and preserve valid zero through ten settings',()=>{
- for(const value of [0,3,6,10]){const draft=editSettingsDraft(createSettingsDraft(saved),'maxSendRetries',value);assert.equal(draft.values.maxSendRetries,value);assert.deepEqual(settingsPayload(draft,'delivery'),{maxSendRetries:value});}
- const draft=createSettingsDraft(saved);
- for(const invalid of [null,-1,1.5,NaN,Infinity,11,Number.MAX_SAFE_INTEGER])assert.equal(editSettingsDraft(draft,'maxSendRetries',invalid),draft);
- assert.equal(createSettingsDraft({...saved,maxSendRetries:null}).values.maxSendRetries,3);
- assert.equal(createSettingsDraft({...saved,maxSendRetries:100}).values.maxSendRetries,10);
+test('legacy retry preferences never appear in drafts or save payloads',()=>{
+ for(const maxSendRetries of [null,0,3,10,100,undefined]){
+  const draft=createSettingsDraft({...saved,maxSendRetries});
+  assert.deepEqual(draft.values,saved);
+  const edited=editSettingsDraft(draft,'retentionDays',30);
+  assert.deepEqual(settingsPayload(edited,'retention'),{retentionDays:30});
+  assert.deepEqual(settingsPayload(edited,'notifications'),{});
+  assert.equal(syncSettingsDraft(draft,{...saved,maxSendRetries:5}),draft);
+ }
 });

@@ -47,7 +47,7 @@ test('real background opener cleans up creation completed after emergency stop w
 test('real background heartbeat discards a response from the previous session',async()=>{
  const state={sessionId:'old',attempts:{a:{attemptId:'a',phase:'unknown'}}};let saves=0,commands=0;
  const executor={state,request:async()=>{state.sessionId='new';return{terminalAttempts:[{attemptId:'a',status:'confirmed'}],commands:[{type:'SEND'}]};},save:async()=>saves++,handleCommand:()=>commands++};
- const run=backgroundFunction('runHeartbeat','connect',{executor,transport:{connected:true}});
+ const run=backgroundFunction('runHeartbeat','connect',{executor,transport:{connected:true},updater:{check:async()=>{}}});
  await run();assert.equal(state.attempts.a.phase,'unknown');assert.equal(saves,0);assert.equal(commands,0);
 });
 test('late repair completion cannot consume a new missing-target budget',async()=>{
@@ -78,6 +78,14 @@ test('managed consolidation cancels moves after stop during tab lookup',async()=
 test('stopped heartbeat still reconciles control-plane resume command without recovery',async()=>{
  const state={sessionId:'s',emergencyStopped:true,attempts:{}};let requests=0,commands=0;
  const executor={state,request:async()=>{requests++;return{commands:[{type:'CONTROL',action:'resume'}]};},save:async()=>{},handleCommand:()=>{commands++;}};
- const run=backgroundFunction('runHeartbeat','connect',{executor,transport:{connected:true}});
+ const run=backgroundFunction('runHeartbeat','connect',{executor,transport:{connected:true},updater:{check:async()=>{}}});
  await run();assert.equal(requests,1);assert.equal(commands,1);
+});
+test('heartbeat checks update while stopped and before failing observation',async()=>{
+ for(const stopped of [true,false]){
+  const events=[];const state={sessionId:'s',emergencyStopped:stopped,attempts:{}};
+  const executor={state,request:async()=>({commands:[]}),save:async()=>{}};
+  const run=backgroundFunction('runHeartbeat','connect',{executor,transport:{connected:true,disconnect:()=>events.push('disconnect')},updater:{check:async()=>events.push('update')},refreshManagedContent:async()=>{},observation:async()=>{events.push('observe');throw Error('failed');}});
+  await run();assert.equal(events[0],'update');if(!stopped)assert.ok(events.includes('observe'));
+ }
 });

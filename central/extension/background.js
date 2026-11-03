@@ -48,9 +48,9 @@ chrome.runtime.onInstalled?.addListener(()=>void configurePanelAction().catch(()
  * 발송 도중 코드가 교체되어 관찰 근거가 사라지는 일을 피하기 위한 조건입니다.
  */
 async function refreshManagedContent(){
-  if(!executor.isIdle)return;
+  if(!executor.isMaintenanceIdle)return;
   let status;try{status=await transport.request({type:'EXTENSION_STATUS'});}catch{return;}
-  if(!status.reloadSafe||status.buildId!==BUILD_ID||!executor.beginMaintenance())return;
+  if(!status.reloadSafe||status.buildId!==BUILD_ID||!executor.beginMaintenance({allowBlocked:true}))return;
   try{
     const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;
     const statuses=await ensureManagedContent(chrome,records,BUILD_ID);
@@ -116,6 +116,9 @@ async function runHeartbeat() {
   const current=()=>transport.connected&&executor.state.sessionId===sessionId;
   try {
     if(!current())return;
+    // 업데이트 확인은 관찰/복구 성공이나 발송 재개에 의존하지 않습니다.
+    // 실제 reload 안전성은 updater의 전용 maintenance 게이트가 판단합니다.
+    await updater.check();if(!current())return;
     const knownAttemptIds=Object.values(executor.state.attempts).filter(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
     const result=await executor.request({type:'HEARTBEAT',knownAttemptIds});
     if(!current())return;
@@ -129,7 +132,7 @@ async function runHeartbeat() {
     if(!current())return;
     for(const command of result.commands || [])void executor.handleCommand(command);
     if(executor.state.emergencyStopped)return;
-    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(!current()||executor.state.emergencyStopped)return;await updater.check();if(current())lastError=null;
+    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(current())lastError=null;
   }catch{if(!current())return;lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect({explicit=false}={}) {
@@ -159,9 +162,10 @@ async function connect({explicit=false}={}) {
       for(const command of response.commands||[])if(command.type!=='CLOSE_CHANNEL')void executor.handleCommand(command);
       const sessionId=executor.state.sessionId;
       const current=()=>transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId;
+      await updater.check({force:true});if(!current())return;
       await refreshManagedContent();if(!current())return;
       await restoreSavedConnections();if(!current())return;
-      await observation();if(!current())return;void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
+      await observation();if(!current())return;clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
       await chrome.alarms.clear('dico-central-reconnect');
     } catch(error){lastError=String(error.message || error).slice(0,200);transport.disconnect();throw Error(lastError);}
   })().finally(()=>{connecting=null;});return connecting;

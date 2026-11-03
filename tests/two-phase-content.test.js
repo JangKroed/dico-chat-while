@@ -236,10 +236,10 @@ test('두 번째 순환의 긴 Markdown·이모지는 실제 작성자와 새 �
  assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.equal(r.events.filter(e=>e.type==='paste').length,2);
 });
 
-test('재시도 0회 설정이면 남은 초안의 증거만 반환하고 중복 요청을 차단한다',async()=>{
+test('구형 0회 설정에서도 중지 시 남은 초안의 증거를 보존하고 중복 요청을 차단한다',async()=>{
  const message='### 제목 💰\n- __설명__ **1600** '.repeat(8).trim();
- const r=rig({managed:true,message,ignoreEnter:true});r.delivery.maxSendRetries=0;await r.request('DICO_PREPARE');r.tick(3000);
- const result=await r.request('DICO_DELIVER');assert.equal(result.status,'draft-retained');assert.equal(result.code,'DELIVERY_DRAFT_RETAINED');
+ const r=rig({managed:true,message,ignoreEnter:true});r.delivery.maxSendRetries=0;await r.request('DICO_PREPARE');r.tick(3000);r.onRetry(()=>r.stop());
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');
  assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(result.deliveryEvidence.composerRetained,true);assert.equal(result.deliveryEvidence.newMessage,false);
  assert.equal(r.editor.innerText,message);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
  assert.equal((await r.request('DICO_DELIVER')).status,'uncertain');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
@@ -372,36 +372,31 @@ test('무시된 첫 Enter만 재시도하고 실제 성공 뒤에는 Enter를 �
   await r.request('DICO_PREPARE');r.tick(3000);
   const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
   assert.equal(r.events.filter(e=>e.type==='keydown').length,ignored+1);
-  assert.equal(result.deliveryEvidence.retryCount,ignored);assert.equal(result.deliveryEvidence.maxSendRetries,5);
+  assert.equal(result.deliveryEvidence.retryCount,ignored);assert.equal(result.deliveryEvidence.maxSendRetries,null);
   assert.equal(r.events.filter(e=>e.type==='paste').length,1);
   assert.equal(r.requests.filter(m=>m.type==='DICO_RETRY_WAIT').length,ignored);
   assert.equal((await r.request('DICO_DELIVER')).status,'uncertain');
   assert.equal(r.events.filter(e=>e.type==='keydown').length,ignored+1);
  }
 });
-test('명시한 재시도 횟수를 지키며 5회보다 큰 설정도 자르지 않는다',async()=>{
- for(const maximum of [0,2,5,8]){
-  const r=rig({ignoreEnter:true});if(maximum!==undefined)r.delivery.maxSendRetries=maximum;
+// 구형 횟수 설정은 정상 미발송 흐름의 종료 조건이 아니다. 동일 초안이
+// 남아 있고 발송 중/성공/오류 증거가 없을 때만 10회를 넘어서 이어 간다.
+test('구형 0·3·10·null 설정과 누락은 정상 미발송을 10회 뒤에도 계속 처리한다',async()=>{
+ for(const value of [0,3,10,null,undefined]){
+  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:12});r.target.coordinated=true;
+  if(value===undefined)delete r.delivery.maxSendRetries;else r.delivery.maxSendRetries=value;
   await r.request('DICO_PREPARE');r.tick(3000);const result=await r.request('DICO_DELIVER');
-  const expected=maximum;
-  assert.equal(result.status,'draft-retained');assert.equal(r.events.filter(e=>e.type==='keydown').length,expected+1);
-  assert.equal(result.deliveryEvidence.retryCount,expected);assert.equal(result.deliveryEvidence.maxSendRetries,expected);
+  assert.equal(result.status,'confirmed',String(value));assert.equal(result.deliveryEvidence.maxSendRetries,null);
+  assert.equal(result.deliveryEvidence.retryCount,12);assert.equal(r.events.filter(e=>e.type==='keydown').length,13);
+  assert.equal(r.events.filter(e=>e.type==='paste').length,1);
  }
 });
-// 구형 무제한 값과 잘못된 입력도 유한 횟수로 끝나야 한다. 중지 훅은
-// 수정 전 코드의 무한 루프를 끊는 테스트 장치이며 정상 구현에서는 호출되지 않는다.
-test('재시도 null·누락·잘못된 값은 기본 3회이며 큰 정수는 최대 10회로 제한한다',async()=>{
- for(const [value,expected] of [[null,3],[undefined,3],[-1,3],[1.5,3],['8',3],[Infinity,3],[Number.MAX_SAFE_INTEGER+1,3],[11,10],[100,10]]){
-  const r=rig({managed:true,loggedUser:'123456789012345678',ignoreEnter:true});r.target.coordinated=true;
-  if(value===undefined)delete r.delivery.maxSendRetries;else r.delivery.maxSendRetries=value;
-  await r.request('DICO_PREPARE');r.tick(3000);r.onRetry(m=>{if(m.retryCount>12)r.stop();});
-  const result=await r.request('DICO_DELIVER');
-  assert.equal(result.deliveryEvidence.maxSendRetries,expected,String(value));
-  assert.equal(result.status,'draft-retained',String(value));
-  assert.equal(result.deliveryEvidence.retryCount,expected,String(value));
-  assert.equal(r.events.filter(e=>e.type==='keydown').length,expected+1,String(value));
-  assert.equal(r.editor.innerText,'A');
- }
+test('정상 미발송이 10회 넘게 지속되어도 중지하면 초안을 보존하고 추가 Enter를 차단한다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',ignoreEnter:true,maxSendRetries:3});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);r.onRetry(m=>{if(m.retryCount===13)r.stop();});
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'uncertain');assert.equal(result.deliveryEvidence.maxSendRetries,null);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,13);assert.equal(r.editor.innerText,'A');
 });
 test('재시도 중지와 초안·계정 변경은 이전 Enter를 미발송으로 단정하지 않는다',async()=>{
  for(const change of ['stop','draft','account','composition','detach']){
@@ -584,7 +579,7 @@ test('Enter 뒤 입력창이 없어지거나 교체되거나 채널·계정이 �
 });
 test('실패 표시도 진단에 남기되 제출한 중앙 입력창이 비면 즉시 완료하고 남은 초안은 완료하지 않는다',async()=>{
  const failed=await preparedComposerRig();failed.onSubmit(()=>failed.post({failed:true,text:'다르게 렌더링된 실패 문구'}));const result=await failed.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.deliveryEvidence.failedSeen,true);
- const retained=await preparedComposerRig({ignoreEnter:true});const remaining=await retained.request('DICO_DELIVER');assert.notEqual(remaining.status,'confirmed');assert.equal(retained.editor.innerText,'A');assert.equal(remaining.deliveryEvidence.composerRetained,true);
+ const retained=await preparedComposerRig({ignoreEnter:true});retained.onRetry(()=>retained.stop());const remaining=await retained.request('DICO_DELIVER');assert.notEqual(remaining.status,'confirmed');assert.equal(retained.editor.innerText,'A');assert.equal(remaining.deliveryEvidence.composerRetained,true);
 });
 test('제출 뒤 빈 입력창은 500ms 샘플이나 타이머 응답을 기다리지 않는다',async()=>{
  const r=await preparedComposerRig();let afterSubmissionTick=false,submitted=false;r.onSubmit(()=>{submitted=true;});r.onTick(()=>{if(submitted)afterSubmissionTick=true;});
@@ -598,17 +593,17 @@ test('중앙 입력 관찰 종료는 변경된 초안·읽기 불가·불안정�
   assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.doesNotMatch(result.error,/25초|게시.{0,4}확인.{0,4}시간/);
  }
 });
-test('명시적 8회 설정은 같은 초안만 재시도하고 입력창이 비는 즉시 끝난다',async()=>{
+test('구형 8회 설정에서도 같은 초안만 재시도하고 입력창이 비는 즉시 끝난다',async()=>{
  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:8,maxSendRetries:8});r.target.coordinated=true;
  await r.request('DICO_PREPARE');r.tick(3000);const began=r.now();const result=await r.request('DICO_DELIVER');
- assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.timing.confirmationMs,0);assert.equal(result.deliveryEvidence.retryCount,8);assert.equal(result.deliveryEvidence.maxSendRetries,8);
+ assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.timing.confirmationMs,0);assert.equal(result.deliveryEvidence.retryCount,8);assert.equal(result.deliveryEvidence.maxSendRetries,null);
  assert.equal(r.events.filter(e=>e.type==='keydown').length,9);assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.ok(r.now()-began<20000,'retained drafts do not wait 25 seconds for each retry');
 });
-test('구형 null 설정도 중지 즉시 끝나고 미지정 재시도는 기본 3회로 제한된다',async()=>{
+test('구형 null 설정과 미지정 재시도도 중지 즉시 끝난다',async()=>{
  const r=rig({managed:true,loggedUser:'123456789012345678',ignoreEnter:true,maxSendRetries:null});r.target.coordinated=true;
  await r.request('DICO_PREPARE');r.tick(3000);r.onRetry(m=>{if(m.retryCount===2)r.stop();});
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.equal(r.editor.innerText,'A');
- const old=await preparedComposerRig({ignoreEnter:true});delete old.delivery.maxSendRetries;const stopped=await old.request('DICO_DELIVER');assert.equal(stopped.status,'draft-retained');assert.equal(old.events.filter(e=>e.type==='keydown').length,4);
+ const old=await preparedComposerRig({ignoreEnter:true});delete old.delivery.maxSendRetries;old.onRetry(m=>{if(m.retryCount===4)old.stop();});const stopped=await old.request('DICO_DELIVER');assert.equal(stopped.status,'uncertain');assert.equal(old.events.filter(e=>e.type==='keydown').length,4);
 });
 test('다른 사람의 새 메시지는 남은 동일 초안의 재시도를 막지 않는다',async()=>{
  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:6,maxSendRetries:6});r.target.coordinated=true;
@@ -797,6 +792,7 @@ test('계정 증명 만료 후 갱신은 입력창 변경으로 고정되지 않
  const r=rig({managed:true,defaultAvatar:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreEnter:true,maxSendRetries:0});
  r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let injected=false;
  r.onTick(()=>{if(!injected&&r.events.some(e=>e.type==='keydown')){injected=true;r.tick(2100);r.post({author:'987654321098765432',text:'foreign'});}});
+ r.onRetry(()=>r.stop());
  const result=await r.request('DICO_DELIVER');
  assert.equal(result.deliveryEvidence.sameComposer,true);
  assert.notEqual(result.code,'COMPOSER_EDITOR_CHANGED');

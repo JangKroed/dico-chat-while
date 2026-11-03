@@ -8,7 +8,7 @@ const root=resolve(import.meta.dirname,'..'),require=createRequire(join(root,'ce
 let loaded;
 async function components(){return loaded??=(async()=>{
   const {build}=require('esbuild');
-  const built=await build({stdin:{contents:"export * from './src/SupportReport.tsx';export * from './src/support-report.ts';export {History,Logs,Settings} from './src/App.tsx';export {createElement,__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE as ReactInternals} from 'react';export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'expose-pages',setup(b){b.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {History,Logs,Settings};',loader:'tsx'}));}}]});
+  const built=await build({stdin:{contents:"export * from './src/SupportReport.tsx';export * from './src/support-report.ts';export {History,Logs,Settings} from './src/App.tsx';export {createElement,__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE as ReactInternals} from 'react';export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,loader:{'.css':'empty'},plugins:[{name:'expose-pages',setup(b){b.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {History,Logs,Settings};',loader:'tsx'}));}}]});
   const dir=await mkdtemp(join(tmpdir(),'dico-support-ui-'));
   try{const path=join(dir,'components.cjs');await writeFile(path,built.outputFiles[0].contents);return require(path);}finally{await rm(dir,{recursive:true,force:true});}
 })();}

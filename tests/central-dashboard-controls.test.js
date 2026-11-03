@@ -9,7 +9,7 @@ const root=resolve(import.meta.dirname,'..'),require=createRequire(join(root,'ce
 const {build}=require('esbuild');
 let componentPromise;
 function components(){return componentPromise??=(async()=>{
-  const result=await build({stdin:{contents:"export {DashboardGroupControls,Dashboard} from './src/App.tsx'; export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,plugins:[{name:'test-component-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {DashboardGroupControls,Dashboard};\n',loader:'tsx'}));}}]});
+  const result=await build({stdin:{contents:"export {DashboardGroupControls,Dashboard} from './src/App.tsx'; export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,loader:{'.css':'empty'},plugins:[{name:'test-component-export',setup(builder){builder.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {DashboardGroupControls,Dashboard};\n',loader:'tsx'}));}}]});
   const dir=await mkdtemp(join(tmpdir(),'dico-group-controls-'));try{const file=join(dir,'component.cjs');await writeFile(file,result.outputFiles[0].contents);return require(file);}finally{await rm(dir,{recursive:true,force:true});}
 })();}
 function fixture(){

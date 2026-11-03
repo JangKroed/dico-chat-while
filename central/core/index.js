@@ -4,7 +4,7 @@
  * instance=연결된 확장, account=계정, target=목적지, channel/binding=계정과 채널의 실행 연결,
  * group=발송 순서, attempt=한 번의 발송 시도, command=확장에 전달할 명령입니다.
  */
-import {DEFAULT_SEND_RETRIES,MAX_SEND_RETRIES,validSendRetries,normalizeSendRetries} from '../extension/retry-policy.js';
+import {DEFAULT_PREPARE_RETRIES,normalizeSendRetries} from '../extension/retry-policy.js';
 import {supportRecordBuffer} from './support-budget.js';
 import {traceData,validTraceStage} from '../extension/delivery-trace.js';
 import {composerClearedEvidence} from '../extension/delivery-receipt.js';
@@ -36,7 +36,7 @@ const correctedBaseInterval = c => minimumInterval(c)+cooldownCorrection(c);
 const customExtraInterval = c => c.intervalMode==='custom'?Math.max(0,(c.customIntervalMs??c.intervalMs)-minimumInterval(c)):0;
 const effectiveInterval = c => correctedBaseInterval(c)+customExtraInterval(c);
 const confirmationOffset = c => Number.isFinite(c.lastConfirmationMs)&&c.lastConfirmationMs>=0&&c.lastConfirmationMs<=30000?c.lastConfirmationMs:0;
-const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,maxSendRetries:DEFAULT_SEND_RETRIES,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
+const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
 export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
   const store = new CentralStore(databasePath), listeners=new Set();
@@ -447,7 +447,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
     const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
-    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&retryCount<normalizeSendRetries(a.maxSendRetries);
+    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&retryCount<DEFAULT_PREPARE_RETRIES;
     // Only the service can issue a COMMIT permit. No permit means this attempt
     // cannot press Enter, even if its PREPARE response arrives after timeout.
     a.reasonCode=reasonCode;a.executionBlocked=true;finish(a,'not_sent');
@@ -660,7 +660,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(p.retentionDays!==undefined){ensure([30,90,180].includes(p.retentionDays),'VALIDATION','Choose 30, 90 or 180 retention days.');state.settings.retentionDays=p.retentionDays;}
     if(p.onboardingStep!==undefined){ensure(Number.isInteger(p.onboardingStep)&&p.onboardingStep>=0&&p.onboardingStep<=10,'VALIDATION','Invalid onboarding step.');state.settings.onboardingStep=p.onboardingStep;}
     if(p.cooldownMs!==undefined){ensure(Number.isInteger(p.cooldownMs)&&p.cooldownMs>=300000&&p.cooldownMs<=86400000,'VALIDATION','Notification cooldown must be between 5 minutes and 24 hours.');state.settings.cooldownMs=p.cooldownMs;}
-    if(p.maxSendRetries!==undefined){ensure(validSendRetries(p.maxSendRetries),'VALIDATION',`Send retry count must be an integer between 0 and ${MAX_SEND_RETRIES}.`);state.settings.maxSendRetries=p.maxSendRetries;}
+    // 이전 UI/백업의 횟수 설정은 호환 입력으로 무시합니다. 정상 미발송의
+    // 계속 시도는 내부 정책이며 사용자 설정이나 실제 오류 복구 한도가 아닙니다.
+    delete state.settings.maxSendRetries;
     if(p.notificationTypes!==undefined){const allowed=['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure','permit_delay'];ensure(Array.isArray(p.notificationTypes)&&p.notificationTypes.every(x=>allowed.includes(x)),'VALIDATION','Unknown notification type.');state.settings.notificationTypes=[...new Set(p.notificationTypes)];}
     if(p.quietHours!==undefined){const q=p.quietHours,hhmm=/^(?:[01]\d|2[0-3]):[0-5]\d$/;ensure(q&&typeof q.enabled==='boolean'&&hhmm.test(q.start)&&hhmm.test(q.end),'VALIDATION','Quiet hours require enabled and HH:mm start/end.');state.settings.quietHours={enabled:q.enabled,start:q.start,end:q.end};}
   }
@@ -718,7 +720,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.removals.closeRequests=state.removals.closeRequests.filter(r=>!channels.some(c=>bindingKey(c)===bindingKey(r)));
     for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;state.settings.maxSendRetries=DEFAULT_SEND_RETRIES;if(backup.settings)updateSettings({...backup.settings,maxSendRetries:normalizeSendRetries(backup.settings.maxSendRetries)});
+    state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;delete state.settings.maxSendRetries;if(backup.settings)updateSettings(backup.settings);
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
   }
   function importBackup(backup){return transact(()=>restore(backup));}
@@ -801,14 +803,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           // A denied wait is still read-only liveness for this exact lane.
           // Do not spend the next retry while identity verification recovers.
           const current=a.sendRetryCount??0,count=message.retryCount;
-          const validWait=Number.isSafeInteger(message.elapsedMs)&&message.elapsedMs>=0&&(message.retryPhase===true?Number.isSafeInteger(count)&&count>=1&&count>=current&&count<=current+1&&count<=normalizeSendRetries(a.maxSendRetries):current===0&&(message.retryPhase===undefined||message.retryPhase===false));
+          const validWait=Number.isSafeInteger(message.elapsedMs)&&message.elapsedMs>=0&&(message.retryPhase===true?Number.isSafeInteger(count)&&count>=1&&count>=current&&count<=current+1:current===0&&(message.retryPhase===undefined||message.retryPhase===false));
           if(!validWait)return{allowed:false};
           a.preEnterWaitObservedAt=now();a.enterReadyAt=now();if(current>0)a.retryObservedAt=now();
           return{allowed:false,retryable:true,code:'CHANNEL_NOT_READY',retryAfterMs:500};
         }
         if(message.retryPhase===true){
           const count=message.retryCount,current=a.sendRetryCount??0;
-          if(!Number.isSafeInteger(count)||count<1||count>normalizeSendRetries(a.maxSendRetries)||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||now()-(a.retryObservedAt||a.enterReadyAt||a.permittedAt)>30000||count<current||count>current+1||count===current+1&&a.authorizedRetryCount!==count-1||count===current&&a.authorizedRetryCount!==count-1&&a.authorizedRetryCount!==count)return{allowed:false};
+          if(!Number.isSafeInteger(count)||count<1||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||now()-(a.retryObservedAt||a.enterReadyAt||a.permittedAt)>30000||count<current||count>current+1||count===current+1&&a.authorizedRetryCount!==count-1||count===current&&a.authorizedRetryCount!==count-1&&a.authorizedRetryCount!==count)return{allowed:false};
           a.sendRetryCount=count;a.retryObservedAt=now();
         }else if(message.retryPhase!==undefined&&message.retryPhase!==false||a.sendRetryCount>0)return{allowed:false};
         const waiting=message.cooldownMs>0,changed=Boolean(a.preEnterWaiting)!==waiting;
@@ -850,7 +852,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(a.preEnterWaiting)return deny('DISCORD_COOLDOWN',true);
         const retryCount=message.retryCount??0;
         if(!Number.isSafeInteger(retryCount)||retryCount<0||retryCount!==(a.sendRetryCount??0))return deny('RETRY_STATE_MISMATCH');
-        if(retryCount>normalizeSendRetries(a.maxSendRetries))return deny('RETRY_LIMIT_REACHED');
         if(retryCount>0&&(!a.retryObservedAt||now()-a.retryObservedAt>30000))return deny('RETRY_OBSERVATION_STALE',true);
         try{eligibleChannel(c);}catch(error){return deny(['ACCOUNT_UNVERIFIED','CHANNEL_UNVERIFIED','INSTANCE_OFFLINE','CONFIG_PENDING'].includes(error.code)?'CHANNEL_NOT_READY':error.code||'CHANNEL_NOT_READY',true);}
         if(monotonicNow()<Math.max(g.nextMono||0,c.nextMono||0))return deny('INTERVAL_NOT_ELAPSED',true);
@@ -1106,7 +1107,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       const prepareDue=Math.max(g.nextMono||0,(c.nextMono||0)-(earlyPrepare?5000:0));
       if(mono<prepareDue){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
       const item=c.playlist[c.playlistIndex%c.playlist.length],m=get('messages',item.messageId),revision=m.revisions.find(r=>r.id===item.revisionId);
-      const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false,maxSendRetries:normalizeSendRetries(state.settings.maxSendRetries)};
+      const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false,maxSendRetries:normalizeSendRetries()};
       state.attempts.push(a);g.activeAttemptId=a.id;g.waitReason='preparing';g.nextEligibleAt=null;command('PREPARE',c.instanceId,attemptPayload(a));event('delivery.preparing',{attemptId:a.id,groupId:g.id,instanceId:c.instanceId,accountId:c.accountId,channelId:c.channelId});
     }
     return{ok:true};
@@ -1193,18 +1194,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
   function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(ACTIVE.has(a.status)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
-    // 이전 무제한 정책은 유한 횟수로 이행합니다. 사용자가 정한 0..10은
-    // 그대로 보존하고, 활성 시도의 결과·횟수·잠금은 변경하지 않습니다.
-    // 재시작의 기존 세션 차단 절차가 뒤따르므로 이행 자체가 재발송을 허가하지 않습니다.
-    const previousRetryLimit=state.settings.maxSendRetries;
-    state.settings.maxSendRetries=normalizeSendRetries(previousRetryLimit);
+    // 과거 사용자별 횟수 제한은 폐기하되, 활성 시도의 누적 횟수·결과·
+    // 잠금은 보존합니다. 바로 아래 재시작 절차에서 이전 실행을 차단하므로
+    // 내부 계속 시도 정책으로의 이행이 과거 미확인 발송을 다시 보내지 않습니다.
+    const hadRetryPreference=Object.hasOwn(state.settings,'maxSendRetries');
+    delete state.settings.maxSendRetries;
     let normalizedAttempts=0;
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status))){
-      const bounded=normalizeSendRetries(a.maxSendRetries);
-      if(a.maxSendRetries!==bounded){a.maxSendRetries=bounded;normalizedAttempts++;}
+      if(a.maxSendRetries!==null){a.maxSendRetries=normalizeSendRetries();normalizedAttempts++;}
     }
-    if(previousRetryLimit!==state.settings.maxSendRetries||normalizedAttempts)event('settings.retry_policy_migrated',{reasonCode:'BOUNDED_RETRY_POLICY',maxSendRetries:state.settings.maxSendRetries,normalizedAttempts});
-    state.retryPolicyVersion=2;
+    if(hadRetryPreference||normalizedAttempts)event('settings.retry_policy_migrated',{reasonCode:'CONTINUOUS_SEND_SEPARATE_ERROR_RECOVERY',maxSendRetries:null,prepareRetries:DEFAULT_PREPARE_RETRIES,normalizedAttempts});
+    state.retryPolicyVersion=3;
     state.service={status:'ready',reasonCode:null,startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
     for(const i of state.instances){invalidateAccounts(i.id);i.connected=false;i.sessionId=id();delete i.lastSeenMono;}
@@ -1213,6 +1213,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
-  else transact(()=>{state.retryPolicyVersion=2;event('service.started');});
+  else transact(()=>{state.retryPolicyVersion=3;event('service.started');});
   return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
 }

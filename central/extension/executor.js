@@ -51,8 +51,13 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     return retryRequest({type:'ACK',commandId:c.id,status,...extra});
   }
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
+  // 과거 횟수 옵션은 내부 계속 시도 정책으로 이행합니다. 실제 입력은 매번
+  // 동일 시도·연속 횟수·세션·중지 상태와 중앙 승인을 다시 확인해야 합니다.
   const delivery=a=>({id:a.attemptId,sessionId:a.sessionId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:normalizeSendRetries(a.maxSendRetries),...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
   const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
+  // 업데이트는 이미 실행 차단된 미확인 결과를 그대로 보존해 재시작할 수 있습니다.
+  // 일반 연결 복구 idle은 엄격하게 유지하며, 활성 호출/초안 준비/발송 중에는 허용하지 않습니다.
+  const isMaintenanceIdle=()=>Boolean(state)&&!state.resetPending&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase)||['unknown','needs_review'].includes(a.phase)&&a.result?.executionBlocked===true);
   const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&normalizeSendRetries(a.maxSendRetries)===normalizeSendRetries(p.maxSendRetries);
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
   function inputAllowed(message,tabId){
@@ -80,7 +85,6 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(message.phase==='prepare')return{allowed:true};
     const retryCount=message.retryCount??0;
     if(!Number.isSafeInteger(retryCount)||retryCount!==(a.sendRetryCount??0))return denied('RETRY_COUNT_MISMATCH');
-    if(retryCount>normalizeSendRetries(a.maxSendRetries))return denied('RETRY_LIMIT_REACHED');
     const started=now(),monoStarted=monotonicNow();
     try{
       const response=await request({type:'AUTHORIZE_ENTER',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,retryCount});
@@ -135,7 +139,6 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return denied('INVALID_WAIT');
       if(mode==='retry'){
         if(!Number.isSafeInteger(message.retryCount)||message.retryCount<1||message.retryCount<(a.sendRetryCount??0)||message.retryCount>(a.sendRetryCount??0)+1)return denied('RETRY_COUNT_MISMATCH');
-        if(message.retryCount>normalizeSendRetries(a.maxSendRetries))return denied('RETRY_LIMIT_REACHED');
         requestFields={retryPhase:true,retryCount:message.retryCount,cooldownMs:message.cooldownMs};
       }else{
         if(message.enterAttempted!==false||(a.sendRetryCount??0)!==0)return denied('RETRY_COUNT_MISMATCH');
@@ -402,7 +405,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     void job.finally(()=>{if(commandJobs.get(commandKey)===job)commandJobs.delete(commandKey);}).catch(()=>{});
     return job;
   }
-  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,authorizeInput,inputAllowed,inputDenial:localDenial,preEnterWait,retryWait,authorizePreEnterWait,authorizeRetryWait,observationWait,cooldownSample,async setSession(s){
+  return {get isIdle(){return isIdle();},get isMaintenanceIdle(){return isMaintenanceIdle();},beginMaintenance({allowBlocked=false}={}){if(maintenance||!(allowBlocked?isMaintenanceIdle():isIdle()))return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,authorizeInput,inputAllowed,inputDenial:localDenial,preEnterWait,retryWait,authorizePreEnterWait,authorizeRetryWait,observationWait,cooldownSample,async setSession(s){
       await load();const resetEpoch=s.resetEpoch??0;
       if(!Number.isSafeInteger(resetEpoch)||resetEpoch<0)throw Error('초기화 세대가 올바르지 않습니다.');
       const reset=state.resetPending===true||s.resetRequired===true||resetEpoch!==state.resetEpoch;

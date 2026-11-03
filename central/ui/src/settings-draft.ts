@@ -1,9 +1,9 @@
-export type Preferences = {retentionDays:number;notificationsEnabled:boolean;hideNotificationNames:boolean;maxSendRetries:number}
+export type Preferences = {retentionDays:number;notificationsEnabled:boolean;hideNotificationNames:boolean}
 export type SettingsDraft = {saved:Preferences;values:Preferences}
-const fields = ['retentionDays','notificationsEnabled','hideNotificationNames','maxSendRetries'] as const
+const fields = ['retentionDays','notificationsEnabled','hideNotificationNames'] as const
 function readPreferences(settings:Record<string,unknown>|undefined):Preferences|null {
   if(!settings||![30,90,180].includes(Number(settings.retentionDays))||typeof settings.notificationsEnabled!=='boolean'||typeof settings.hideNotificationNames!=='boolean')return null
-  return {retentionDays:Number(settings.retentionDays),notificationsEnabled:settings.notificationsEnabled,hideNotificationNames:settings.hideNotificationNames,maxSendRetries:Number.isSafeInteger(settings.maxSendRetries)&&Number(settings.maxSendRetries)>=0?Math.min(10,Number(settings.maxSendRetries)):3}
+  return {retentionDays:Number(settings.retentionDays),notificationsEnabled:settings.notificationsEnabled,hideNotificationNames:settings.hideNotificationNames}
 }
 export function createSettingsDraft(settings:Record<string,unknown>|undefined):SettingsDraft|null {
   const saved=readPreferences(settings)
@@ -21,13 +21,11 @@ export function syncSettingsDraft(draft:SettingsDraft|null,settings:Record<strin
   return {saved,values}
 }
 export function editSettingsDraft<K extends keyof Preferences>(draft:SettingsDraft|null,key:K,value:Preferences[K]):SettingsDraft|null {
-  // 무제한/과도한 재시도는 저장하지 않습니다. 서버와 동일한 0~10회 범위입니다.
-  if(key==='maxSendRetries'&&(!Number.isSafeInteger(value)||Number(value)<0||Number(value)>10))return draft
   return draft?{...draft,values:{...draft.values,[key]:value}}:null
 }
-export function settingsPayload(draft:SettingsDraft|null,section:'notifications'|'retention'|'delivery'):Record<string,unknown>|null {
+export function settingsPayload(draft:SettingsDraft|null,section:'notifications'|'retention'):Record<string,unknown>|null {
   if(!draft)return null
-  const keys=section==='delivery'?['maxSendRetries'] as const:section==='retention'?['retentionDays'] as const:['notificationsEnabled','hideNotificationNames'] as const
+  const keys=section==='retention'?['retentionDays'] as const:['notificationsEnabled','hideNotificationNames'] as const
   return Object.fromEntries(keys.filter(key=>draft.values[key]!==draft.saved[key]).map(key=>[key,draft.values[key]]))
 }
 export function settingsDirty(draft:SettingsDraft|null):boolean {

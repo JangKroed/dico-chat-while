@@ -2521,9 +2521,11 @@ main {
 .update-browsers .subheading {
   gap: 12px;
 }
+/* 긴 업데이트 설명은 별도 행에 배치해 브라우저 이름이 한 글자 폭으로 눌리지 않게 한다. */
 .update-browser {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(100px, 1fr) minmax(110px, 1fr);
+  align-items: start;
   gap: 12px;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
@@ -2531,7 +2533,6 @@ main {
   color: var(--text-subtle);
 }
 .update-browser>div {
-  flex: 1;
   min-width: 0;
 }
 .update-browser strong,.update-browser small {
@@ -2545,6 +2546,11 @@ main {
 .update-browser small {
   font-size: 12px;
   margin-top: 4px;
+}
+.update-browser>.secondary {
+  grid-column: 1 / -1;
+  margin: 0;
+  line-height: 1.7;
 }
 .update-browser>.setup-status {
   white-space: normal;
@@ -2577,14 +2583,11 @@ main {
   width: 100%;
 }
 .update-browser {
-  flex-wrap: wrap;
+  grid-template-columns: minmax(0, 1fr);
   gap: 9px;
 }
-.update-browser>div {
-  flex-basis: 50%;
-}
 .update-browser>.setup-status {
-  margin-left: auto;
+  justify-self: start;
 }
 .update-browsers .subheading {
   align-items: flex-start;

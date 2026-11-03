@@ -72,6 +72,22 @@ export function supportedUpdateNode(version){const [major,minor,patch]=String(ve
  * 그룹이 멈췄다는 표시만으로 충분하지 않습니다. 진행 중·미확인 시도와 제어 의도도 검사합니다.
  */
 export function safeToUpdate(snapshot){return Boolean(snapshot&&['ready','stopped','resume_required'].includes(snapshot.service?.status)&&Array.isArray(snapshot.groups)&&snapshot.groups.every(g=>['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent)&&Array.isArray(snapshot.attempts)&&!snapshot.attempts.some(a=>activeAttempts.has(a.status)));}
+/**
+ * 확장 코드 교체는 관리 프로그램 전체 교체와 구분한다. 이미 입력 차단이 확인된
+ * 미확인 결과는 기록·그룹 잠금을 그대로 보존한 채 확장만 교체할 수 있다.
+ * 실제 준비/실행 중이거나 중지 확인 중인 경우에는 여전히 교체를 금지한다.
+ */
+export function safeToReloadExtension(snapshot){
+  if(!snapshot||!['ready','stopped','resume_required'].includes(snapshot.service?.status)||!Array.isArray(snapshot.groups)||!Array.isArray(snapshot.attempts))return false;
+  const blocked=new Map(snapshot.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true&&typeof a.id==='string').map(a=>[a.id,a]));
+  if(snapshot.attempts.some(a=>activeAttempts.has(a.status)&&!blocked.has(a.id)))return false;
+  return snapshot.groups.every(group=>{
+    if(!['stopped','paused','needs_review'].includes(group.status)||group.controlIntent)return false;
+    if(!group.activeAttemptId)return true;
+    const attempt=blocked.get(group.activeAttemptId);
+    return Boolean(attempt&&attempt.groupId===group.id);
+  });
+}
 export function assertUpdateSafe(snapshot){if(!safeToUpdate(snapshot))throw error('UPDATE_BUSY','모든 그룹을 중지하거나 일시정지하고 진행 중·미확인 발송과 중지 확인을 먼저 해결하세요.');}
 export function publicUpdateStatus(value={}){
   const phase=['idle','preparing','ready','applying','completed','failed'].includes(value.phase)?value.phase:'idle';
