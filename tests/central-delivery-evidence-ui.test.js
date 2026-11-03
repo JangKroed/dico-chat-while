@@ -47,3 +47,25 @@ test('legacy timeout and fresh composer failures have actionable input-state lab
   assert.ok(deliveryReasonLabel(code));assert.doesNotMatch(unknownDeliveryCause(code),/증거가 충분하지/);
  }
 });
+
+
+test('retained draft is an observation rather than a mandatory manual resend instruction',()=>{
+ assert.equal(deliveryReasonLabel('DELIVERY_DRAFT_RETAINED'),'입력창에 문구 남음');
+ assert.doesNotMatch(deliveryReasonLabel('DELIVERY_DRAFT_RETAINED'),/필요|확인해야/);
+ assert.match(unknownDeliveryCause('DELIVERY_DRAFT_RETAINED'),/미발송으로 판단할 수 없습니다/);
+});
+
+test('transient authorization and channel recovery codes have Korean reasons without manual posting demands',()=>{
+ for(const code of ['AUTHORIZATION_TIMEOUT','AUTHORIZATION_UNAVAILABLE','CHANNEL_NOT_READY']){
+  assert.ok(deliveryReasonLabel(code),code);
+  assert.match(unknownDeliveryCause(code),/연결|허가|준비/);
+  assert.doesNotMatch(unknownDeliveryCause(code),/게시 내역을 확인|실제 게시 여부.*확인해야/);
+ }
+});
+
+
+test('unknown-delivery causes describe input or connection recovery without requiring manual post checks',()=>{
+ for(const code of ['CONTENT_UNAVAILABLE','COMMIT_EDITOR_UNSTABLE','PREPARE_EDITOR_UNSTABLE','CONTENT_EXCEPTION_BEFORE_ENTER','PREPARE_WAIT_TIMEOUT','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING']){
+  assert.doesNotMatch(unknownDeliveryCause(code),/게시 내역을 확인|게시 여부를.*확인해야|게시 여부를 확인하세요/,code);
+ }
+});

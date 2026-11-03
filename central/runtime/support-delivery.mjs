@@ -1,0 +1,178 @@
+import {randomBytes,randomUUID,createHash,timingSafeEqual} from 'node:crypto';
+import {mkdirSync,readFileSync,writeFileSync,renameSync,chmodSync,unlinkSync,openSync,fsyncSync,closeSync} from 'node:fs';
+import {resolve,join} from 'node:path';
+import {isIP} from 'node:net';
+import {inspectSupportReport,SUPPORT_REPORT_MAX_BYTES} from './support-report.mjs';
+
+const DEFAULTS={enabled:false,autoSend:false,receiverUrl:'',includeBodies:false,includeNames:false,receiverEnabled:false,retentionDays:30};
+const DAY=86400000;
+const fail=(message,status=400,code='SUPPORT_DELIVERY_INVALID')=>Object.assign(Error(message),{status,code});
+const copy=value=>structuredClone(value);
+function readJSON(path,fallback){try{return JSON.parse(readFileSync(path,'utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
+function atomicJSON(path,value){
+ const temporary=path+'.tmp',fd=openSync(temporary,'w',0o600);
+ try{writeFileSync(fd,JSON.stringify(value));fsyncSync(fd);}finally{closeSync(fd);}
+ renameSync(temporary,path);if(process.platform!=='win32')chmodSync(path,0o600);
+}
+function privateHost(host){
+ const name=host.replace(/^\[|\]$/g,'').toLowerCase();
+ if(name==='localhost'||name==='::1')return true;
+ if(isIP(name)===4){const [a,b]=name.split('.').map(Number);return a===127||a===10||a===192&&b===168||a===172&&b>=16&&b<=31;}
+ return isIP(name)===6&&(/^(fc|fd)/.test(name)||/^fe[89ab]/.test(name));
+}
+function receiverURL(input){
+ if(input==='')return '';
+ if(typeof input!=='string'||input.length>2048)throw fail('수신 서버 주소를 확인하세요.');
+ let url;try{url=new URL(input);}catch{throw fail('수신 서버 주소를 확인하세요.');}
+ if(url.username||url.password||url.search||url.hash||!['https:','http:'].includes(url.protocol)||url.protocol==='http:'&&!privateHost(url.hostname))throw fail('수신 주소는 인증정보 없는 HTTPS 또는 내부망 HTTP 주소여야 합니다.');
+ return url.href;
+}
+function tokenValue(value){if(typeof value!=='string'||value.length>512||value!==''&&!/^[a-zA-Z0-9._~-]{24,512}$/.test(value))throw fail('수신 서버에서 발급한 연결 키를 확인하세요.');return value;}
+function settingsPatch(settings,patch){
+ if(!patch||typeof patch!=='object'||Array.isArray(patch))throw fail('자동 제보 설정을 확인하세요.');
+ const next={...settings};
+ for(const key of ['enabled','autoSend','includeBodies','includeNames','receiverEnabled'])if(patch[key]!==undefined){if(typeof patch[key]!=='boolean')throw fail('자동 제보 설정 값을 확인하세요.');next[key]=patch[key];}
+ if(patch.retentionDays!==undefined){if(!Number.isInteger(patch.retentionDays)||patch.retentionDays<1||patch.retentionDays>365)throw fail('보관 기간은 1~365일이어야 합니다.');next.retentionDays=patch.retentionDays;}
+ if(patch.receiverUrl!==undefined)next.receiverUrl=receiverURL(patch.receiverUrl);
+ return next;
+}
+async function receiptJSON(response){
+ if(!response.ok){await response.body?.cancel();throw fail(`수신 서버가 HTTP ${response.status} 응답을 반환했습니다.`,502,'SUPPORT_RECEIVER_REJECTED');}
+ const reader=response.body?.getReader();if(!reader)throw fail('수신 서버 접수 확인이 없습니다.',502);
+ const chunks=[];let length=0;
+ try{for(;;){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>65536)throw fail('수신 서버 응답이 너무 큽니다.',502);chunks.push(Buffer.from(value));}}
+ finally{await reader.cancel().catch(()=>{});}
+ try{return JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{throw fail('수신 서버 접수 확인 형식을 확인하세요.',502);}
+}
+function restrictPrivacy(input,policy){
+ const report=inspectSupportReport(input).report;
+ const privacy={...report.privacy,includeBodies:report.privacy.includeBodies&&policy.includeBodies,includeNames:report.privacy.includeNames&&policy.includeNames};
+ if(privacy.includeBodies===report.privacy.includeBodies&&privacy.includeNames===report.privacy.includeNames)return report;
+ return inspectSupportReport({...report,privacy}).report;
+}
+
+// This store is owned by the runtime's single-instance lock. All disk mutations
+// are synchronous and atomic; report creation is serialized separately because
+// it reads async build metadata. Credentials never enter the report/state file.
+export function createSupportDelivery({dir,createReport,now=Date.now,fetchImpl=globalThis.fetch,timeoutMs=15000,retryBaseMs=30000,pollMs=5000}={}){
+ if(!dir||typeof createReport!=='function')throw Error('Support delivery requires dir and createReport.');
+ const directory=resolve(dir),outDir=join(directory,'outbox'),inDir=join(directory,'inbox');
+ for(const path of [directory,outDir,inDir]){mkdirSync(path,{recursive:true,mode:0o700});if(process.platform!=='win32')chmodSync(path,0o700);}
+ const statePath=join(directory,'state.json'),credentialPath=join(directory,'credentials.json');
+ let state=readJSON(statePath,{version:1,settings:{...DEFAULTS},outbox:[],inbox:[]});
+ if(state.version!==1||!Array.isArray(state.outbox)||!Array.isArray(state.inbox))throw Error('자동 제보 저장소 형식을 확인하세요.');
+ state.settings=settingsPatch(DEFAULTS,state.settings);
+ let credentials=readJSON(credentialPath,null);
+ if(!credentials){credentials={receiverToken:randomBytes(32).toString('hex'),reporterToken:''};atomicJSON(credentialPath,credentials);}
+ tokenValue(credentials.receiverToken);tokenValue(credentials.reporterToken);
+ if(process.platform!=='win32')chmodSync(credentialPath,0o600);
+ for(const entry of state.outbox)if(entry.status==='sending'){entry.status='queued';entry.nextAttemptAt=now();}
+ const save=()=>atomicJSON(statePath,state);
+ let closed=false,timer=null,queueTail=Promise.resolve(),flushing=null,controller=null;
+ const pendingPolicies=new Set();
+ save();
+ const outPath=id=>join(outDir,`${id}.json`),inPath=id=>join(inDir,`${id}.json`);
+ const safeId=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(id);
+ function status(){
+  const configured=Boolean(state.settings.receiverUrl&&credentials.reporterToken);
+  return copy({settings:state.settings,configured,hasReporterToken:Boolean(credentials.reporterToken),transportWarning:state.settings.receiverUrl.startsWith('http:')?'내부망 HTTP는 보고서와 연결 키를 암호화하지 않습니다. 신뢰하는 네트워크에서만 사용하세요.':null,outbox:state.outbox,inbox:state.inbox,counts:{queued:state.outbox.filter(item=>['queued','sending'].includes(item.status)).length,sent:state.outbox.filter(item=>item.status==='sent').length,failed:state.outbox.filter(item=>item.status==='failed').length,inbox:state.inbox.length}});
+ }
+ function configure(patch){
+  const next=settingsPatch(state.settings,patch);
+  let reporterToken=credentials.reporterToken;
+  if(next.receiverUrl!==state.settings.receiverUrl)reporterToken='';
+  if(patch.reporterToken!==undefined)reporterToken=tokenValue(patch.reporterToken);
+  const changedDestination=next.receiverUrl!==state.settings.receiverUrl||reporterToken!==credentials.reporterToken;
+  const loweredPrivacy=state.settings.includeBodies&&!next.includeBodies||state.settings.includeNames&&!next.includeNames;
+  if(!next.enabled||changedDestination||loweredPrivacy)controller?.abort();
+  credentials={...credentials,reporterToken};atomicJSON(credentialPath,credentials);
+  state.settings=next;save();
+  if(loweredPrivacy){
+   for(const policy of pendingPolicies){policy.includeBodies&&=next.includeBodies;policy.includeNames&&=next.includeNames;}
+   // Shrink unsent reports immediately, including the copy of an aborted
+   // request. Re-enabling inclusion never restores removed data. A request
+   // already accepted by the receiver cannot be recalled by aborting it.
+   for(const item of state.outbox)if(item.status!=='sent')atomicJSON(outPath(item.id),restrictPrivacy(readJSON(outPath(item.id),null),next));
+  }
+  return status();
+ }
+ function authorizeReceiver(authorization){
+  if(!state.settings.receiverEnabled)throw fail('이 설치에서 보고서 수신이 꺼져 있습니다.',403,'SUPPORT_RECEIVER_DISABLED');
+  const provided=typeof authorization==='string'&&authorization.startsWith('Bearer ')?authorization.slice(7):'';
+  const hash=value=>createHash('sha256').update(value).digest();
+  if(!provided||!timingSafeEqual(hash(provided),hash(credentials.receiverToken)))throw fail('보고서 수신 연결 키가 필요합니다.',401,'SUPPORT_RECEIVER_UNAUTHORIZED');
+  return true;
+ }
+ function queue(options={}){
+  const job=queueTail.then(async()=>{
+   if(closed)throw fail('자동 제보 처리가 종료되었습니다.',409);
+   if(!state.settings.enabled||options.automatic&&!state.settings.autoSend){if(options.automatic)return null;throw fail('보고서 전송 허용 설정을 먼저 켜 주세요.',409,'SUPPORT_SENDING_DISABLED');}
+   if(options.incidentId!==undefined&&(typeof options.incidentId!=='string'||!options.incidentId||options.incidentId.length>200))throw fail('문제 식별자를 확인하세요.');
+   for(const key of ['includeBodies','includeNames'])if(options[key]!==undefined&&typeof options[key]!=='boolean')throw fail('보고서 개인정보 포함 옵션을 확인하세요.');
+   const duplicate=options.incidentId&&state.outbox.find(item=>item.incidentId===options.incidentId);if(duplicate)return copy(duplicate);
+   const settings={...state.settings};
+   let report;pendingPolicies.add(settings);
+   try{report=await createReport({...(options.attemptId!==undefined?{attemptId:options.attemptId}:{}),from:options.from??Math.max(0,now()-3600000),to:options.to??now(),includeBodies:settings.includeBodies&&(options.automatic||options.includeBodies!==false),includeNames:settings.includeNames&&(options.automatic||options.includeNames!==false)});}finally{pendingPolicies.delete(settings);}
+   if(options.userDescription!==undefined)report.userDescription=options.userDescription;
+   if(closed||!state.settings.enabled||options.automatic&&!state.settings.autoSend)return null;
+   const clean=restrictPrivacy(report,{includeBodies:settings.includeBodies&&state.settings.includeBodies,includeNames:settings.includeNames&&state.settings.includeNames});
+   const item={id:randomUUID(),reportId:clean.reportId,...(options.incidentId?{incidentId:options.incidentId}:{}),createdAt:now(),status:'queued',attempts:0,nextAttemptAt:now(),lastError:null,receiptId:null,sentAt:null};
+   atomicJSON(outPath(item.id),clean);state.outbox.unshift(item);save();
+   if(timer)void flush().catch(()=>{});
+   return copy(item);
+  });
+  queueTail=job.catch(()=>{});return job;
+ }
+ async function transmit(item){
+  item.status='sending';item.attempts++;save();
+  controller=new AbortController();const timeout=setTimeout(()=>controller?.abort(),timeoutMs);timeout.unref?.();
+  try{
+   const stored=readFileSync(outPath(item.id));if(stored.length>SUPPORT_REPORT_MAX_BYTES)throw fail('보고서가 16MiB를 초과합니다.',413);
+   const policy={...state.settings},reporterToken=credentials.reporterToken;
+   const report=restrictPrivacy(JSON.parse(stored.toString('utf8')),policy);atomicJSON(outPath(item.id),report);
+   const payload=JSON.stringify(report);if(Buffer.byteLength(payload)>SUPPORT_REPORT_MAX_BYTES)throw fail('보고서가 16MiB를 초과합니다.',413);
+   const response=await fetchImpl(policy.receiverUrl,{method:'POST',redirect:'error',headers:{'content-type':'application/json',authorization:`Bearer ${reporterToken}`},body:payload,signal:controller.signal});
+   const receipt=await receiptJSON(response);
+   if(receipt.reportId!==item.reportId||!safeId(receipt.receiptId)||!Number.isSafeInteger(receipt.receivedAt)||receipt.receivedAt<0)throw fail('수신 서버의 접수 확인을 검증하지 못했습니다.',502);
+   item.status='sent';item.sentAt=now();item.receiptId=receipt.receiptId;item.nextAttemptAt=null;item.lastError=null;
+  }catch(error){
+   item.status='failed';item.lastError=error.code==='SUPPORT_RECEIVER_REJECTED'?error.message:'전송하지 못했습니다. 수신 주소·연결 키·네트워크를 확인하세요. 자동으로 다시 시도합니다.';
+   item.nextAttemptAt=now()+Math.min(3600000,retryBaseMs*2**Math.min(10,item.attempts-1));
+  }finally{clearTimeout(timeout);controller=null;save();}
+ }
+ function flush({force=false}={}){
+  if(flushing)return flushing;
+  flushing=(async()=>{
+   for(const item of state.outbox){
+    if(closed||!state.settings.enabled||!state.settings.receiverUrl||!credentials.reporterToken)break;
+    if(item.status==='sent'||!force&&item.nextAttemptAt>now())continue;
+    await transmit(item);
+   }
+   return status();
+  })().finally(()=>{flushing=null;});return flushing;
+ }
+ async function receive(input,authorization){
+  authorizeReceiver(authorization);
+  const inspected=inspectSupportReport(input),report=inspected.report;
+  const existing=state.inbox.find(item=>item.reportId===report.reportId);
+  if(existing)return {receiptId:existing.receiptId,reportId:existing.reportId,receivedAt:existing.receivedAt,duplicate:true};
+  const item={receiptId:randomUUID(),reportId:report.reportId,receivedAt:now(),createdAt:report.createdAt,summary:inspected.summary};
+  atomicJSON(inPath(item.receiptId),report);state.inbox.unshift(item);save();
+  return {receiptId:item.receiptId,reportId:item.reportId,receivedAt:item.receivedAt,duplicate:false};
+ }
+ function get(receiptId){
+  if(!safeId(receiptId)||!state.inbox.some(item=>item.receiptId===receiptId))throw fail('접수된 보고서를 찾을 수 없습니다.',404,'SUPPORT_RECEIPT_NOT_FOUND');
+  return inspectSupportReport(readJSON(inPath(receiptId),null));
+ }
+ function prune(){
+  const cutoff=now()-state.settings.retentionDays*DAY;
+  const removeOut=state.outbox.filter(item=>item.status==='sent'&&item.sentAt<cutoff),removeIn=state.inbox.filter(item=>item.receivedAt<cutoff);
+  if(!removeOut.length&&!removeIn.length)return status();
+  state.outbox=state.outbox.filter(item=>!removeOut.includes(item));state.inbox=state.inbox.filter(item=>!removeIn.includes(item));save();
+  for(const path of [...removeOut.map(item=>outPath(item.id)),...removeIn.map(item=>inPath(item.receiptId))])try{unlinkSync(path);}catch(error){if(error.code!=='ENOENT')throw error;}
+  return status();
+ }
+ function start(){if(closed)throw fail('자동 제보 처리가 종료되었습니다.',409);if(!timer){timer=setInterval(()=>{try{prune();void flush().catch(()=>{});}catch{}},pollMs);timer.unref?.();void flush().catch(()=>{});}return status();}
+ async function close(){closed=true;clearInterval(timer);timer=null;controller?.abort();await queueTail;await flushing;}
+ return {directory,load:status,status,configure,queue,flush,receive,authorizeReceiver,inbox:()=>copy(state.inbox),get,receiverKey:()=>({token:credentials.receiverToken}),prune,start,close};
+}

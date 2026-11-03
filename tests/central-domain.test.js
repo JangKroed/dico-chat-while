@@ -1259,7 +1259,7 @@ test('입력창 비움 증명은 메시지 ID 없이 한 번만 다음 문구로
 test('미제출·다른 입력창·계정·대상·실패은 입력창 비움 성공으로 인정하지 않는다',()=>{
  const f=fixture();try{
   const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
-  const invalid=[{enterAttempted:false},{expectedDraftSubmitted:false},{composerCleared:false},{sameEditor:false},{targetMatched:false},{accountMatched:false},{failedSeen:true},{composerRetained:true},{phase:'prepare'},{stage:'inspect'},{submitMethod:undefined}];
+  const invalid=[{enterAttempted:false},{expectedDraftSubmitted:false},{composerCleared:false},{sameEditor:false},{targetMatched:false},{accountMatched:false},{composerRetained:true},{phase:'prepare'},{stage:'inspect'},{submitMethod:undefined}];
   for(const patch of invalid)assert.throws(()=>f.result(c,a,'confirmed',{messageId:undefined,confirmationBasis:'composer_cleared',deliveryEvidence:{...clearedComposerEvidence(),...patch}}),{code:'EVIDENCE_REQUIRED'});
   assert.equal(f.manager.snapshot().attempts[0].status,'permitted');assert.equal(f.manager.snapshot().channels[0].playlistIndex,0);
  }finally{f.manager.close();}

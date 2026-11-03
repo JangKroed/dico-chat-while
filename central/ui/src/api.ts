@@ -128,3 +128,16 @@ export const getSupportReport=(options:import('./support-report').SupportReportO
   return request<import('./support-report').SupportReport>(`/api/support/report?${query}`,{signal:signal??AbortSignal.timeout(20000)})
 }
 export const inspectSupportReport=(report:import('./support-report').SupportReport,signal?:AbortSignal)=>request<import('./support-report').SupportInspection>('/api/support/inspect',{method:'POST',body:JSON.stringify({report}),signal:signal??AbortSignal.timeout(20000)})
+
+export type AutomaticSupportSettings={enabled:boolean;autoSend:boolean;receiverUrl:string;includeBodies:boolean;includeNames:boolean;receiverEnabled:boolean;retentionDays:number}
+export type SupportOutboxItem={id:string;reportId:string;incidentId?:string;createdAt:number;status:'queued'|'sending'|'sent'|'failed';attempts:number;nextAttemptAt?:number;lastError:string|null;receiptId:string|null;sentAt:number|null}
+export type SupportInboxItem={receiptId:string;reportId:string;receivedAt:number;createdAt:number;summary:Record<string,number>}
+export type AutomaticSupportStatus={settings:AutomaticSupportSettings;configured:boolean;hasReporterToken:boolean;transportWarning:string|null;outbox:SupportOutboxItem[];counts:{queued:number;sent:number;failed:number;inbox:number};inbox:SupportInboxItem[]}
+export type AutomaticSupportPatch=Partial<AutomaticSupportSettings>&{reporterToken?:string}
+export type SendSupportOptions={attemptId?:string;description?:string;includeBodies?:boolean;includeNames?:boolean}
+export const getAutomaticSupport=(signal?:AbortSignal)=>request<AutomaticSupportStatus>('/api/support/automatic',{signal:signal??AbortSignal.timeout(10000)})
+export const updateAutomaticSupport=(settings:AutomaticSupportPatch,signal?:AbortSignal)=>request<AutomaticSupportStatus>('/api/support/automatic',{method:'POST',body:JSON.stringify(settings),signal:signal??AbortSignal.timeout(10000)})
+export const sendSupportReport=(options:SendSupportOptions,signal?:AbortSignal)=>request<SupportOutboxItem>('/api/support/send',{method:'POST',body:JSON.stringify(options),signal:signal??AbortSignal.timeout(20000)})
+export const getSupportInbox=(signal?:AbortSignal)=>request<{items:SupportInboxItem[]}>('/api/support/inbox',{signal:signal??AbortSignal.timeout(10000)})
+export const getSupportInboxReport=(id:string,signal?:AbortSignal)=>request<import('./support-report').SupportInspection>(`/api/support/inbox/${encodeURIComponent(id)}`,{signal:signal??AbortSignal.timeout(20000)})
+export const createSupportReceiverKey=(signal?:AbortSignal)=>request<{token:string}>('/api/support/receiver-key',{method:'POST',body:'{}',signal:signal??AbortSignal.timeout(10000)})

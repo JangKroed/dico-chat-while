@@ -38,7 +38,7 @@ export async function runNativeHost({ input, output, origin, ids, service, insta
         if (packet.message.type === 'HELLO' && Array.isArray(result.commands)) {
           for (const command of result.commands) send({ type: 'COMMAND', command });
         }
-      } catch { send({ type: 'RESPONSE', requestId, ok: false, error: 'Invalid message or local service unavailable' }); }
+      } catch(error) { send({ type: 'RESPONSE', requestId, ok: false, code:/^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code||'')?error.code:'SERVICE_UNAVAILABLE',error: 'Invalid message or local service unavailable' }); }
     }
   } finally {
     clearInterval(poll);

@@ -73,3 +73,19 @@ test('successful MAIN observation retains the original authorization timestamp i
  const r=rig(),began=r.now();r.chrome.scripting.executeScript=async()=>{r.advance(500);return[{result:seen()}];};
  const result=await r.run();assert.equal(result.allowed,true);assert.equal(result.authorizedAt,began);assert.equal(result.maxAgeMs,2000);assert.equal(r.now()-result.authorizedAt,500);
 });
+
+test('structured transient authorization denial preserves its cause without reading identity',async()=>{
+ const r=rig();r.executor.authorizeInput=async()=>({allowed:false,retryable:true,code:'NATIVE_REQUEST_TIMEOUT',retryAfterMs:500});
+ const result=await r.run();assert.equal(result.allowed,false);assert.equal(result.retryable,true);assert.equal(result.code,'NATIVE_REQUEST_TIMEOUT');assert.equal(r.reads.length,0);
+});
+test('an expired account read requests fresh authorization while an identity mismatch never retries',async()=>{
+ const stale=rig();stale.chrome.scripting.executeScript=async()=>{stale.advance(2001);return[{result:seen()}];};
+ assert.equal((await stale.run()).code,'AUTHORIZATION_EXPIRED');assert.equal((await stale.run()).retryable,true);
+ const mismatch=rig();mismatch.setObservation({...seen(),accountId:otherId});const result=await mismatch.run();assert.equal(result.code,'ACCOUNT_MISMATCH');assert.equal(result.retryable,false);
+});
+
+test('loss of transport during identity read preserves the retryable local gate reason',async()=>{
+ const r=rig();r.chrome.scripting.executeScript=async()=>{r.executor.inputAllowed=()=>false;return[{result:seen()}];};
+ r.executor.inputDenial=()=>({allowed:false,code:'NATIVE_DISCONNECTED',retryable:true,retryAfterMs:500});
+ const result=await r.run();assert.equal(result.allowed,false);assert.equal(result.code,'NATIVE_DISCONNECTED');assert.equal(result.retryable,true);
+});

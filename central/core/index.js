@@ -708,7 +708,23 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(!a||a.status!=='permitted'||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return{allowed:false};
         const g=get('groups',a.groupId),c=get('channels',a.bindingId);
         if(state.service.status!=='ready'||g.status!=='running'||g.controlIntent||g.activeAttemptId!==a.id||g.runId!==a.runId||c.configVersion!==a.configVersion||c.tabId!==a.tabId||message.retryPhase!==true&&now()-a.permittedAt>MAX_PRE_ENTER_WAIT_MS)return{allowed:false};
-        try{eligibleChannel(c);}catch{return{allowed:false};}
+        if(message.observationPhase===true){
+          // Read-only observation keeps the original lane alive. It grants no
+          // Enter authority and cannot reserve or skip a retry count.
+          if(message.retryPhase===true||message.retryCount!==(a.sendRetryCount??0)||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.cooldownMs!==0)return{allowed:false};
+          a.preEnterWaitObservedAt=now();a.retryObservedAt=now();a.enterReadyAt=now();
+          g.waitReason='delivery_observation';return{allowed:true};
+        }
+        if(message.observationPhase!==undefined&&message.observationPhase!==false)return{allowed:false};
+        try{eligibleChannel(c);}catch{
+          // A denied wait is still read-only liveness for this exact lane.
+          // Do not spend the next retry while identity verification recovers.
+          const current=a.sendRetryCount??0,count=message.retryCount;
+          const validWait=Number.isSafeInteger(message.elapsedMs)&&message.elapsedMs>=0&&(message.retryPhase===true?Number.isSafeInteger(count)&&count>=1&&count>=current&&count<=current+1&&(a.maxSendRetries==null||count<=a.maxSendRetries):current===0&&(message.retryPhase===undefined||message.retryPhase===false));
+          if(!validWait)return{allowed:false};
+          a.preEnterWaitObservedAt=now();a.enterReadyAt=now();if(current>0)a.retryObservedAt=now();
+          return{allowed:false,retryable:true,code:'CHANNEL_NOT_READY',retryAfterMs:500};
+        }
         if(message.retryPhase===true){
           const count=message.retryCount,current=a.sendRetryCount??0;
           if(!Number.isSafeInteger(count)||count<1||a.maxSendRetries!=null&&count>a.maxSendRetries||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||now()-(a.retryObservedAt||a.enterReadyAt||a.permittedAt)>30000||count<current||count>current+1||count===current+1&&a.authorizedRetryCount!==count-1||count===current&&a.authorizedRetryCount!==count-1&&a.authorizedRetryCount!==count)return{allowed:false};
@@ -737,15 +753,26 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         return{ok:true};
       }
       if(message.type==='AUTHORIZE_ENTER'){
-        if(clockGap()){suspendForClockGap();lastWall=now();lastMono=monotonicNow();return{allowed:false};}
+        const deny=(code,retryable=false,retryAfterMs=500)=>({allowed:false,code,retryable,...(retryable?{retryAfterMs}:{})});
+        if(clockGap()){suspendForClockGap();lastWall=now();lastMono=monotonicNow();return deny('CLOCK_UNSAFE');}
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
-        if(!a||a.status!=='permitted'||a.preEnterWaiting||a.sessionId!==i.sessionId||a.runId!==message.runId||a.configVersion!==message.configVersion)return{allowed:false};
-        const retryCount=message.retryCount??0;
-        if(!Number.isSafeInteger(retryCount)||retryCount<0||a.maxSendRetries!=null&&retryCount>a.maxSendRetries||retryCount!==(a.sendRetryCount??0)||retryCount>0&&(!a.retryObservedAt||now()-a.retryObservedAt>30000))return{allowed:false};
+        if(!a||a.status!=='permitted')return deny('ATTEMPT_STATE');
+        if(a.sessionId!==i.sessionId||a.runId!==message.runId)return deny('STALE_ATTEMPT');
+        if(a.configVersion!==message.configVersion)return deny('CONFIG_MISMATCH');
         const g=state.groups.find(g=>g.id===a.groupId),c=state.channels.find(c=>c.id===a.bindingId);
-        if(state.service.status!=='ready'||!g||g.status!=='running'||g.controlIntent||g.runId!==a.runId||g.activeAttemptId!==a.id||!c||c.configVersion!==a.configVersion||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||c.tabId!==a.tabId)return{allowed:false};
-        try{eligibleChannel(c);}catch{return{allowed:false};}
-        if(monotonicNow()<Math.max(g.nextMono||0,c.nextMono||0))return{allowed:false};
+        if(state.service.status!=='ready'||!g||g.status!=='running'||g.controlIntent||g.runId!==a.runId||g.activeAttemptId!==a.id)return deny('EXECUTION_STOPPED');
+        if(!c||c.configVersion!==a.configVersion)return deny('CONFIG_MISMATCH');
+        if(c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||c.tabId!==a.tabId)return deny('TARGET_MISMATCH');
+        // A current, scoped authorization request is liveness, not evidence of
+        // delivery. Keep transient permission waits from timing out the lane.
+        a.enterReadyAt=now();if(a.sendRetryCount>0)a.retryObservedAt=now();
+        if(a.preEnterWaiting)return deny('DISCORD_COOLDOWN',true);
+        const retryCount=message.retryCount??0;
+        if(!Number.isSafeInteger(retryCount)||retryCount<0||retryCount!==(a.sendRetryCount??0))return deny('RETRY_STATE_MISMATCH');
+        if(a.maxSendRetries!=null&&retryCount>a.maxSendRetries)return deny('RETRY_LIMIT_REACHED');
+        if(retryCount>0&&(!a.retryObservedAt||now()-a.retryObservedAt>30000))return deny('RETRY_OBSERVATION_STALE',true);
+        try{eligibleChannel(c);}catch(error){return deny(['ACCOUNT_UNVERIFIED','CHANNEL_UNVERIFIED','INSTANCE_OFFLINE','CONFIG_PENDING'].includes(error.code)?'CHANNEL_NOT_READY':error.code||'CHANNEL_NOT_READY',true);}
+        if(monotonicNow()<Math.max(g.nextMono||0,c.nextMono||0))return deny('INTERVAL_NOT_ELAPSED',true);
         a.authorizedRetryCount=retryCount;return{allowed:true};
       }
 

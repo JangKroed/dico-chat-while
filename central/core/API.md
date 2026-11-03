@@ -20,7 +20,7 @@ Existing corrupt or newer-schema databases fail closed: the core throws and does
 
 A restart disconnects observations, invalidates execution sessions, supersedes queued transport messages, and preserves all unresolved attempts as unknown. No attempt is automatically retried. Groups require an explicit start/resume; the service returns to ready automatically. Group and account delays use monotonic deadlines, with conservative full waits after resume. Clock discontinuity or an event-loop gap over 15 seconds blocks new permits.
 
-A group owns both its logical Discord channel and each account/channel resource. A prepared attempt is not authorization to press Enter. Only the durable `COMMIT_PERMIT` command grants that authority. A stop receipt or control applied ACK does not establish that an issued permit was unsent. Fresh submitted attempts may finish with `confirmationBasis:composer_cleared` when the same verified composer is observed empty immediately after submission, with no observed failure. This advances the scheduler without a Discord message ID. `message_observed` keeps the observed message-ID contract. Composer clearance is recorded separately from observed posting; historical unknown attempts cannot be resolved from an empty composer alone. Manual unsent resolution requires prior executor evidence that the old attempt cannot still execute.
+A group owns both its logical Discord channel and each account/channel resource. A prepared attempt is not authorization to press Enter. Only the durable `COMMIT_PERMIT` command grants that authority. A stop receipt or control applied ACK does not establish that an issued permit was unsent. Fresh submitted attempts may finish with `confirmationBasis:composer_cleared` when the same verified composer is observed empty immediately after submission, under the submitted-composer criterion. Failure observations remain diagnostic and do not override a verified empty submitted composer. This advances the scheduler without a Discord message ID. `message_observed` keeps the observed message-ID contract. Composer clearance is recorded separately from observed posting; historical unknown attempts cannot be resolved from an empty composer alone. Manual unsent resolution requires prior executor evidence that the old attempt cannot still execute.
 
 ## Public methods
 
@@ -134,7 +134,7 @@ The executor reports unknown-result blocking proof only after a final commit obs
 
 ### Bounded same-attempt retries (0.4.12)
 
-`settings.update {maxSendRetries}` accepts integers 0–5, default 5. Each PREPARE snapshots this value on the attempt and carries it through COMMIT_PERMIT; changing settings does not expand an in-flight attempt's budget.
+`settings.update {maxSendRetries}` accepts nonnegative safe integers or null (unlimited), default null. Each PREPARE snapshots this value on the attempt and carries it through COMMIT_PERMIT; changing settings does not expand an in-flight attempt's budget.
 
 The executor sends `DELIVERY_WAIT {retryPhase:true,retryCount,cooldownMs,elapsedMs,attemptId,runId,configVersion}` for same-attempt retry progress. The count stays unchanged for cooldown heartbeats and advances one step for a subsequent retry; it cannot skip, rewind, or exceed the snapshotted budget. `AUTHORIZE_ENTER` includes that count and remains idempotent for repeated current-count preflight checks. Session, group/run, config, service, stop and live channel gates still apply.
 
@@ -176,3 +176,12 @@ Authenticated `GET /api/support/report` accepts optional attemptId/from/to and i
 `POST /api/support/inspect {report}` requires UI authentication/CSRF and validates a maximum16MiB report without evaluating content. Other request bodies retain the existing1MiB limit. Imported reports are unverified diagnostic data and cannot change configuration or delivery state. There is no configured external recipient; users download the file and deliver it through their chosen channel.
 
 `DELIVERY_TRACE` binds a monotonically increasing sequence, stage, observedAt and allowlisted scalar data to the exact instance/session/attempt. It grants no send authority, drops textContext/body/credentials and samples repeated stage telemetry. The native bridge accepts this type in addition to existing delivery messages.
+
+
+### 0.4.24 automatic support delivery
+
+Local UI auth+CSRF protects POST `/api/support/automatic` (consent, autoSend, receiverUrl, write-only reporterToken, inclusion flags, receiverEnabled, retentionDays), POST `/api/support/send`, and POST `/api/support/receiver-key`. GET `/api/support/automatic` returns sanitized configuration and outbox/inbox status. GET `/api/support/inbox` and `/api/support/inbox/:receiptId` return administrator receipt summaries and the inspected report. These administrator operations are unavailable from LAN controller sessions.
+
+POST `/api/support/receive` accepts a raw bounded support report using a separate per-install bearer credential and explicit receiver opt-in; it never accepts UI cookies/native bridge credentials as substitutes. It can be reached through the enabled LAN listener or an explicitly configured HTTPS proxy. It returns a report-linked receipt; lost ACK retry is idempotent by reportId.
+
+DELIVERY_WAIT `{observationPhase:true,retryCount,cooldownMs:0,elapsedMs}` refreshes a current, scoped permitted attempt without granting Enter or consuming a retry. AUTHORIZE_ENTER denials preserve `{code,retryable,retryAfterMs?}`; valid scoped requests refresh liveness even when a transient condition prevents Enter.

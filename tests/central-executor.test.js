@@ -516,8 +516,8 @@ test('실행기는 메시지 ID 없는 입력창 비움 증명을 영구 보관�
  const report=r.reports.find(m=>m.type==='DELIVERY_RESULT');assert.equal(report.outcome,'confirmed');assert.equal(report.messageId,undefined);assert.equal(report.confirmationBasis,'composer_cleared');assert.equal(report.deliveryEvidence.emptyStableMs,undefined);
  await r.client.handleCommand(cmd('PREPARE','repeat-preparation'));assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);assert.equal(r.state.processed['repeat-preparation'],true);
 });
-test('실행기는 불완전한 입력창 비움 증명이나 실패 표시를 성공으로 보고하지 않는다',async()=>{
- for(const patch of [{enterAttempted:false},{sameEditor:false},{failedSeen:true}]){
+test('실행기는 불완전한 입력창 비움 증명을 성공으로 보고하지 않는다',async()=>{
+ for(const patch of [{enterAttempted:false},{sameEditor:false}]){
   const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));r.chrome.tabs.sendMessage=async()=>({...clearedComposerReceipt(),deliveryEvidence:{...clearedComposerReceipt().deliveryEvidence,...patch}});
   await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'unknown');assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').outcome,'unknown');
  }
@@ -542,4 +542,65 @@ test('전송 중 세션이 바뀌거나 연결이 끊기면 content 완료 영�
   r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);if(m.type==='DICO_DELIVER'){if(mode==='session')await r.client.setSession({instanceId:'instance',sessionId:'new'});else r.transport.connected=false;throw Error('lost response');}return clearedComposerReceipt();};
   await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVERY_RECEIPT').length,0);assert.equal(r.state.attempts.attempt.phase,'unknown');
  }
+});
+
+test('authorization diagnostics distinguish transient service failures from local stop',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const a=r.client.state.attempts.attempt;
+ Object.assign(a,{phase:'executing',permitId:'permit',enterRequested:true});
+ r.transport.request=async()=>{throw Object.assign(Error('timeout'),{code:'NATIVE_REQUEST_TIMEOUT',retryable:true});};
+ assert.deepEqual(await r.client.authorizeInput({id:'attempt',phase:'commit'},7),{allowed:false,code:'NATIVE_REQUEST_TIMEOUT',retryable:true,retryAfterMs:500});
+ r.client.state.emergencyStopped=true;const stopped=await r.client.authorizeInput({id:'attempt',phase:'commit'},7);assert.equal(stopped.code,'EXECUTION_STOPPED');assert.equal(stopped.retryable,false);
+});
+test('known delivery survives report transport failure and retries reporting without another Enter',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const request=r.transport.request;
+ let failures=3;r.transport.request=async message=>{if(message.type==='DELIVERY_RESULT'&&failures-->0)throw Object.assign(Error('timeout'),{code:'NATIVE_REQUEST_TIMEOUT',retryable:true});return request(message);};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.notEqual(r.state.processed.COMMIT_PERMIT?.status,'rejected');
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.reported,true);assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);assert.equal(r.reports.some(m=>m.status==='rejected'),false);
+});
+test('lost applied ACK retries only the acknowledgement even for a mutating command',async()=>{
+ const r=rig();await configured(r);const request=r.transport.request;let failed=0;
+ r.transport.request=async message=>{if(message.type==='ACK'&&message.status==='applied'&&message.commandId==='PREPARE'&&failed++<3)throw Object.assign(Error('timeout'),{code:'NATIVE_REQUEST_TIMEOUT',retryable:true});return request(message);};
+ await r.client.handleCommand(cmd('PREPARE'));assert.notEqual(r.state.processed.PREPARE?.status,'rejected');await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.processed.PREPARE,true);assert.equal(r.messages.filter(m=>m.type==='DICO_PREPARE').length,1);assert.equal(r.reports.some(m=>m.status==='rejected'),false);
+});
+
+test('structured wait responses preserve transient denial without advancing the retry count',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const a=r.client.state.attempts.attempt;
+ Object.assign(a,{phase:'executing',permitId:'permit',enterRequested:true,maxSendRetries:1});
+ r.transport.request=async()=>({allowed:false,code:'COOLDOWN_ACTIVE',retryable:true,retryAfterMs:750});
+ const response=await r.client.authorizeRetryWait({id:'attempt',phase:'commit',retryCount:1,cooldownMs:0,elapsedMs:0},7);
+ assert.equal(response.code,'COOLDOWN_ACTIVE');assert.equal(response.retryable,true);assert.equal(a.sendRetryCount,undefined);
+ r.transport.request=async()=>({allowed:true});assert.equal((await r.client.authorizeRetryWait({id:'attempt',phase:'commit',retryCount:1,cooldownMs:0,elapsedMs:0},7)).allowed,true);
+ assert.equal(a.sendRetryCount,1);assert.equal((await r.client.authorizeRetryWait({id:'attempt',phase:'commit',retryCount:2,cooldownMs:0,elapsedMs:0},7)).retryable,false);
+});
+test('observation wait refreshes only the executing attempt without spending another send retry',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const a=r.client.state.attempts.attempt;
+ Object.assign(a,{phase:'executing',permitId:'permit',enterRequested:true,sendRetryCount:2,maxSendRetries:2});
+ r.transport.request=async message=>{r.reports.push(message);return{allowed:true};};
+ assert.equal((await r.client.observationWait({id:'attempt',phase:'commit',retryCount:2,elapsedMs:50000},7)).allowed,true);
+ const message=r.reports.at(-1);assert.equal(message.type,'DELIVERY_WAIT');assert.equal(message.observationPhase,true);assert.equal(message.retryCount,2);assert.equal(a.sendRetryCount,2);
+ assert.equal((await r.client.observationWait({id:'attempt',phase:'commit',retryCount:1,elapsedMs:50000},7)).allowed,false);
+ r.client.state.emergencyStopped=true;assert.equal((await r.client.observationWait({id:'attempt',phase:'commit',retryCount:2,elapsedMs:50000},7)).retryable,false);
+});
+
+test('COMMIT_PERMIT rejection keeps the exact local gate cause',async()=>{
+ for(const [patch,code] of [[r=>{r.client.state.emergencyStopped=true;},'EXECUTION_STOPPED'],[r=>{r.chrome.tabs.get=async()=>({url:'https://discord.com/channels/11111111111111111/99999999999999999'});},'TARGET_MISMATCH']]){
+  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));patch(r);await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+  assert.equal(r.state.processed.COMMIT_PERMIT.rejectionCode,code);assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,0);
+ }
+});
+test('a stop during reporting never prevents delivery-result recovery or causes another Enter',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const request=r.transport.request;let failures=3;
+ r.transport.request=async message=>{if(message.type==='DELIVERY_RESULT'&&failures-->0)throw Object.assign(Error('timeout'),{code:'NATIVE_REQUEST_TIMEOUT',retryable:true});return request(message);};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));r.client.state.emergencyStopped=true;await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.reported,true);assert.equal(r.state.processed.COMMIT_PERMIT,true);assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);
+});
+
+test('an exact submitted-and-cleared receipt retains failure indicator as diagnostic only',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async()=>({...clearedComposerReceipt(),deliveryEvidence:{...clearedComposerReceipt().deliveryEvidence,failedSeen:true}});
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').deliveryEvidence.failedSeen,true);
 });

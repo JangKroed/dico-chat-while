@@ -1,9 +1,13 @@
 import {composerClearedEvidence} from './delivery-receipt.js';
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
-const deliveryCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+const deliveryCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED','AUTHORIZATION_DENIED','AUTHORIZATION_EXPIRED','AUTHORIZATION_TIMEOUT','AUTHORIZATION_UNAVAILABLE','NATIVE_REQUEST_TIMEOUT','NATIVE_DISCONNECTED','NATIVE_SEND_FAILED','NATIVE_RESPONSE_REJECTED','SERVICE_UNAVAILABLE','SERVICE_REJECTED','ACCOUNT_MISMATCH','SESSION_MISMATCH','EXECUTION_STOPPED','CONFIG_MISMATCH','UPDATE_IN_PROGRESS','RETRY_COUNT_MISMATCH','ATTEMPT_STATE','STALE_ATTEMPT','RETRY_STATE_MISMATCH','RETRY_LIMIT_REACHED','RETRY_OBSERVATION_STALE','CHANNEL_NOT_READY','DISCORD_COOLDOWN','INTERVAL_NOT_ELAPSED','CLOCK_UNSAFE','COOLDOWN_ACTIVE']);
 const deliveryStatuses=new Set(['uncertain','draft-retained','blocked','deferred','confirmed','failed','no_response','reconcile_inconclusive','executor_result']);
+const validCode=code=>typeof code==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(code);
 const safeReason=code=>deliveryCodes.has(code)||deliveryStatuses.has(code)?code:undefined;
+const transientCodes=new Set(['NATIVE_DISCONNECTED','NATIVE_REQUEST_TIMEOUT','NATIVE_SEND_FAILED','SERVICE_UNAVAILABLE','AUTHORIZATION_EXPIRED','COOLDOWN_ACTIVE','ACCOUNT_UNVERIFIED','EDITOR_LOADING']);
+const denied=(code,retryable=false,retryAfterMs=500)=>({allowed:false,code,retryable,...(retryable?{retryAfterMs:Number.isSafeInteger(retryAfterMs)?Math.min(5000,Math.max(100,retryAfterMs)):500}:{})});
+const remoteDenied=value=>{const candidate=value?.code??value?.reasonCode,code=validCode(candidate)?candidate:'AUTHORIZATION_DENIED';return denied(code,value?.retryable===true||transientCodes.has(code),value?.retryAfterMs);};
 function deliveryEvidence(value) {
   if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
   const evidence={};
@@ -16,14 +20,27 @@ function deliveryEvidence(value) {
   if(value.maxSendRetries===null)evidence.maxSendRetries=null;
   return Object.keys(evidence).length?evidence:undefined;
 }
-const diagnostic=result=>({reasonCode:deliveryCodes.has(result?.code)?result.code:safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
+const diagnostic=result=>({reasonCode:safeReason(result?.code)||safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
 const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
 export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,lookupChannelName,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),commandJobs=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
   const request=async message=>{if(state.resetPending)throw Error('초기화된 연결 정보를 저장하는 중입니다.');return transport.request({...message,sessionId:state.sessionId,resetEpoch:state.resetEpoch},state.instanceId);};
-  const ack=(c,status,extra={})=>request({type:'ACK',commandId:c.id,status,...extra});
+  async function retryRequest(message){
+    const sessionId=state.sessionId,instanceId=state.instanceId;
+    for(let count=0;;count++){
+      try{return await request(message);}catch(error){
+        if(count>=2||error?.retryable!==true||sessionId!==state.sessionId||instanceId!==state.instanceId)throw error;
+        await wait(250*(count+1));
+        if(sessionId!==state.sessionId||instanceId!==state.instanceId)throw error;
+      }
+    }
+  }
+  async function ack(c,status,extra={}){
+    if(status==='applied'){state.processed[c.id]={status:'ack-pending',extra};await save();}
+    return retryRequest({type:'ACK',commandId:c.id,status,...extra});
+  }
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
   const delivery=a=>({id:a.attemptId,sessionId:a.sessionId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??null,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
   const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
@@ -35,24 +52,35 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     const config=state.bindings[a.bindingId];if(!config||config.configVersion!==a.configVersion)return false;
     return message.phase==='prepare'?a.phase==='preparing':a.phase==='executing'&&Boolean(a.permitId)&&a.enterRequested===true;
   }
-  async function canSend(message,tabId) {
-    await load();const a=state.attempts[message.id],localAllowed=()=>inputAllowed(message,tabId);
-    if(!localAllowed())return false;
-    if(message.phase==='prepare')return true;
+  function localDenial(message,tabId){
+    const a=state?.attempts?.[message?.id];
+    if(!a||a.tabId!==tabId)return denied('TARGET_MISMATCH');
+    if(a.sessionId!==state.sessionId||state.resetPending)return denied('SESSION_MISMATCH');
+    if(state.emergencyStopped||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))return denied('EXECUTION_STOPPED');
+    if(state.bindings[a.bindingId]?.configVersion!==a.configVersion)return denied('CONFIG_MISMATCH');
+    if(maintenance)return denied('UPDATE_IN_PROGRESS');
+    if(!transport.connected)return denied('NATIVE_DISCONNECTED',true);
+    return denied('AUTHORIZATION_DENIED');
+  }
+  async function authorizeInput(message,tabId) {
+    await load();const a=state.attempts[message?.id],localAllowed=()=>inputAllowed(message,tabId);
+    if(!localAllowed())return localDenial(message,tabId);
+    if(message.phase==='prepare')return{allowed:true};
     const retryCount=message.retryCount??0;
-    if(!Number.isSafeInteger(retryCount)||retryCount!==(a.sendRetryCount??0))return false;
-    // Revalidate service state immediately before Enter, including any sleep,
-    // stale run, configuration change or global pause since the permit arrived.
+    if(!Number.isSafeInteger(retryCount)||retryCount!==(a.sendRetryCount??0))return denied('RETRY_COUNT_MISMATCH');
     const started=now(),monoStarted=monotonicNow();
     try{
       const response=await request({type:'AUTHORIZE_ENTER',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,retryCount});
+      if(!localAllowed())return localDenial(message,tabId);
       const elapsed=now()-started,monoElapsed=monotonicNow()-monoStarted;
-      return elapsed>=0&&elapsed<=2000&&monoElapsed>=0&&monoElapsed<=2000&&Math.abs(elapsed-monoElapsed)<=1000&&response?.allowed===true&&localAllowed();
-    }catch{return false;}
+      if(elapsed<0||elapsed>2000||monoElapsed<0||monoElapsed>2000||Math.abs(elapsed-monoElapsed)>1000)return denied('AUTHORIZATION_EXPIRED',true);
+      return response?.allowed===true?{allowed:true}:remoteDenied(response);
+    }catch(error){return localAllowed()?remoteDenied(error):localDenial(message,tabId);}
   }
+  const canSend=async(message,tabId)=>(await authorizeInput(message,tabId)).allowed;
   async function report(a) {
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
-    await request({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
+    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
     const samples=pendingCooldownSamples.get(a.attemptId)||[];pendingCooldownSamples.delete(a.attemptId);
     if(a.phase==='confirmed')for(const sample of samples)await cooldownSample({deliveryId:a.attemptId,sample},a.tabId);
@@ -74,29 +102,42 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     }
     if(changed)await save();
   }
-  async function preEnterWait(message,tabId){
+  async function authorizeWait(message,tabId,mode){
     await load();const a=state.attempts[message?.id];
-    const allowed=()=>Boolean(!maintenance&&transport.connected&&!state.emergencyStopped&&a&&a.tabId===tabId&&a.phase==='executing'&&a.permitId&&a.enterRequested===true&&a.sessionId===state.sessionId&&!volatileStops.has(a.groupId)&&!state.stoppedGroups[a.groupId]&&!state.stoppedRuns[a.runId]&&!volatileStoppedRuns.has(a.runId)&&state.bindings[a.bindingId]?.configVersion===a.configVersion);
-    if(message?.phase!=='commit'||message.enterAttempted!==false||(a.sendRetryCount??0)!==0||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.elapsedMs>21630000||!allowed())return false;
-    const began=now(),monoBegan=monotonicNow();
-    try{
-      const response=await request({type:'DELIVERY_WAIT',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,cooldownMs:message.cooldownMs,elapsedMs:message.elapsedMs});
-      const elapsed=now()-began,monoElapsed=monotonicNow()-monoBegan;
-      return response?.allowed===true&&elapsed>=0&&elapsed<=2000&&monoElapsed>=0&&monoElapsed<=2000&&Math.abs(elapsed-monoElapsed)<=1000&&allowed();
-    }catch{return false;}
-  }
-  async function retryWait(message,tabId){
-    await load();const a=state.attempts[message?.id];
-    const allowed=()=>Boolean(!maintenance&&transport.connected&&!state.emergencyStopped&&a&&a.tabId===tabId&&a.phase==='executing'&&a.permitId&&a.enterRequested===true&&a.sessionId===state.sessionId&&!volatileStops.has(a.groupId)&&!state.stoppedGroups[a.groupId]&&!state.stoppedRuns[a.runId]&&!volatileStoppedRuns.has(a.runId)&&state.bindings[a.bindingId]?.configVersion===a.configVersion);
-    if(message?.phase!=='commit'||!Number.isSafeInteger(message.retryCount)||message.retryCount<1||a?.maxSendRetries!=null&&message.retryCount>a.maxSendRetries||!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0||message.retryCount<(a?.sendRetryCount??0)||message.retryCount>(a?.sendRetryCount??0)+1||!allowed())return false;
+    const allowed=()=>inputAllowed(message,tabId);
+    if(!allowed())return localDenial(message,tabId);
+    if(message?.phase!=='commit'||!Number.isSafeInteger(message.elapsedMs)||message.elapsedMs<0)return denied('INVALID_WAIT');
+    let requestFields;
+    if(mode==='observation'){
+      if(!Number.isSafeInteger(message.retryCount)||message.retryCount!==(a.sendRetryCount??0))return denied('RETRY_COUNT_MISMATCH');
+      requestFields={observationPhase:true,retryCount:message.retryCount,cooldownMs:0};
+    }else{
+      if(!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return denied('INVALID_WAIT');
+      if(mode==='retry'){
+        if(!Number.isSafeInteger(message.retryCount)||message.retryCount<1||message.retryCount<(a.sendRetryCount??0)||message.retryCount>(a.sendRetryCount??0)+1)return denied('RETRY_COUNT_MISMATCH');
+        if(a.maxSendRetries!=null&&message.retryCount>a.maxSendRetries)return denied('RETRY_LIMIT_REACHED');
+        requestFields={retryPhase:true,retryCount:message.retryCount,cooldownMs:message.cooldownMs};
+      }else{
+        if(message.enterAttempted!==false||(a.sendRetryCount??0)!==0)return denied('RETRY_COUNT_MISMATCH');
+        requestFields={cooldownMs:message.cooldownMs};
+      }
+    }
     const started=now(),monoStarted=monotonicNow();
     try{
-      const response=await request({type:'DELIVERY_WAIT',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,retryPhase:true,retryCount:message.retryCount,cooldownMs:message.cooldownMs,elapsedMs:message.elapsedMs});
+      const response=await request({type:'DELIVERY_WAIT',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,...requestFields,elapsedMs:message.elapsedMs});
+      if(!allowed())return localDenial(message,tabId);
       const elapsed=now()-started,monoElapsed=monotonicNow()-monoStarted;
-      if(response?.allowed!==true||elapsed<0||elapsed>2000||monoElapsed<0||monoElapsed>2000||Math.abs(elapsed-monoElapsed)>1000||!allowed())return false;
-      a.sendRetryCount=message.retryCount;await save();return allowed();
-    }catch{return false;}
+      if(elapsed<0||elapsed>2000||monoElapsed<0||monoElapsed>2000||Math.abs(elapsed-monoElapsed)>1000)return denied('AUTHORIZATION_EXPIRED',true);
+      if(response?.allowed!==true)return remoteDenied(response);
+      if(mode==='retry'){a.sendRetryCount=message.retryCount;await save();}
+      return allowed()?{allowed:true}:localDenial(message,tabId);
+    }catch(error){return allowed()?remoteDenied(error):localDenial(message,tabId);}
   }
+  const authorizePreEnterWait=(message,tabId)=>authorizeWait(message,tabId,'pre-enter');
+  const authorizeRetryWait=(message,tabId)=>authorizeWait(message,tabId,'retry');
+  const observationWait=(message,tabId)=>authorizeWait(message,tabId,'observation');
+  const preEnterWait=async(message,tabId)=>(await authorizePreEnterWait(message,tabId)).allowed;
+  const retryWait=async(message,tabId)=>(await authorizeRetryWait(message,tabId)).allowed;
   async function cooldownSample(message,tabId){
     await load();const a=state.attempts[message?.deliveryId],value=message?.sample;
     if(!value||!['remaining','observed'].includes(value.status)||!Number.isFinite(value.elapsedMs)||value.elapsedMs<0||value.elapsedMs>21720000||!Number.isFinite(value.maxGapMs)||value.maxGapMs<0||value.maxGapMs>1500)return false;
@@ -131,9 +172,10 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   async function perform(c) {
     const p=c.payload || {};
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
-    if(state.processed[c.id]){
+    if(state.processed[c.id]&&state.processed[c.id]?.status!=='report-pending'){
       const previous=state.processed[c.id];
       if(previous?.status==='rejected')await ack(c,'rejected',{rejectionCode:previous.rejectionCode});
+      else if(previous?.status==='ack-pending'){await ack(c,'applied',previous.extra);state.processed[c.id]=true;state.lastError=null;await save();}
       return;
     }
     if(maintenance&&c.type!=='CONTROL')throw Object.assign(Error('확장 업데이트 적용 중입니다.'),{code:'UPDATE_IN_PROGRESS'});
@@ -216,10 +258,18 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       await awaitPrepared(a);await ack(c,'applied');
     } else if(c.type==='COMMIT_PERMIT') {
       const a=state.attempts[p.attemptId];
-      if(!a || !matches(a,p) || a.runId!==p.runId || state.stoppedRuns[p.runId] || volatileStoppedRuns.has(p.runId) || state.emergencyStopped || a.sessionId!==state.sessionId || !p.permitId)throw Error('발송 허가가 준비한 문구와 일치하지 않거나 중지된 실행입니다.');
+      if(!a||!matches(a,p)||a.runId!==p.runId||a.sessionId!==state.sessionId||!p.permitId)throw Object.assign(Error('발송 허가가 준비한 문구와 일치하지 않습니다.'),{code:'STALE_ATTEMPT'});
       if(a.enterRequested) {if(!a.reported)await report(a);await ack(c,'applied');}
       else {
-        if(a.phase!=='prepared' || state.stoppedGroups[a.groupId] || volatileStops.has(a.groupId) || !transport.connected || !await tabMatches(a))throw Error('현재 발송을 실행할 수 없습니다.');
+        if(state.stoppedRuns[p.runId]||volatileStoppedRuns.has(p.runId)||state.emergencyStopped||state.stoppedGroups[a.groupId]||volatileStops.has(a.groupId))throw Object.assign(Error('중지된 실행의 발송을 진행할 수 없습니다.'),{code:'EXECUTION_STOPPED'});
+        if(a.phase!=='prepared')throw Object.assign(Error('준비가 완료되지 않은 발송입니다.'),{code:'ATTEMPT_STATE'});
+        if(state.bindings[a.bindingId]?.configVersion!==a.configVersion)throw Object.assign(Error('발송 구성 버전이 변경되었습니다.'),{code:'CONFIG_MISMATCH'});
+        if(!transport.connected)throw Object.assign(Error('관리 프로그램 연결을 기다립니다.'),{code:'NATIVE_DISCONNECTED',retryable:true});
+        if(!await tabMatches(a))throw Object.assign(Error('발송 대상 채널이 변경되었습니다.'),{code:'TARGET_MISMATCH'});
+        // Tab lookup yields; a stop/configuration change must close the gate
+        // again before recording the operation that may request Enter.
+        if(state.stoppedRuns[p.runId]||volatileStoppedRuns.has(p.runId)||state.emergencyStopped||state.stoppedGroups[a.groupId]||volatileStops.has(a.groupId))throw Object.assign(Error('중지된 실행의 발송을 진행할 수 없습니다.'),{code:'EXECUTION_STOPPED'});
+        if(a.sessionId!==state.sessionId||state.bindings[a.bindingId]?.configVersion!==a.configVersion)throw Object.assign(Error('발송 세션 또는 구성이 변경되었습니다.'),{code:'CONFIG_MISMATCH'});
         a.permitId=p.permitId;a.phase='executing';a.enterRequested=true;await save();
         let result;
         try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVER',target:target(a),delivery:delivery(a)});}catch{}
@@ -274,6 +324,13 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       inFlight++;try {await load();const key=c.type==='CLOSE_CHANNEL'?'config':c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
       const lane=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
         state.lastError=String(error.message || error).slice(0,250);
+        const attempt=state.attempts[c.payload?.attemptId];
+        if(state.processed[c.id]?.status==='ack-pending'||(['COMMIT_PERMIT','RECONCILE'].includes(c.type)&&attempt?.result)){
+          if(state.processed[c.id]?.status!=='ack-pending')state.processed[c.id]={status:'report-pending',reasonCode:safeReason(error.code)||'REPORT_FAILED'};
+          await save();return;
+        }
+        if(error?.retryable===true){await save();return;}
+
         // Rejection is terminal too. Persist before ACK so already queued or
         // replayed commands cannot replace the original cause with PREPARE_FAILED.
         const rejectionCode=/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`;
@@ -286,7 +343,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     void job.finally(()=>{if(commandJobs.get(commandKey)===job)commandJobs.delete(commandKey);}).catch(()=>{});
     return job;
   }
-  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,inputAllowed,preEnterWait,retryWait,cooldownSample,async setSession(s){
+  return {get isIdle(){return isIdle();},beginMaintenance(){if(maintenance||!isIdle())return false;maintenance=true;return true;},endMaintenance(){maintenance=false;},load,save,request,handleCommand,canSend,authorizeInput,inputAllowed,inputDenial:localDenial,preEnterWait,retryWait,authorizePreEnterWait,authorizeRetryWait,observationWait,cooldownSample,async setSession(s){
       await load();const resetEpoch=s.resetEpoch??0;
       if(!Number.isSafeInteger(resetEpoch)||resetEpoch<0)throw Error('초기화 세대가 올바르지 않습니다.');
       const reset=state.resetPending===true||s.resetRequired===true||resetEpoch!==state.resetEpoch;

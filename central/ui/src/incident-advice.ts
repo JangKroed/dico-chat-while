@@ -42,6 +42,16 @@ remedies.RETRY_CANCELLED={title:'같은 메시지의 재시도가 중단됐습�
 remedies.RETRY_DELIVERY_AMBIGUOUS={...remedies.RETRY_CANCELLED,title:'게시 흔적이 있어 추가 재시도를 중단했습니다',cause:'이전 Enter 이후 게시 흔적이나 입력창 변화가 관측되어 추가 전송을 중단했습니다. 중복 발송을 피하려면 실제 게시 내역으로 이전 결과를 확인해야 합니다.'}
 remedies.CLOCK_UNSAFE={title:'시간 흐름을 다시 확인해야 합니다',cause:'처리 간격 또는 시계 흐름이 허용 범위를 벗어나 새 발송을 멈췄습니다. 절전 복귀나 긴 처리 지연으로도 발생할 수 있으며, 기존 발송 결과는 별도로 확인해야 합니다.',steps:['관리 프로그램과 해당 브라우저가 실행 중인지 확인하세요.','미확인 시도는 중지 적용과 실행 차단을 확인한 뒤 실제 Discord 게시 내역으로 결과를 확정하세요.','미확인 결과를 정리하고 계정·채널 연결을 확인한 뒤 그룹에서 재개하세요. 시간 오류만으로 미발송을 확정하지 마세요.'],page:'history',actionLabel:'중단된 실행 결과 확인'}
 remedies.clock_or_sleep_gap=remedies.CLOCK_UNSAFE
+const authorizationRecoverySteps=[
+  '전송용 Discord 탭과 관리 프로그램의 연결·입력 상태를 확인하세요. 현재 초안과 계정 차례를 유지한 채 자동 재시도합니다.',
+  '현재 문구를 직접 다시 입력하거나 전송하지 말고 복구 상태를 기다리세요. 중지·설정 변경이 필요하면 그룹의 제어 기능을 사용하세요.',
+  '복구가 계속 지연되면 이 알림의 ‘오류 제보’로 관련 시도와 연결 진단을 함께 저장하세요.'
+]
+const authorizationRecoveryReasons=['AUTHORIZATION_TIMEOUT','AUTHORIZATION_UNAVAILABLE','CHANNEL_NOT_READY']
+for(const [code,title] of Object.entries({AUTHORIZATION_TIMEOUT:'전송 허가 응답이 지연됐습니다',AUTHORIZATION_UNAVAILABLE:'전송 허가 연결을 확인해야 합니다',CHANNEL_NOT_READY:'채널 연결·입력 준비를 확인해야 합니다'})){
+  remedies[code]={title,cause:unknownDeliveryCause(code),steps:['전송용 Discord 탭과 관리 프로그램의 연결·입력 상태를 확인하세요.','채널 설정에서 계정·대상과 적용 상태를 확인하세요. 연결이 계속 지연되면 ‘오류 제보’로 진단을 함께 저장하세요.'],page:'channels',actionLabel:'연결·입력 상태 확인'}
+}
+
 
 function windowAdvice(action:string|undefined,rejectionCode:string|undefined):Remedy {
   const label=({reveal:'전송 창 보기',hide:'전송 창 숨기기',consolidate:'전송 창 모으기',separate:'채널별 창 분리'} as Record<string,string>)[action||'']||'전송 창 관리'
@@ -81,12 +91,12 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
     else remedy={title:'확장 요청을 확인해야 합니다',cause:'상세 거절 사유가 기록되지 않았습니다. 현재 기록만으로 초안·계정·버전 등의 원인을 단정할 수 없습니다.',steps:['아래 대상 브라우저와 확장 상태를 확인하세요.','진행 중·미확인 시도가 있으면 전체 중지를 요청하고 실제 Discord 게시 내역을 확인하세요. 중지만으로 미발송 여부를 판단하지 마세요.','관리 프로그램과 모든 확장을 업데이트하고 필요한 초안을 보관한 뒤 Discord를 새로고침하세요. 같은 문제가 반복되면 새로 기록된 거절 사유를 확인하세요.'],page:attempt?.status==='unknown'?'history':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'channels':'connections',actionLabel:attempt?.status==='unknown'?'미확인 실행 기록 확인':commandType==='OPEN_CHANNEL'||commandType==='CONFIG_SYNC'?'채널·적용 상태 확인':'계정·브라우저 확인'}
   }else if(i.code==='delivery_unknown'){
     const reason=attempt?.reasonCode||text(i.reasonCode),specific=['MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','CLOCK_UNSAFE','clock_or_sleep_gap'].includes(reason||'')?remedies[reason!]:undefined
-    remedy={title:specific?.title||'실제 Discord 게시 여부를 확인해야 합니다',cause:specific?.cause||unknownDeliveryCause(reason),steps:[
-      attempt?.executionBlocked===true?'이전 시도의 실행 차단이 확인됐습니다. 해당 계정·채널의 실제 Discord 게시 내역을 직접 확인하세요.':'이전 실행의 최종 결과와 실행 차단 확인을 기다리세요. 필요하면 해당 그룹의 중지를 요청하고 확장의 적용 확인 응답을 기다리세요.',
-      '중지와 실행 차단은 과거 미발송의 증거가 아닙니다. 게시 내역에서 실제 게시 여부를 판단하세요.',
-      '실제 미발송이면 ‘미발송 확인 · 같은 계정에서 계속’을 눌러 같은 그룹의 해당 계정 차례에서 계속하세요. 확정 전에는 다시 보내지 마세요.',
-      '다른 초안이 남아 있으면 보관한 뒤 직접 정리하세요. Discord 제한 해제 대기와 같은 계정·채널의 준비 상태도 확인하세요.'
-    ],page:'history',actionLabel:'미확인 실행 기록 확인'};knownReason=true
+    remedy={title:specific?.title||'발송 복구를 기다리고 있습니다',cause:specific?.cause||unknownDeliveryCause(reason),steps:[
+      attempt?.executionBlocked===true?'이전 시도의 실행 차단이 확인됐습니다. 해당 계정·채널의 연결·입력 상태를 확인하세요.':'이전 실행의 최종 결과와 실행 차단 확인을 기다리세요. 필요하면 해당 그룹의 중지를 요청하고 확장의 적용 확인 응답을 기다리세요.',
+      '전송용 Discord 탭의 연결·입력 상태를 확인하세요. 복구가 계속 지연되면 ‘오류 제보’로 관련 시도와 연결 진단을 함께 저장하세요.',
+      '중지와 실행 차단은 과거 미발송의 증거가 아닙니다. 미확인 결과를 임의로 확정하거나 현재 문구를 직접 다시 보내지 마세요.',
+      '직접 처리하려는 경우에만 실제 Discord 게시 내역을 확인하세요. 실제 미발송이면 ‘미발송 확인 · 같은 계정에서 계속’을 사용해 같은 계정 차례에서 계속할 수 있습니다.'
+    ],page:'history',actionLabel:'발송 복구 상태 확인'};knownReason=true
   }else if(i.code==='connection_lost'){
     remedy={title:'브라우저 연결이 끊겼습니다',cause:'중앙 관리 프로그램이 해당 브라우저의 연결을 유지하지 못했습니다.',steps:['해당 브라우저와 DICO 확장이 실행 중인지 확인하고 관리 프로그램에 다시 연결하세요.','계정 등록과 채널 검증 상태를 확인하세요.','진행 중·미확인 발송은 실제 Discord 게시 내역을 확인한 뒤 실행 기록에서 처리하세요.'],page:'connections',actionLabel:'브라우저 연결 확인'};knownReason=true
   }else if(i.code==='channel_unverified'){
@@ -99,9 +109,12 @@ export function incidentAdvice(i:Incident,s:Snapshot):IncidentAdvice {
   }else{
     remedy={title:i.title||'확인할 문제가 있습니다',cause:i.description||i.message||'서비스에 확인이 필요한 상태가 기록되었습니다. 상세 정보와 대상 상태를 확인하세요.',steps:['관련 브라우저·그룹 상태와 최근 로그를 확인하세요.','미확인 발송은 실제 Discord 게시 내역을 확인하기 전까지 다시 보내지 마세요.'],page:attemptId?'history':'settings',actionLabel:attemptId?'관련 실행 기록 확인':'설치·서비스 상태 확인'}
   }
-  if(i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(commandType||'')&&['confirmed','not_sent','cancelled'].includes(attempt?.status||'')){
+  if(i.code==='command_rejected'&&authorizationRecoveryReasons.includes(rejectionCode||'')&&['preparing','permitted'].includes(attempt?.status||'')&&group?.status==='running'&&group.activeAttemptId===attempt?.id){
+    remedy={...remedy,title:'전송 허가 연결·입력 상태를 자동 복구하고 있습니다',steps:authorizationRecoverySteps}
+  }
+  if((i.code==='delivery_unknown'||i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(commandType||''))&&['confirmed','not_sent','cancelled'].includes(attempt?.status||'')){
     const outcome=attempt?.status==='confirmed'?(attempt.confirmationBasis==='composer_cleared'?'발송 처리':'게시 확인'):attempt?.status==='not_sent'?'미발송':'취소'
-    remedy={...remedy,cause:`${remedy.cause} 관련 시도는 현재 ${outcome}으로 확정되어 있습니다.`,steps:['‘해결 상태 재검사’를 눌러 확정된 시도의 지난 알림을 정리하세요.',...remedy.steps]}
+    remedy={...remedy,title:i.code==='delivery_unknown'?`지난 발송 시도 · ${outcome}`:remedy.title,cause:`관련 시도는 현재 ${outcome}으로 확정되어 있습니다. 이 알림은 확정 전 기록입니다.`,steps:['‘해결 상태 재검사’를 눌러 확정된 시도의 지난 알림을 정리하세요.','현재 그룹과 계정·채널의 상태는 관련 화면에서 확인할 수 있습니다.'],...(i.code==='delivery_unknown'?{page:'history' as const,actionLabel:'확정된 실행 기록 확인'}:{})}
   }
   return {...remedy,knownReason,affected,commandType,rejectionCode}
 }

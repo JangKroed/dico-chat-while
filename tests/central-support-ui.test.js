@@ -84,7 +84,7 @@ test('changing privacy cancels a pending preview and prevents a stale body expor
     assert.equal(new URL(pending[1].path,'http://localhost').searchParams.get('includeBodies'),'false');
     pending[1].resolve(Response.json({...report,privacy:{includeBodies:false,includeNames:true},attempts:[{id:'attempt-1',status:'unknown'}]}));await settle();tree=render();
     const shown=elements(tree).find(node=>node.type===SupportReportPreview);assert.equal(shown.props.report.privacy.includeBodies,false);assert.equal(shown.props.report.attempts[0].body,undefined);
-    assert.ok(elements(tree).some(node=>node.type==='button'&&node.props.children==='제보 파일 저장'));assert.equal(elements(tree).some(node=>typeof node.props?.children==='string'&&node.props.children==='전송 완료'),false);
+    assert.ok(elements(tree).some(node=>node.type==='button'&&node.props.children==='파일로 백업'));assert.equal(elements(tree).some(node=>typeof node.props?.children==='string'&&node.props.children==='전송 완료'),false);
   }finally{globalThis.fetch=prior;}
 });
 

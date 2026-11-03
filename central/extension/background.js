@@ -211,8 +211,9 @@ async function bindActive(windowId) {
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id)return false;
   if(message?.type==='DICO_DELAY'){void executor.load().then(()=>managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id})).then(respond).catch(()=>respond({ok:false}));return true;}
-  if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.preEnterWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
-  if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.retryWait(message,sender.tab.id).then(allowed=>respond({allowed})).catch(()=>respond({allowed:false}));return true;}
+  if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.authorizePreEnterWait(message,sender.tab.id).then(respond).catch(()=>respond({allowed:false}));return true;}
+  if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.authorizeRetryWait(message,sender.tab.id).then(respond).catch(()=>respond({allowed:false}));return true;}
+  if(message?.type==='DICO_OBSERVE_WAIT'&&sender.tab){executor.observationWait(message,sender.tab.id).then(respond).catch(()=>respond({allowed:false,retryable:true,code:'AUTHORIZATION_UNAVAILABLE',retryAfterMs:500}));return true;}
   if(message?.type==='DICO_ACCOUNT_IDENTITY'&&sender.tab){void observe(sender.tab.id).then(respond).catch(()=>respond({verified:false,reason:'SCRIPT_UNAVAILABLE'}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){authorizeAccountInput({chrome,executor,message,tabId:sender.tab.id}).then(respond).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_TIMING_SAMPLE'&&sender.tab){executor.cooldownSample(message,sender.tab.id).then(ok=>respond({ok})).catch(()=>respond({ok:false}));return true;}

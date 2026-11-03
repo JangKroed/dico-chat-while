@@ -124,3 +124,43 @@ test('clock gaps and unavailable managed waits explain unknown delivery without 
 });
 
 test('removed channel close rejection directs to remaining browser tab without recreating a deleted account',()=>{const s=snapshot();s.commands=[{id:'close',type:'CLOSE_CHANNEL',instanceId:'browser',rejectionCode:'ACCOUNT_UNVERIFIED',payload:{accountId:'123',guildId:'guild',channelId:'channel'}}];const advice=incidentAdvice({id:'problem',code:'command_rejected',commandId:'close'},s);assert.match(advice.title,/전송 탭을 닫/);assert.equal(advice.page,'connections');assert.ok(advice.steps.some(step=>step.includes('직접 닫')));assert.ok(advice.steps.every(step=>!step.includes('계정 등록')));});
+
+
+test('unresolved delivery puts connection recovery and error reporting before optional manual resolution',()=>{
+ const s=snapshot();s.attempts=[{id:'attempt',status:'unknown',reasonCode:'DELIVERY_DRAFT_RETAINED'}];
+ const advice=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
+ assert.match(advice.title,/발송 복구/);
+ assert.ok(advice.steps.some(step=>step.includes('연결')&&step.includes('입력')));
+ assert.ok(advice.steps.some(step=>step.includes('오류 제보')));
+ const manual=advice.steps.find(step=>step.includes('같은 계정에서 계속'));
+ assert.match(manual,/직접 처리하려는 경우/);
+ assert.doesNotMatch(advice.steps.slice(0,2).join(' '),/게시 내역.*확인/);
+ assert.doesNotMatch(advice.cause,/발송.*확정됐|미발송.*확정됐/);
+});
+
+test('authorization recovery incidents keep the retained draft and give an automatic retry path',()=>{
+ for(const rejectionCode of ['AUTHORIZATION_TIMEOUT','AUTHORIZATION_UNAVAILABLE','CHANNEL_NOT_READY']){
+  const s=snapshot();s.groups[0].status='running';s.groups[0].activeAttemptId='attempt';s.attempts=[{id:'attempt',status:'permitted',groupId:'group'}];
+  const advice=incidentAdvice({id:rejectionCode,code:'command_rejected',rejectionCode,attemptId:'attempt'},s);
+  assert.equal(advice.knownReason,true);
+  assert.ok(advice.steps.some(step=>step.includes('자동 재시도')));
+  assert.ok(advice.steps.some(step=>step.includes('오류 제보')));
+  assert.doesNotMatch(advice.steps.join(' '),/실제 게시.*확인|미발송 확인/);
+ }
+});
+
+test('terminal not-sent retained draft is a recorded result without mandatory resend or reconfirmation',()=>{
+ const s=snapshot();s.attempts=[{id:'attempt',status:'not_sent',reasonCode:'DELIVERY_DRAFT_RETAINED',executionBlocked:true}];
+ const advice=incidentAdvice({id:'incident',code:'delivery_unknown',attemptId:'attempt'},s);
+ assert.match(advice.cause,/미발송.*확정/);
+ assert.ok(advice.steps.some(step=>step.includes('해결 상태 재검사')));
+ assert.doesNotMatch(advice.steps.join(' '),/게시 내역.*확인|미발송 확인|같은 계정에서 계속/);
+});
+
+
+test('channel opening rejection does not imply an automatic send retry or a retained draft',()=>{
+ const advice=incidentAdvice({id:'incident',code:'command_rejected',commandType:'OPEN_CHANNEL',rejectionCode:'CHANNEL_NOT_READY'},snapshot());
+ assert.equal(advice.knownReason,true);
+ assert.doesNotMatch([advice.title,advice.cause,...advice.steps].join(' '),/자동 재시도|초안.*보존|차례.*유지/);
+ assert.ok(advice.steps.some(step=>step.includes('오류 제보')));
+});

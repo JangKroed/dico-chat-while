@@ -54,11 +54,11 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const DateMock=class extends Date {static now(){return clock}};
  const pageLocation={origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:pageLocation,Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook)return runtimeHook(m);if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook){const handled=await runtimeHook(m);if(handled!==undefined)return handled;}if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:({text='',sameForm=true}={})=>{if(replacementEditor)replacementEditor.isConnected=false;replacementEditor={...editor,innerText:text,isConnected:true,closest:()=>sameForm?form:{...form}};editor.isConnected=false;return replacementEditor;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{if(listener(message,{id:'ext'},resolve)===false)resolve(undefined);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:({text='',sameForm=true}={})=>{if(replacementEditor)replacementEditor.isConnected=false;replacementEditor={...editor,innerText:text,isConnected:true,closest:()=>sameForm?form:{...form}};editor.isConnected=false;return replacementEditor;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{if(listener(message,{id:'ext'},resolve)===false)resolve(undefined);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},removePosts:()=>{nodes.length=0;check?.();},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false,ageMs=0}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock-ageMs)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
@@ -567,8 +567,8 @@ test('Enter 뒤 입력창이 없어지거나 교체되거나 채널·계정이 �
   const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed',mode);assert.equal(result.code,({missing:'COMPOSER_EDITOR_MISSING',replacement:'COMPOSER_EDITOR_CHANGED',channel:'TARGET_MISMATCH',account:'ACCOUNT_UNVERIFIED'})[mode]);assert.equal(result.deliveryEvidence.enterAttempted,true);assert.equal(result.deliveryEvidence.sameEditor,!['missing','replacement'].includes(mode));assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
  }
 });
-test('명시적 전송 실패 또는 남은 초안은 입력창 비움 성공 기준을 충족하지 않는다',async()=>{
- const failed=await preparedComposerRig();failed.onSubmit(()=>failed.post({failed:true,text:'다르게 렌더링된 실패 문구'}));const result=await failed.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(result.code,'DISCORD_SEND_FAILED');assert.equal(result.deliveryEvidence.failedSeen,true);
+test('실패 표시도 진단에 남기되 제출한 중앙 입력창이 비면 즉시 완료하고 남은 초안은 완료하지 않는다',async()=>{
+ const failed=await preparedComposerRig();failed.onSubmit(()=>failed.post({failed:true,text:'다르게 렌더링된 실패 문구'}));const result=await failed.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.deliveryEvidence.failedSeen,true);
  const retained=await preparedComposerRig({ignoreEnter:true});const remaining=await retained.request('DICO_DELIVER');assert.notEqual(remaining.status,'confirmed');assert.equal(retained.editor.innerText,'A');assert.equal(remaining.deliveryEvidence.composerRetained,true);
 });
 test('제출 뒤 빈 입력창은 500ms 샘플이나 타이머 응답을 기다리지 않는다',async()=>{
@@ -654,4 +654,109 @@ test('재시도 직전 안정 확인 중 같은 초안 입력창이 교체되면
  await r.request('DICO_PREPARE');r.tick(3000);let replaced=false;
  r.onRetry(()=>r.onTick(()=>{if(!replaced){replaced=true;r.replaceEditor({text:'A'});}}));
  const result=await r.request('DICO_DELIVER');assert.equal(replaced,true);assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+});
+
+
+test('중앙 발송의 일시 승인 거절은 같은 초안과 시도에서 재승인하고 한 번만 제출한다',async()=>{
+ for(const phase of ['initial','final','retry']){
+  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:phase==='retry'?1:0,maxSendRetries:null});r.target.coordinated=true;
+  await r.request('DICO_PREPARE');r.tick(3000);let calls=0,deniedAt;
+  r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&m.phase==='commit'){calls++;if(calls===({initial:1,final:2,retry:3})[phase]){deniedAt=r.now();return{allowed:false,retryable:true,code:'COORDINATOR_UNAVAILABLE',retryAfterMs:1500};}}});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed',phase);
+  assert.equal(r.events.filter(e=>e.type==='keydown').length,phase==='retry'?2:1,phase);assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+  assert.ok(r.events.filter(e=>e.type==='keydown').at(-1).at>=deniedAt+1500);
+  assert.ok(r.requests.filter(m=>m.type==='DICO_CAN_SEND').every(m=>m.id==='attempt'));
+ }
+});
+test('중앙 재승인 대기 중 중지·계정·채널·초안 변경은 Enter를 막고 거절 코드를 남긴다',async()=>{
+ for(const mode of ['stop','account','channel','draft']){
+  const r=await preparedComposerRig();let denied=false;
+  r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&!denied){denied=true;return{allowed:false,retryable:true,code:'COORDINATOR_UNAVAILABLE',retryAfterMs:1000};}});
+  r.onTick(()=>{if(mode==='stop')r.stop();if(mode==='account')r.account('987654321098765432');if(mode==='channel')r.navigate('/channels/123/999');if(mode==='draft')r.editor.innerText='개인 초안';});
+  const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed',mode);assert.equal(r.events.filter(e=>e.type==='keydown').length,0,mode);assert.ok(result.code,mode);
+ }
+});
+test('중앙의 늦은 승인은 같은 초안을 재검사하고 새 승인을 받아 제출한다',async()=>{
+ const r=await preparedComposerRig();r.delivery.strictAuthorization=true;let delayed=false;
+ r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&!delayed&&r.requests.filter(x=>x.type==='DICO_CAN_SEND'&&x.phase==='commit').length===2){delayed=true;const authorizedAt=r.now();r.tick(3001);return{allowed:true,authorizedAt,maxAgeMs:2000};}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.equal(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length,3);
+});
+test('늦게 렌더된 과거 자기 메시지와 실패 표시는 같은 중앙 초안의 재시도를 중단하지 않는다',async()=>{
+ for(const mode of ['old-message','failed']){
+  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;
+  await r.request('DICO_PREPARE');r.tick(3000);let posted=false;
+  r.onTick(()=>{if(!posted&&r.events.some(e=>e.type==='keydown')){posted=true;r.post(mode==='failed'?{failed:true}:{ageMs:1500});}});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed',mode);assert.equal(r.events.filter(e=>e.type==='keydown').length,2,mode);assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+ }
+});
+
+
+test('진행 중 전송과 이번 시도의 자기 게시 증거는 자동 관찰하며 비워지면 추가 Enter 없이 완료한다',async()=>{
+ for(const mode of ['sending','own-post']){
+  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreEnter:true,maxSendRetries:null});r.target.coordinated=true;
+  await r.request('DICO_PREPARE');r.tick(3000);let postedAt;
+  r.onTick(()=>{if(!r.events.some(e=>e.type==='keydown'))return;if(postedAt===undefined){postedAt=r.now();r.post({sending:mode==='sending'});}else if(r.now()-postedAt>=30000)r.editor.innerText='';});
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed',mode);assert.equal(r.events.filter(e=>e.type==='keydown').length,1,mode);assert.ok(r.requests.some(m=>m.type==='DICO_OBSERVE_WAIT'));
+ }
+});
+test('전송 중 표시는 자동 관찰하되 중지하면 재입력 없이 끝난다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',ignoreEnter:true,maxSendRetries:null});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);let posted=false;
+ r.onTick(()=>{if(!posted&&r.events.some(e=>e.type==='keydown')){posted=true;r.post({sending:true});}});
+ r.onRuntime(m=>m.type==='DICO_OBSERVE_WAIT'?{allowed:false,code:'ATTEMPT_CANCELLED',retryable:false}:undefined);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');assert.equal(result.code,'ATTEMPT_CANCELLED');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+test('재시도 승인 중 전송 표시가 생기면 해제까지 관찰하고 같은 초안만 재시도한다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);let pendingAt;
+ r.onRetry(()=>{if(pendingAt===undefined){pendingAt=r.now();r.post({sending:true});}});
+ r.onTick(()=>{if(pendingAt!==undefined&&r.now()-pendingAt>=3000)r.removePosts();});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');const enters=r.events.filter(e=>e.type==='keydown');assert.equal(enters.length,2);assert.ok(enters[1].at>=pendingAt+3000);
+});
+
+test('최종 승인 뒤 자동 관찰이 길어지면 오래된 승인으로 재전송하지 않고 다시 승인받는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;r.delivery.strictAuthorization=true;
+ await r.request('DICO_PREPARE');r.tick(3000);let pendingAt,authorizations=0;
+ r.onAuthorization(m=>{if(m.retryCount===1){authorizations++;if(pendingAt===undefined){pendingAt=r.now();r.post({sending:true});}}});
+ r.onTick(()=>{if(pendingAt!==undefined&&r.now()-pendingAt>=3000)r.removePosts();});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(authorizations,2);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);
+});
+
+test('승인 연결이 30초 넘게 끊겨도 실제 코어의 같은 시도를 관찰 하트비트로 보존한다',async t=>{
+ const guildId='11111111111111111',channelId='22222222222222222',accountId='123456789012345678',tabId=7;
+ const r=rig({guildId,channelId,managed:true,loggedUser:accountId,noPostedMessage:true});
+ const manager=createCentralManager({now:r.now,monotonicNow:r.now});t.after(async()=>{r.onTick(null);await r.requestMessage({type:'DICO_CONTENT_DISPOSE'});manager.close();});
+ const hello=manager.bridge({type:'HELLO',protocolVersion:1,name:'authorization outage integration'});
+ manager.bridge({type:'OBSERVATION',sessionId:hello.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId,guildId,channelId,tabId,verified:true}]},hello.instanceId);
+ const channel=manager.snapshot().channels[0],first=manager.execute('message.create',{name:'A',body:'A'}),second=manager.execute('message.create',{name:'B',body:'B'});
+ manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:first.id},{messageId:second.id}]});
+ let stored,outageAt;
+ const transport={connected:true,request:async message=>{if(message.type==='AUTHORIZE_ENTER'){outageAt??=r.now();if(r.now()-outageAt<35000)throw Object.assign(Error('authorization request timeout'),{code:'NATIVE_REQUEST_TIMEOUT'});}return manager.bridge(message,hello.instanceId);}};
+ const chrome={storage:{local:{get:async()=>({dicoCentral:structuredClone(stored)}),set:async value=>{stored=structuredClone(value.dicoCentral);}}},tabs:{get:async()=>({id:tabId,url:`https://discord.com/channels/${guildId}/${channelId}`}),sendMessage:async(_id,message)=>{if(message.delivery)Object.assign(r.delivery,message.delivery);return r.requestMessage(message);}}};
+ const executor=createCentralExecutor({chrome,transport,now:r.now,monotonicNow:r.now});await executor.load();await executor.setSession(hello);
+ r.onRuntime(async m=>{
+  if(m.type==='DICO_CAN_SEND')return {...await executor.authorizeInput(m,tabId),authorizedAt:r.now(),maxAgeMs:2000};
+  if(m.type==='DICO_OBSERVE_WAIT')return executor.observationWait(m,tabId);
+  if(m.type==='DICO_RETRY_WAIT')return executor.authorizeRetryWait(m,tabId);
+  if(m.type==='DICO_PRE_ENTER_WAIT')return executor.authorizePreEnterWait(m,tabId);
+ });
+ r.onTick(()=>{manager.bridge({type:'HEARTBEAT',sessionId:hello.sessionId},hello.instanceId);manager.tick();});
+ for(const command of manager.commands(hello.instanceId))await executor.handleCommand(command);
+ const group=manager.execute('group.create',{name:'Keep original attempt',members:[channel.id],intervalMs:0});manager.execute('group.start',{id:group.id});manager.tick();
+ for(const type of ['PREPARE','COMMIT_PERMIT']){const command=manager.commands(hello.instanceId).find(x=>x.type===type);assert.ok(command);await executor.handleCommand(command);}
+ const state=manager.snapshot();assert.equal(state.attempts.length,1);assert.equal(state.attempts[0].status,'confirmed');assert.equal(state.attempts[0].sendRetryCount??0,0);assert.equal(state.channels[0].playlistIndex,1);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.equal(r.events.filter(e=>e.type==='paste').length,1);assert.ok(r.events.find(e=>e.type==='keydown').at>=outageAt+35000);
+ assert.ok(r.requests.some(m=>m.type==='DICO_OBSERVE_WAIT'&&m.retryCount===0));
+});
+
+test('승인 복구 하트비트의 중지는 즉시 끝내고 일시 거절은 재귀 없이 다음 승인으로 돌아간다',async()=>{
+ for(const stopped of [true,false]){
+  const r=await preparedComposerRig();let authorizations=0,heartbeats=0;
+  r.onRuntime(m=>{
+   if(m.type==='DICO_CAN_SEND'&&++authorizations===1)return{allowed:false,retryable:true,code:'NATIVE_REQUEST_TIMEOUT',retryAfterMs:500};
+   if(m.type==='DICO_OBSERVE_WAIT'){heartbeats++;return{allowed:false,retryable:!stopped,code:stopped?'EXECUTION_STOPPED':'NATIVE_REQUEST_TIMEOUT',retryAfterMs:500};}
+  });
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,stopped?'blocked':'confirmed');assert.equal(heartbeats,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,stopped?0:1);
+  if(stopped){assert.equal(result.code,'EXECUTION_STOPPED');assert.equal(authorizations,1);}
+ }
 });

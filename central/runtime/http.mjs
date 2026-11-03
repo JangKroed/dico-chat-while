@@ -18,7 +18,7 @@ async function body(req,maxBytes=1024*1024) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
+export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,supportDelivery,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
   if(!['local','lan'].includes(mode))throw Error('Invalid access mode');
   if (mode==='local'&&(typeof bridgeToken!=='string' || bridgeToken.length<32))throw Error('Private bridge credential required');
   if(mode==='lan'&&typeof pairingCodes?.consume!=='function')throw Error('LAN pairing provider required');
@@ -50,6 +50,12 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       if (decodeURIComponent(rawPath).split('/').some(s=>s==='..' || s==='.') || rawPath.includes('\\'))throw fail(404,'경로를 찾을 수 없습니다.');
       const url=new URL(req.url,origin),path=url.pathname;
       if(path==='/api/access-mode'&&req.method==='GET')return json(res,200,{mode});
+      if(path==='/api/support/receive'&&req.method==='POST'){
+        if(!supportDelivery)throw fail(404,'제보 수신 기능이 준비되지 않았습니다.');
+        if(req.headers.origin)throw fail(403,'제보 전용 전송 경로입니다.');
+        if(supportDelivery.authorizeReceiver(req.headers.authorization)===false)throw fail(401,'제보 수신 인증이 필요합니다.');
+        return json(res,202,await supportDelivery.receive(await body(req,SUPPORT_REPORT_MAX_BYTES),req.headers.authorization));
+      }
       // Check this before credentials or body parsing, even if a caller knows
       // the native bridge token or holds a valid LAN controller session.
       if(mode==='lan'&&(path.startsWith('/api/bridge')||path.startsWith('/api/lan-access')||path==='/api/remote-access-link'))throw fail(404,'이 접속에서는 사용할 수 없는 경로입니다.');
@@ -100,6 +106,22 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
       if (path.startsWith('/api/')) {
         const session=uiSession(req);
         if (path==='/api/session' && req.method==='GET')return json(res,200,{csrfToken:session.csrfToken,...(appVersion?{appVersion}:{})});
+        if(path==='/api/support/automatic'||path==='/api/support/send'||path==='/api/support/receiver-key'||path==='/api/support/inbox'||path.startsWith('/api/support/inbox/')){
+          if(mode!=='local')throw fail(403,'중앙 PC에서 제보 전송·수신 설정을 관리하세요.');
+          if(!supportDelivery)throw fail(503,'자동 제보 기능이 준비되지 않았습니다.');
+          if(path==='/api/support/automatic'&&req.method==='GET')return json(res,200,supportDelivery.status());
+          if(path==='/api/support/inbox'&&req.method==='GET')return json(res,200,{items:supportDelivery.inbox()});
+          if(path.startsWith('/api/support/inbox/')&&req.method==='GET')return json(res,200,supportDelivery.get(decodeURIComponent(path.slice('/api/support/inbox/'.length))));
+          checkMutation(req,session);
+          if(path==='/api/support/automatic'&&req.method==='POST')return json(res,200,supportDelivery.configure(await body(req)));
+          if(path==='/api/support/receiver-key'&&req.method==='POST'){await body(req);return json(res,200,supportDelivery.receiverKey());}
+          if(path==='/api/support/send'&&req.method==='POST'){
+            const p=await body(req);const record=await supportDelivery.queue({attemptId:p.attemptId,userDescription:p.userDescription||p.description,from:p.from,to:p.to,includeBodies:p.includeBodies,includeNames:p.includeNames});
+            return json(res,202,record);
+          }
+          throw fail(405,'지원하지 않는 요청입니다.');
+        }
+
         if(path==='/api/lan-access'&&req.method==='GET'){
           if(!lanAccess)throw fail(404,'내부망 접속 기능이 준비되지 않았습니다.');
           return json(res,200,await lanAccess.status());

@@ -81,3 +81,16 @@ test('remote browser links require the current UI session and CSRF, expire, and 
 });
 
 test('retained history and log pages require UI authentication and forward bounded page cursors and filters',async()=>{const calls=[];const paged={...manager(),historyPage:options=>{calls.push(['history',options]);return{items:[{id:'older'}],nextCursor:'older',retentionDays:90};},eventPage:options=>{calls.push(['logs',options]);return{items:[{eventId:20}],nextCursor:'20',retentionDays:90};}};const app=createCentralApplication({manager:paged,origin,bridgeToken});try{assert.equal((await request(app,'/api/history')).status,401);assert.equal((await request(app,'/api/logs?paged=1')).status,401);assert.equal(calls.length,0);const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}}),cookie=session.headers['set-cookie'].split(';')[0];const history=await request(app,'/api/history?cursor=older&limit=99999&query=prior&status=unknown&from=100&to=200',{cookie});assert.equal(history.status,200);assert.equal(JSON.parse(history.body).nextCursor,'older');assert.deepEqual(calls[0],['history',{cursor:'older',limit:500,query:'prior',status:'unknown',level:undefined,from:100,to:200}]);const logs=await request(app,'/api/logs?paged=1&cursor=21&level=ERROR',{cookie});assert.equal(logs.status,200);assert.equal(calls[1][0],'logs');assert.equal(calls[1][1].cursor,'21');assert.equal(calls[1][1].level,'ERROR');assert.equal((await request(app,'/api/logs?after=0',{cookie})).status,200);}finally{await app.close();}});
+
+test('automatic support controls require UI auth and CSRF; inbound reports use a separate receiver credential',async t=>{
+ let configured=0,queued=0,received=0;
+ const supportDelivery={status:()=>({configured:true,settings:{enabled:true},counts:{queued:0}}),configure:p=>{configured++;return{settings:p};},queue:async()=>{queued++;return{id:'report',status:'queued'};},flush:async()=>{},inbox:()=>[],get:()=>({report:{reportId:'report'}}),receiverKey:()=>({token:'dedicated-receiver-token'}),authorizeReceiver:value=>value==='Bearer receiver',receive:async()=>{received++;return{receiptId:'receipt'};}};
+ const app=createCentralApplication({manager:manager(),origin,bridgeToken,supportDelivery});t.after(()=>app.close());
+ assert.equal((await request(app,'/api/support/automatic')).status,401);
+ const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}}),cookie=session.headers['set-cookie'].split(';')[0],csrf=JSON.parse(session.body).csrfToken;
+ assert.equal((await request(app,'/api/support/automatic',{method:'POST',body:{enabled:true},cookie,headers:{origin}})).status,403);
+ assert.equal((await request(app,'/api/support/automatic',{method:'POST',body:{enabled:true},cookie,headers:{origin,'x-dico-csrf':csrf}})).status,200);assert.equal(configured,1);
+ assert.equal((await request(app,'/api/support/send',{method:'POST',body:{},cookie,headers:{origin,'x-dico-csrf':csrf}})).status,202);assert.equal(queued,1);
+ assert.equal((await request(app,'/api/support/receive',{method:'POST',body:{report:{}},headers:{authorization:`Bearer ${bridgeToken}`}})).status,401);
+ assert.equal((await request(app,'/api/support/receive',{method:'POST',body:{report:{}},headers:{authorization:'Bearer receiver'}})).status,202);assert.equal(received,1);
+});

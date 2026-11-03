@@ -235,3 +235,19 @@ test('framed native cooldown calibration updates the real runtime without losing
   const final=runtime.manager.snapshot();
   assert.equal(final.instances[0].connected,true);assert.equal(final.accounts.length,1);assert.equal(final.channels[0].verified,true);assert.equal(final.channels[0].playlistIndex,1);
 });
+
+test('native host preserves safe service error code without disclosing raw message',async t=>{
+ const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output);
+ const service={request:async()=>{throw Object.assign(Error('private cookie or token'),{code:'EXECUTION_STOPPED'});}};
+ const run=runNativeHost({input,output,origin:'chrome-extension://abcdefghijklmnopabcdefghijklmnop/',ids:['abcdefghijklmnopabcdefghijklmnop'],service,pollMs:60000});
+ input.write(encodePacket({requestId:'reason',message:{type:'HELLO',protocolVersion:1}}));
+ t.after(async()=>{input.end();await run;output.end();});
+ const reply=(await packets.next()).value;assert.equal(reply.code,'EXECUTION_STOPPED');assert.doesNotMatch(JSON.stringify(reply),/private|cookie|token/);
+ input.end();await run;output.end();
+});
+
+test('HTTP service rejection preserves only bounded causal code',async t=>{
+ const server=createServer((req,res)=>{res.writeHead(409,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{code:'EXECUTION_STOPPED',message:'private data'}}));});
+ server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>server.close());
+ await assert.rejects(bridgeRequest({url:`http://127.0.0.1:${server.address().port}`,bridgeToken:'local'},'/api/bridge','POST',{}),e=>e.code==='EXECUTION_STOPPED'&&!e.message.includes('private'));
+});

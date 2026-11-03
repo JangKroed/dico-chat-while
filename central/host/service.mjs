@@ -12,7 +12,11 @@ export async function bridgeRequest(descriptor, path, method = 'GET', body) {
       method, headers: { Authorization: `Bearer ${descriptor.bridgeToken}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, redirect: 'error'
     });
-    if (!response.ok) throw new Error('Bridge request failed');
+    if (!response.ok) {
+      let payload;try{payload=await response.json();}catch{}
+      const code=/^[A-Z][A-Z0-9_]{0,63}$/.test(payload?.error?.code||'')?payload.error.code:'SERVICE_REJECTED';
+      throw Object.assign(Error('Bridge request failed'),{code,status:response.status});
+    }
     return await response.json();
   } finally { clearTimeout(timeout); }
 }

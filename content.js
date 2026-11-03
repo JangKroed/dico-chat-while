@@ -227,6 +227,35 @@
     if(target?.coordinated&&response?.identity)rememberOwnIdentity(target,response.identity);
     return response;
   }
+  async function requestDeliveryPermission(target,delivery,message,guard=null) {
+    let retried=false;
+    const original=editors()[0],originalForm=original?.closest?.('form');
+    for(;;){
+      if(retried){
+        await refreshOwnIdentity(target,true);
+        const observed=await guard?.();if(observed)return {allowed:false,outcome:observed};
+        const inspection=inspectForDelivery(target,delivery),found=editors();
+        if(!inspection.ok)return {allowed:false,code:inspection.code||'INPUT_SCOPE_CHANGED'};
+        if(found.length!==1||!found[0].isConnected||composing||!composerMatches(found[0],delivery.text))return {allowed:false,code:'DRAFT_MISMATCH'};
+        if(found[0]!==original&&!(original?.isConnected===false&&originalForm?.isConnected===true&&found[0].closest?.('form')===originalForm))return {allowed:false,code:'COMPOSER_EDITOR_CHANGED'};
+      }
+      const response=await requestInputAuthorization(target,message);
+      if(response?.allowed===true||response?.retryable!==true||!managedTiming(target)||delivery.phase!=='commit')return response;
+      // A transient denial grants no input permission. Keep the original
+      // operation and exact draft, then ask again; cancellation stays terminal.
+      const found=editors();
+      if(!matchesTarget(target)||!coordinatedAccountMatches(target)||found.length!==1||!found[0].isConnected||composing||!composerMatches(found[0],delivery.text))return {allowed:false,code:'INPUT_SCOPE_CHANGED'};
+      if(message.type==='DICO_CAN_SEND'){
+        // Authorization can fail independently of the wait connection. This
+        // heartbeat keeps only the current attempt alive; it never grants Enter.
+        // Call directly so an observation denial cannot recurse into heartbeats.
+        const progress=await requestInputAuthorization(target,{type:'DICO_OBSERVE_WAIT',id:delivery.id,phase:'commit',retryCount:message.retryCount??0,elapsedMs:Math.max(0,Date.now()-delivery.startedAt)});
+        if(progress?.allowed!==true&&progress?.retryable!==true)return progress;
+      }
+      await deliveryDelay(target,Math.max(100,Math.min(5000,Number(response.retryAfterMs)||500)));
+      retried=true;
+    }
+  }
   function ownUserId(target) {
     if (/^\d{17,20}$/.test(target.ownUserId || '')) return target.ownUserId;
     const ids=ownPanelIds(ownPanel());return ids.size===1?[...ids][0]:null;
@@ -428,7 +457,7 @@
       return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
-  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false, managed = false, submissionTarget = null) {
+  function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false, managed = false, submissionTarget = null, observationPermission = null) {
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
     const locallySending = new Set();
@@ -505,8 +534,8 @@
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
         const row = node.closest('li') || node;
-        // A newly failed local row outranks an empty composer even when emoji
-        // or Markdown rendering prevents text matching.
+        // Keep failure diagnostics even when emoji/Markdown text differs.
+        // Managed completion still follows the verified submitted composer.
         if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
           evidence.failedSeen = true;detail = 'Discord가 메시지를 전송 실패로 표시했습니다.';continue;
         }
@@ -544,7 +573,7 @@
           evidence.authorUnknown = true;
           detail = '작성자를 확인하지 못했습니다. 설정의 내 Discord 사용자 ID를 입력해 주세요.'; continue;
         }
-        evidence.ownMessageSeen=true;
+        if(!submissionTarget||created>=startedAt)evidence.ownMessageSeen=true;
         if (!empty) { detail = '입력창이 비워졌는지 확인하지 못했습니다.'; continue; }
         evidence.messageId=id;
         if(!submissionTarget){finish({status:'confirmed',messageId:id,confirmationBasis:'message_observed'});return;}
@@ -555,7 +584,7 @@
         const form=editor.closest?.('form')||editor.parentElement;
         composerReadable=!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]');
         Object.assign(evidence,{editorPresent:found.length>0,sameEditor,sameComposer,editorReacquired,targetMatched,accountMatched,composerEmpty:Boolean(sameComposer&&empty),expectedDraftSubmitted:expectedDraft&&submitted,sendingActive});
-        const valid=expectedDraft&&submitted&&sameComposer&&targetMatched&&accountMatched&&composerReadable&&!evidence.failedSeen;
+        const valid=expectedDraft&&submitted&&sameComposer&&targetMatched&&accountMatched&&composerReadable;
         // The user's completion criterion is the actual submitted composer
         // becoming empty. There is no duration or posted-message requirement.
         if(valid&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor,sameComposer:true,editorReacquired,targetMatched:true,accountMatched:true}});return;}
@@ -573,6 +602,7 @@
       const retained = Boolean(liveEditor&&composerMatches(liveEditor,text)&&(!submissionTarget||evidence.sameComposer));
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
       if(submissionTarget){
+        if(managed&&retained&&composerReadable&&evidence.targetMatched&&evidence.accountMatched&&(evidence.sendingActive||evidence.ownMessageSeen)){deadline=Date.now()+25000;return;}
         const code=evidence.failedSeen?'DISCORD_SEND_FAILED':!evidence.targetMatched?'TARGET_MISMATCH':!evidence.accountMatched?'ACCOUNT_UNVERIFIED':!evidence.editorPresent?'COMPOSER_EDITOR_MISSING':!evidence.sameComposer?'COMPOSER_EDITOR_CHANGED':!composerReadable?'COMPOSER_STATE_UNREADABLE':retained?'DELIVERY_DRAFT_RETAINED':!evidence.composerEmpty?'COMPOSER_DRAFT_CHANGED':'COMPOSER_STATE_UNREADABLE';
         const errors={DISCORD_SEND_FAILED:'Discord가 전송 실패를 표시했습니다. 초안과 오류 표시를 확인하세요.',TARGET_MISMATCH:'전송 후 다른 채널로 이동했습니다. 원래 채널의 입력 상태를 확인하세요.',ACCOUNT_UNVERIFIED:'전송 후 등록 계정을 확인할 수 없습니다. 로그인 계정과 입력 상태를 확인하세요.',COMPOSER_EDITOR_MISSING:'전송 후 입력창이 보이지 않습니다. 전송용 채널을 확인하세요.',COMPOSER_EDITOR_CHANGED:'전송 후 입력창이 바뀌었습니다. 남은 초안과 입력 상태를 확인하세요.',COMPOSER_STATE_UNREADABLE:'전송 후 입력 상태를 읽을 수 없습니다. 초안을 보존합니다.',COMPOSER_DRAFT_CHANGED:'전송 후 입력 문구가 바뀌었습니다. 변경된 초안을 보존합니다.',DELIVERY_DRAFT_RETAINED:'입력창에 문구가 남아 있습니다. 진행 중인 전송 표시와 초안을 확인하세요.'};
         finish({status:'uncertain',code,deliveryEvidence:{composerRetained:retained},error:errors[code]});return;
@@ -584,7 +614,16 @@
     const armTimeout=()=>{deadline=Date.now()+(submissionOnly?3000:25000);if(!managed)timer=setTimeout(expire,submissionOnly?3000:25000);};
     armTimeout();
     if(managed){
-      void(async()=>{while(!finished){await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;if(submissionTarget)await refreshOwnIdentity(submissionTarget,true);if(finished)break;if(deadline!==null&&Date.now()>=deadline)expire(true);else check(true);}})().catch(()=>finish({status:'uncertain',code:'MANAGED_DELAY_UNAVAILABLE',error:'관찰 연결이 끊겨 초안과 발송 기록을 보존합니다.'}));
+      void(async()=>{let lastObservationAt=0;while(!finished){
+        await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;
+        if(submissionTarget)await refreshOwnIdentity(submissionTarget,true);if(finished)break;
+        if(deadline!==null&&Date.now()>=deadline)expire(true);else check(true);
+        if(!finished&&submitted&&(evidence.sendingActive||evidence.ownMessageSeen)&&Date.now()-lastObservationAt>=1000&&observationPermission){
+          lastObservationAt=Date.now();report({...evidence,observationPending:true});
+          const permission=await observationPermission();if(finished)break;
+          if(permission?.allowed!==true)finish({status:'uncertain',code:permission?.code||'OBSERVATION_CANCELLED',error:'자동 관찰이 중지되어 남은 초안을 보존합니다.'});
+        }
+      }})().catch(()=>finish({status:'uncertain',code:'MANAGED_DELAY_UNAVAILABLE',error:'관찰 연결이 끊겨 초안과 발송 기록을 보존합니다.'}));
     }else poll=setInterval(check,500);
     return {
       get promise(){return promise;},
@@ -601,7 +640,8 @@
         check();
         if(finished)return latest;
         const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if((submissionTarget?evidence.sendingActive||evidence.failedSeen||evidence.ownMessageSeen:fields.some(key=>evidence[key])) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor || !composerMatches(editor,text))return{status:'uncertain',code:'RETRY_DELIVERY_AMBIGUOUS',error:'이전 Enter 이후 게시 기록 또는 입력창이 변경되어 추가 전송을 중지합니다.',deliveryEvidence:{...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(editor.isConnected&&composerMatches(editor,text))}};
+        if(managed&&submissionTarget&&evidence.sameComposer&&evidence.targetMatched&&evidence.accountMatched&&composerReadable&&composerMatches(editor,text)&&(evidence.sendingActive||evidence.ownMessageSeen))return{status:'observation-pending'};
+        if((submissionTarget?evidence.sendingActive||evidence.ownMessageSeen:fields.some(key=>evidence[key])) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor || !composerMatches(editor,text))return{status:'uncertain',code:'RETRY_DELIVERY_AMBIGUOUS',error:'이전 Enter 이후 게시 기록 또는 입력창이 변경되어 추가 전송을 중지합니다.',deliveryEvidence:{...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(editor.isConnected&&composerMatches(editor,text))}};
         return null;
       },
       rearm(){if(finished)return false;promise=new Promise(done=>{resolve=done;});armTimeout();return true;},
@@ -719,7 +759,7 @@
     const maxWaitMs=21630000,mono=()=>globalThis.performance?.now() ?? Date.now();
     for(;;){
       await refreshOwnIdentity(target);
-      const observed=state.guard?.();if(observed)return observed;
+      const observed=await state.guard?.();if(observed)return observed;
       editor=state.currentEditor?.()||editor;
       const current=inspect(target),found=editors();
       if(!current.ok)return{status:'blocked',code:current.code,error:current.error};
@@ -730,8 +770,9 @@
       if(elapsed<0||monoElapsed<0||state.retryCount===0&&(elapsed>=maxWaitMs||monoElapsed>=maxWaitMs)||Math.abs(elapsed-monoElapsed)>1000)return{status:'deferred',code:'COOLDOWN_WAIT_TIMEOUT',retryAfterMs:current.cooldownMs,draftPrepared:true,error:'Discord 대기 확인 시간이 만료되었습니다. 현재 초안과 차례를 보존합니다.'};
       if(current.cooldownMs<=0){
         if(state.waiting){
-          const progress=await chrome.runtime.sendMessage({type:state.retryCount>0?'DICO_RETRY_WAIT':'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',retryCount:state.retryCount||0,elapsedMs:elapsed,cooldownMs:0,maxWaitMs,enterAttempted:state.retryCount>0});
-          if(progress?.allowed!==true)return{status:'blocked',code:'PRE_ENTER_WAIT_CANCELLED',error:'대기 해제 확인 중 발송이 중지되었습니다. 초안을 보존합니다.'};
+          const progress=await requestDeliveryPermission(target,delivery,{type:state.retryCount>0?'DICO_RETRY_WAIT':'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',retryCount:state.retryCount||0,elapsedMs:elapsed,cooldownMs:0,maxWaitMs,enterAttempted:state.retryCount>0},state.guard);
+          if(progress?.outcome)return progress.outcome;
+          if(progress?.allowed!==true)return{status:'blocked',code:progress?.code||'PRE_ENTER_WAIT_CANCELLED',error:'대기 해제 확인 중 발송이 중지되었습니다. 초안을 보존합니다.'};
           state.waiting=false;
         }
         return null;
@@ -741,8 +782,9 @@
       if(state.lastTraceAt===undefined||elapsed-state.lastTraceAt>=5000){state.lastTraceAt=elapsed;trace('slowmode-wait',{cooldownMs:current.cooldownMs,elapsedMs:elapsed,maxWaitMs});}
       // This keeps the existing attempt alive and checks cancellation. It does
       // not authorize Enter; strict authorization is requested after waiting.
-      const progress=await chrome.runtime.sendMessage({type:state.retryCount>0?'DICO_RETRY_WAIT':'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',retryCount:state.retryCount||0,elapsedMs:elapsed,cooldownMs:current.cooldownMs,maxWaitMs,enterAttempted:state.retryCount>0});
-      if(progress?.allowed!==true)return{status:'blocked',code:'PRE_ENTER_WAIT_CANCELLED',error:'대기 중 발송이 중지되었거나 현재 시도의 연결이 만료되었습니다. 초안을 보존합니다.'};
+      const progress=await requestDeliveryPermission(target,delivery,{type:state.retryCount>0?'DICO_RETRY_WAIT':'DICO_PRE_ENTER_WAIT',id:delivery.id,phase:'commit',retryCount:state.retryCount||0,elapsedMs:elapsed,cooldownMs:current.cooldownMs,maxWaitMs,enterAttempted:state.retryCount>0},state.guard);
+      if(progress?.outcome)return progress.outcome;
+      if(progress?.allowed!==true)return{status:'blocked',code:progress?.code||'PRE_ENTER_WAIT_CANCELLED',error:'대기 중 발송이 중지되었거나 현재 시도의 연결이 만료되었습니다. 초안을 보존합니다.'};
       await deliveryDelay(target,500);
     }
   }
@@ -791,15 +833,16 @@
       // Distinguish a blocked worker/permission reply from slow editor preparation.
       evidence.stage='authorize';
       trace('authorization-request');
-      const authorization = await requestInputAuthorization(target,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase, ...(delivery.phase==='commit'?{retryCount:0}:{}) });
+      const authorization = await requestDeliveryPermission(target,delivery,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase, ...(delivery.phase==='commit'?{retryCount:0}:{}) });
       trace('authorization-response',{authorized:authorization?.allowed===true});
-      if (!authorization?.allowed) return { status: 'blocked', error: '전송 예약이 취소되었거나 만료되었습니다.' };
+      if (!authorization?.allowed) return { status: 'blocked',code:authorization?.code||'AUTHORIZATION_DENIED', error: '전송 예약이 취소되었거나 만료되었습니다.' };
       result = inspectForDelivery(target,delivery);
       if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       let editor = editors()[0];
       originalEditor = editor;
-      const retryObservation=()=>{
-        const outcome=watcher.retryOutcome();
+      const retryObservation=async()=>{
+        let outcome=watcher.retryOutcome();
+        while(outcome?.status==='observation-pending'){await deliveryDelay(target,500);await refreshOwnIdentity(target,true);outcome=watcher.retryOutcome();}
         if(!outcome&&watcher.editor!==editor){
           editor=watcher.editor;editor.focus();
           const range=document.createRange();range.selectNodeContents(editor);range.collapse(false);
@@ -816,17 +859,19 @@
           evidence.stage='stable';
           const stabilizingEditor=editor;
           const stable=await stableEditor(target,delivery.text,editor,500,trace,true);
-          const afterStable=cooldownWait.guard?.();if(afterStable)return afterStable;
+          const afterStable=await cooldownWait.guard?.();if(afterStable)return afterStable;
           if(retryCount>0&&editor!==stabilizingEditor)continue;
           if(!stable)return {status:'blocked',code:'COMMIT_EDITOR_UNSTABLE',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
           evidence.stage='authorize';
           const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
-          const finalAuthorization=await requestInputAuthorization(target,{type:'DICO_CAN_SEND',id:delivery.id,phase:'commit',retryCount});
+          const finalAuthorization=await requestDeliveryPermission(target,delivery,{type:'DICO_CAN_SEND',id:delivery.id,phase:'commit',retryCount},cooldownWait.guard);
+          const afterAuthorization=await cooldownWait.guard?.();if(afterAuthorization)return afterAuthorization;
           const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
           const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-authorizationMonoStarted;
           const staleAuthorization=delivery.strictAuthorization && (!Number.isFinite(finalAuthorization?.authorizedAt) || authorizationElapsed<0 || authorizationElapsed>2000 || authorizationMonoElapsed<0 || authorizationMonoElapsed>2000 || Math.abs(authorizationElapsed-authorizationMonoElapsed)>1000 || authorizationNow-finalAuthorization.authorizedAt<0 || authorizationNow-finalAuthorization.authorizedAt>2000);
-          const afterAuthorization=cooldownWait.guard?.();if(afterAuthorization)return afterAuthorization;
-          if (!finalAuthorization?.allowed || staleAuthorization) return {status:'blocked',error:'전송 준비 후 중지 또는 지연된 승인 응답을 확인했습니다.'};
+          if(finalAuthorization?.outcome)return finalAuthorization.outcome;
+          if(staleAuthorization&&finalAuthorization?.allowed&&managedTiming(target)){await deliveryDelay(target,500);continue;}
+          if (!finalAuthorization?.allowed || staleAuthorization) return {status:'blocked',code:finalAuthorization?.code||(staleAuthorization?'AUTHORIZATION_EXPIRED':'AUTHORIZATION_DENIED'),error:'전송 준비 후 중지 또는 지연된 승인 응답을 확인했습니다.'};
           const finalCooldown=slowmode(editor);
           if(!finalCooldown.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',draftPrepared:true,error:'최종 승인 후 대기 시간을 확인하지 못했습니다. 초안을 보존합니다.'};
           if(finalCooldown.cooldownMs>0)continue;
@@ -928,14 +973,14 @@
       };
       for(;;){
         if(retryCount>0){
-          let observed=retryObservation();if(observed)return finishOutcome(observed);
+          let observed=await retryObservation();if(observed)return finishOutcome(observed);
           const retryStarted=Date.now(),initialCooldownMs=slowmode(editor).cooldownMs;
-          const permission=await chrome.runtime.sendMessage({type:'DICO_RETRY_WAIT',id:delivery.id,phase:'commit',retryCount,cooldownMs:initialCooldownMs,elapsedMs:0});
-          observed=retryObservation();if(observed)return finishOutcome(observed);
-          if(permission?.allowed!==true)return finishOutcome({status:'uncertain',code:'RETRY_CANCELLED',error:'재시도 권한이 취소되어 남은 초안을 보존합니다.'});
+          const permission=await requestDeliveryPermission(target,delivery,{type:'DICO_RETRY_WAIT',id:delivery.id,phase:'commit',retryCount,cooldownMs:initialCooldownMs,elapsedMs:0},retryObservation);
+          observed=await retryObservation();if(observed)return finishOutcome(observed);
+          if(permission?.allowed!==true)return finishOutcome({status:'uncertain',code:permission?.code||'RETRY_CANCELLED',error:'재시도 권한이 취소되어 남은 초안을 보존합니다.'});
           trace('retry-wait',{retryCount,maxSendRetries:evidence.maxSendRetries,elapsedMs:Date.now()-retryStarted});
           const ready=await prepareCommit(retryCount,initialCooldownMs);if(ready)return finishOutcome(ready);
-          observed=retryObservation();if(observed)return finishOutcome(observed);
+          observed=await retryObservation();if(observed)return finishOutcome(observed);
         }
         const finalSelection=window.getSelection();
         if (!coordinatedAccountMatches(target) || !matchesTarget(target) || editors()[0]!==editor || !editor.isConnected || composing || document.activeElement!==editor || !finalSelection?.isCollapsed || !editor.contains(finalSelection.anchorNode) || !editor.contains(finalSelection.focusNode) || !composerMatches(editor,delivery.text)) return afterEnter({status:'blocked',error:'Enter 직전 계정 또는 입력창 상태가 변경되었습니다. 초안을 보존하고 중지합니다.'});
@@ -947,7 +992,7 @@
         }
         cooldownProbeCancel?.();
         enterAt=Date.now();enterMono=globalThis.performance?.now() ?? enterAt;
-        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries===null||evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null);
+        if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries===null||evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null,()=>requestDeliveryPermission(target,delivery,{type:'DICO_OBSERVE_WAIT',id:delivery.id,phase:'commit',retryCount,elapsedMs:Math.max(0,Date.now()-enterAt)}));
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
         trace('before-enter');
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
@@ -967,8 +1012,8 @@
         evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;
         const flags=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if(outcome.status!=='draft-retained'||evidence.maxSendRetries!==null&&retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.failedSeen===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
-        const observed=retryObservation();if(observed)return finishOutcome(observed);
+        if(outcome.status!=='draft-retained'||evidence.maxSendRetries!==null&&retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
+        const observed=await retryObservation();if(observed)return finishOutcome(observed);
         retryCount++;
       }
     } catch(error) {
