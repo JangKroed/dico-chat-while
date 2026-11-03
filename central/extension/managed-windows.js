@@ -14,28 +14,35 @@ async function ownedWindowId(chrome,saved){
     if(ownsWindow(win,records))return windowId;
   }
 }
-export async function createManagedWindow(chrome,target){
+export async function createManagedWindow(chrome,target,assertCurrent=()=>{}){
+  assertCurrent();
   const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralWindowId']);
   const windowId=await ownedWindowId(chrome,saved),url=`https://discord.com/channels/${target.guildId}/${target.channelId}`;
+  assertCurrent();
   if(Number.isInteger(windowId)){
     const tab=await chrome.tabs.create({windowId,active:false,url});
+    try{assertCurrent();}catch(error){try{await chrome.tabs.remove(tab.id);}catch{}throw error;}
     await chrome.storage.local.set({dicoCentralWindowId:windowId});return{id:windowId,tabs:[tab]};
   }
   const win=await chrome.windows.create({url,type:'normal',focused:false,state:'minimized'});
+  try{assertCurrent();}catch(error){try{if(win.tabs?.[0]?.id)await chrome.tabs.remove(win.tabs[0].id);}catch{}throw error;}
   if(Number.isInteger(win?.id))await chrome.storage.local.set({dicoCentralWindowId:win.id});
   return win;
 }
-export async function ensureConsolidatedManagedWindow(chrome,target){
+export async function ensureConsolidatedManagedWindow(chrome,target,assertCurrent=()=>{}){
+  assertCurrent();
   const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralWindowId']),records=saved.dicoCentralTabs||[];
   const record=records.find(item=>item.tabId===target.tabId&&item.accountId===target.accountId&&item.guildId===target.guildId&&item.channelId===target.channelId);
   if(!record)fail('MANAGED_TAB_MISSING','연결된 전송용 탭을 찾을 수 없습니다.');
   const tab=await managedTab(chrome,record);let windowId=await ownedWindowId(chrome,saved);
+  assertCurrent();
   if(!Number.isInteger(windowId)){
     const win=await chrome.windows.create({tabId:tab.id,type:'normal',state:'minimized',focused:false});
     if(!Number.isInteger(win?.id))fail('WINDOW_CONSOLIDATION_PARTIAL','전송 창을 모으지 못했습니다. 기존 탭을 확인해 주세요.');
     windowId=win.id;
   }else if(tab.windowId!==windowId)await chrome.tabs.move(tab.id,{windowId,index:-1});
   // Move the existing page without reload; keep every successful move recoverable.
+  assertCurrent();
   record.windowId=windowId;await chrome.storage.local.set({dicoCentralTabs:records,dicoCentralWindowId:windowId});
   return windowId;
 }

@@ -52,7 +52,13 @@ test('retry setting edits survive unrelated saves and emit only the delivery pre
  assert.equal(draft.values.maxSendRetries,2);
  assert.deepEqual(settingsPayload(draft,'delivery'),{maxSendRetries:2});
  assert.deepEqual(settingsPayload(draft,'notifications'),{});
- assert.equal(createSettingsDraft({...saved,maxSendRetries:undefined}).values.maxSendRetries,null);
+ assert.equal(createSettingsDraft({...saved,maxSendRetries:undefined}).values.maxSendRetries,3);
 });
 
- test('retry preferences preserve unlimited, zero, and arbitrary safe counts without a five-attempt cap',()=>{for(const value of [null,0,6,100000,Number.MAX_SAFE_INTEGER]){const draft=editSettingsDraft(createSettingsDraft(saved),'maxSendRetries',value);assert.equal(draft.values.maxSendRetries,value);assert.deepEqual(settingsPayload(draft,'delivery'),{maxSendRetries:value});assert.equal(createSettingsDraft({...saved,maxSendRetries:value}).values.maxSendRetries,value);}const draft=createSettingsDraft(saved);for(const invalid of [-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1])assert.equal(editSettingsDraft(draft,'maxSendRetries',invalid),draft);});
+test('retry preferences bound retries and preserve valid zero through ten settings',()=>{
+ for(const value of [0,3,6,10]){const draft=editSettingsDraft(createSettingsDraft(saved),'maxSendRetries',value);assert.equal(draft.values.maxSendRetries,value);assert.deepEqual(settingsPayload(draft,'delivery'),{maxSendRetries:value});}
+ const draft=createSettingsDraft(saved);
+ for(const invalid of [null,-1,1.5,NaN,Infinity,11,Number.MAX_SAFE_INTEGER])assert.equal(editSettingsDraft(draft,'maxSendRetries',invalid),draft);
+ assert.equal(createSettingsDraft({...saved,maxSendRetries:null}).values.maxSendRetries,3);
+ assert.equal(createSettingsDraft({...saved,maxSendRetries:100}).values.maxSendRetries,10);
+});

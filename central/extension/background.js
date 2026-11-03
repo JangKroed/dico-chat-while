@@ -107,14 +107,18 @@ async function publishObservation(snapshot){
 }
 async function restoreSavedConnections({onlyMissing=false}={}){
   const sessionId=executor.state.sessionId;
-  await recoverConnections({chrome,onlyMissing,state:executor.state,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
+  return recoverConnections({chrome,onlyMissing,state:executor.state,isCurrent:()=>transport.connected&&executor.state.sessionId===sessionId,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
     canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
 async function runHeartbeat() {
+  const sessionId=executor.state.sessionId;
+  const current=()=>transport.connected&&executor.state.sessionId===sessionId;
   try {
+    if(!current())return;
     const knownAttemptIds=Object.values(executor.state.attempts).filter(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
     const result=await executor.request({type:'HEARTBEAT',knownAttemptIds});
+    if(!current())return;
     if(result.resetRequired){if(result.resetEpoch!==executor.state.resetEpoch)await connect();return;}
     for(const item of result.terminalAttempts || []) {
       const local=executor.state.attempts[item.attemptId];if(!local)continue;
@@ -122,9 +126,11 @@ async function runHeartbeat() {
       local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',messageId:item.messageId,confirmationBasis:item.confirmationBasis,deliveryEvidence:item.deliveryEvidence,executionBlocked:true};
     }
     await executor.save();
+    if(!current())return;
     for(const command of result.commands || [])void executor.handleCommand(command);
-    await refreshManagedContent();await observation();await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});await updater.check();lastError=null;
-  }catch{lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
+    if(executor.state.emergencyStopped)return;
+    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(!current()||executor.state.emergencyStopped)return;await updater.check();if(current())lastError=null;
+  }catch{if(!current())return;lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect({explicit=false}={}) {
   if(connecting)return connecting;
@@ -137,6 +143,7 @@ async function connect({explicit=false}={}) {
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
       const browser=await detectConnectedBrowser(chrome,navigator);
       const response=await transport.request({type:'HELLO',protocolVersion:1,explicitReconnect:explicit,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1','close-channel-v1']});
+      if(executor.state.emergencyStopped)return;
       if(response.removed){
         // A deleted browser may reconnect only through an explicit user action.
         // Retain failed cleanup records so the next connection can retry safely.
@@ -150,20 +157,25 @@ async function connect({explicit=false}={}) {
       if(session.reset){lastAccountObservation=null;recoveryPending=false;}
       for(const command of response.commands||[])if(command.type==='CLOSE_CHANNEL')await executor.handleCommand(command);
       for(const command of response.commands||[])if(command.type!=='CLOSE_CHANNEL')void executor.handleCommand(command);
-      await refreshManagedContent();
-      await restoreSavedConnections();
-      await observation();void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
+      const sessionId=executor.state.sessionId;
+      const current=()=>transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId;
+      await refreshManagedContent();if(!current())return;
+      await restoreSavedConnections();if(!current())return;
+      await observation();if(!current())return;void updater.check({force:true});clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
       await chrome.alarms.clear('dico-central-reconnect');
     } catch(error){lastError=String(error.message || error).slice(0,200);transport.disconnect();throw Error(lastError);}
   })().finally(()=>{connecting=null;});return connecting;
 }
 function openManagedChannel(p){
-  const next=channelOpening.then(()=>openManagedChannelNow(p));channelOpening=next.catch(()=>{});return next;
+  // 대기열에 넣은 시점의 세션을 보존하여 재연결 후 이전 요청을 실행하지 않습니다.
+  const sessionId=executor.state.sessionId;
+  const next=channelOpening.then(()=>{if(sessionId!==executor.state.sessionId)throw Object.assign(Error('이전 세션의 채널 연결을 취소했습니다.'),{code:'STALE_SESSION'});return openManagedChannelNow(p);});channelOpening=next.catch(()=>{});return next;
 }
 async function consolidateRecoveredChannel(record){
+  const sessionId=executor.state.sessionId;
   const next=channelOpening.then(async()=>{
-    if(!transport.connected||executor.state?.emergencyStopped||!executor.beginMaintenance())throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 전송 창을 모으세요.'),{code:'ATTEMPT_UNRESOLVED'});
-    try{return await ensureConsolidatedManagedWindow(chrome,record);}finally{executor.endMaintenance();}
+    if(sessionId!==executor.state.sessionId||!transport.connected||executor.state?.emergencyStopped||!executor.beginMaintenance())throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 전송 창을 모으세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    try{return await ensureConsolidatedManagedWindow(chrome,record,()=>{if(sessionId!==executor.state.sessionId||executor.state.emergencyStopped||!transport.connected)throw Object.assign(Error('이전 창 복구를 취소했습니다.'),{code:'STALE_SESSION'});});}finally{executor.endMaintenance();}
   });
   channelOpening=next.catch(()=>{});return next;
 }
@@ -177,7 +189,7 @@ async function manageChannelWindow(p){
 }
 async function openManagedChannelNow(p) {
   const sessionId=executor.state?.sessionId;
-  const ensureCurrent=()=>{if(sessionId!==executor.state?.sessionId)throw Object.assign(Error('초기화 또는 재연결로 이전 채널 연결 요청을 취소했습니다.'),{code:'STALE_SESSION'});};
+  const ensureCurrent=()=>{if(executor.state?.emergencyStopped||!transport.connected||sessionId!==executor.state?.sessionId)throw Object.assign(Error('초기화 또는 재연결로 이전 채널 연결 요청을 취소했습니다.'),{code:'STALE_SESSION'});};
   if(executor.state?.emergencyStopped||!transport.connected)throw Object.assign(Error('중지된 브라우저에서는 자동 연결을 시작하지 않습니다.'),{code:'EXECUTION_STOPPED'});
   if(!executor.state?.legacyDeclaration)throw Object.assign(Error('기존 실행기 사용 여부를 먼저 확인하세요.'),{code:'LEGACY_UNRESOLVED'});
   if(!/^\d{17,20}$/.test(p.accountId||'')||!/^\d{1,30}$/.test(p.guildId||'')||!/^\d{1,30}$/.test(p.channelId||''))throw Object.assign(Error('연결할 계정·채널 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
@@ -195,13 +207,16 @@ async function openManagedChannelNow(p) {
   }
   if(executor.state.emergencyStopped||!transport.connected)throw Object.assign(Error('브라우저 중지로 채널 열기를 취소했습니다.'),{code:'EXECUTION_STOPPED'});
   ensureCurrent();
-  const win=await createManagedWindow(chrome,p);
-  ensureCurrent();
+  const win=await createManagedWindow(chrome,p,ensureCurrent);
+  // Chrome 생성 요청 자체는 취소할 수 없으므로 중지 중 완료된 새 창은 즉시 정리합니다.
+  try{ensureCurrent();}catch(error){try{if(win.tabs?.[0]?.id)await chrome.tabs.remove(win.tabs[0].id);}catch{}throw error;}
   const tab=win.tabs?.[0];if(!tab)throw Error('전송용 창을 열지 못했습니다.');
   ensureCurrent();
   records.push({resetEpoch:executor.state.resetEpoch??0,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id});await chrome.storage.local.set({dicoCentralTabs:records});
   for(let n=0;n<20;n++) {
+    ensureCurrent();
     const ready=await observe(tab.id);
+    ensureCurrent();
     if(ready?.verified&&ready.accountId===p.accountId&&ready.guildId===p.guildId&&ready.channelId===p.channelId){await observation();return {connected:true};}
     await new Promise(resolve=>setTimeout(resolve,500));
   }

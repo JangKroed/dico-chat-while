@@ -7,12 +7,14 @@ import {randomBytes,randomUUID,createHash,timingSafeEqual} from 'node:crypto';
 import {mkdirSync,readFileSync,writeFileSync,renameSync,chmodSync,unlinkSync,openSync,fsyncSync,closeSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {isIP} from 'node:net';
-import {inspectSupportReport,SUPPORT_REPORT_MAX_BYTES} from './support-report.mjs';
+import {inspectSupportReport,automaticSupportReport,SUPPORT_REPORT_MAX_BYTES} from './support-report.mjs';
 
 const DEFAULTS={enabled:false,autoSend:false,receiverUrl:'',includeBodies:false,includeNames:false,receiverEnabled:false,retentionDays:30};
 const DAY=86400000;
 const fail=(message,status=400,code='SUPPORT_DELIVERY_INVALID')=>Object.assign(Error(message),{status,code});
 const copy=value=>structuredClone(value);
+// 이전 버전은 automatic 표식이 없다. 사건 식별자가 있는 구형 제보는 개인정보 최소화를 우선한다.
+const automaticItem=item=>item.automatic===true||item.automatic===undefined&&Boolean(item.incidentId);
 function readJSON(path,fallback){try{return JSON.parse(readFileSync(path,'utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
 function atomicJSON(path,value){
  const temporary=path+'.tmp',fd=openSync(temporary,'w',0o600);
@@ -71,11 +73,12 @@ function restrictPrivacy(input,policy){
 // This store is owned by the runtime's single-instance lock. All disk mutations
 // are synchronous and atomic; report creation is serialized separately because
 // it reads async build metadata. Credentials never enter the report/state file.
-export function createSupportDelivery({dir,createReport,connection,now=Date.now,fetchImpl=globalThis.fetch,timeoutMs=15000,retryBaseMs=30000,pollMs=5000}={}){
+export function createSupportDelivery({dir,createReport,connection,now=Date.now,fetchImpl=globalThis.fetch,timeoutMs=15000,retryBaseMs=30000,pollMs=5000,maxAttempts=8}={}){
  if(!dir||typeof createReport!=='function')throw Error('Support delivery requires dir and createReport.');
+ if(!Number.isSafeInteger(maxAttempts)||maxAttempts<1||maxAttempts>100)throw Error('제보 전송 시도 한도는 1~100회여야 합니다.');
  const directory=resolve(dir),outDir=join(directory,'outbox'),inDir=join(directory,'inbox');
  for(const path of [directory,outDir,inDir]){mkdirSync(path,{recursive:true,mode:0o700});if(process.platform!=='win32')chmodSync(path,0o700);}
- const statePath=join(directory,'state.json'),credentialPath=join(directory,'credentials.json');
+ const statePath=join(directory,'state.json'),credentialPath=join(directory,'credentials.json'),journalPath=join(directory,'pending-queue.json');
  let state=readJSON(statePath,{version:1,settings:{...DEFAULTS},outbox:[],inbox:[]});
  if(state.version!==1||!Array.isArray(state.outbox)||!Array.isArray(state.inbox))throw Error('자동 제보 저장소 형식을 확인하세요.');
  state.settings=settingsPatch(DEFAULTS,state.settings);
@@ -96,11 +99,26 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
  if(process.platform!=='win32')chmodSync(credentialPath,0o600);
  for(const entry of state.outbox)if(entry.status==='sending'){entry.status='queued';entry.nextAttemptAt=now();}
  const save=()=>atomicJSON(statePath,state);
- let closed=false,timer=null,queueTail=Promise.resolve(),flushing=null,controller=null;
+ let closed=false,timer=null,queueTail=Promise.resolve(),flushing=null,controller=null,activeAutomatic=false;
  const pendingPolicies=new Set();
  save();
  const outPath=id=>join(outDir,`${id}.json`),inPath=id=>join(inDir,`${id}.json`);
  const safeId=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(id);
+ // 보고서 파일과 색인은 별개 파일이다. 두 rename 사이에 프로세스가 종료되어도
+ // fsync된 저널로 같은 식별자의 전송 항목을 복원하여 제보가 고아 파일이 되지 않는다.
+ function recoverPendingQueue(){
+ const pending=readJSON(journalPath,null);
+ if(pending){
+  if(!safeId(pending.item?.id))throw fail('제보 복구 식별자를 확인하세요.');
+  const report=automaticItem(pending.item)?automaticSupportReport(pending.report):inspectSupportReport(pending.report).report;
+  if(pending.item.reportId!==report.reportId)throw fail('제보 복구 보고서가 일치하지 않습니다.');
+  if(!state.outbox.some(item=>item.id===pending.item.id)){
+   atomicJSON(outPath(pending.item.id),report);state.outbox.unshift(pending.item);
+  }
+  save();unlinkSync(journalPath);
+ }
+ }
+ recoverPendingQueue();
  function status(){
   const configured=Boolean(state.settings.receiverUrl&&credentials.reporterToken);
   return copy({settings:state.settings,configured,hasReporterToken:Boolean(credentials.reporterToken),transportWarning:state.settings.receiverUrl.startsWith('http:')?'내부망 HTTP는 보고서와 연결 키를 암호화하지 않습니다. 신뢰하는 네트워크에서만 사용하세요.':null,outbox:state.outbox,inbox:state.inbox,counts:{queued:state.outbox.filter(item=>['queued','sending'].includes(item.status)).length,sent:state.outbox.filter(item=>item.status==='sent').length,failed:state.outbox.filter(item=>item.status==='failed').length,inbox:state.inbox.length}});
@@ -112,7 +130,9 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   if(patch.reporterToken!==undefined)reporterToken=tokenValue(patch.reporterToken);
   const changedDestination=next.receiverUrl!==state.settings.receiverUrl||reporterToken!==credentials.reporterToken;
   const loweredPrivacy=state.settings.includeBodies&&!next.includeBodies||state.settings.includeNames&&!next.includeNames;
-  if(!next.enabled||changedDestination||loweredPrivacy)controller?.abort();
+  // 자동 전송 동의 철회는 이미 전송 중인 자동 요청에도 즉시 적용한다.
+  // 수동 전송은 enabled 동의가 남아 있으면 별도로 계속할 수 있다.
+  if(!next.enabled||changedDestination||loweredPrivacy||!next.autoSend&&activeAutomatic)controller?.abort();
   credentials={...credentials,reporterToken};atomicJSON(credentialPath,credentials);
   state.settings=next;save();
   if(loweredPrivacy){
@@ -138,18 +158,21 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
  function queue(options={}){
   const job=queueTail.then(async()=>{
    if(closed)throw fail('자동 제보 처리가 종료되었습니다.',409);
+   // 이전 디스크 쓰기가 실패했더라도 새 요청이 미완료 저널을 덮어쓰지 않는다.
+   recoverPendingQueue();
    if(!state.settings.enabled||options.automatic&&!state.settings.autoSend){if(options.automatic)return null;throw fail('보고서 전송 허용 설정을 먼저 켜 주세요.',409,'SUPPORT_SENDING_DISABLED');}
    if(options.incidentId!==undefined&&(typeof options.incidentId!=='string'||!options.incidentId||options.incidentId.length>200))throw fail('문제 식별자를 확인하세요.');
    for(const key of ['includeBodies','includeNames'])if(options[key]!==undefined&&typeof options[key]!=='boolean')throw fail('보고서 개인정보 포함 옵션을 확인하세요.');
    const duplicate=options.incidentId&&state.outbox.find(item=>item.incidentId===options.incidentId);if(duplicate)return copy(duplicate);
    const settings={...state.settings};
    let report;pendingPolicies.add(settings);
-   try{report=await createReport({...(options.updateDiagnostic?{updateDiagnostic:options.updateDiagnostic}:{}),...(options.attemptId!==undefined?{attemptId:options.attemptId}:{}),from:options.from??Math.max(0,now()-3600000),to:options.to??now(),includeBodies:!options.updateDiagnostic&&settings.includeBodies&&(options.automatic||options.includeBodies!==false),includeNames:!options.updateDiagnostic&&settings.includeNames&&(options.automatic||options.includeNames!==false)});}finally{pendingPolicies.delete(settings);}
+   try{report=await createReport({...(options.updateDiagnostic?{updateDiagnostic:options.updateDiagnostic}:{}),...(options.attemptId!==undefined?{attemptId:options.attemptId}:{}),from:options.from??Math.max(0,now()-3600000),to:options.to??now(),includeBodies:!options.automatic&&!options.updateDiagnostic&&settings.includeBodies&&options.includeBodies!==false,includeNames:!options.automatic&&!options.updateDiagnostic&&settings.includeNames&&options.includeNames!==false});}finally{pendingPolicies.delete(settings);}
    if(options.userDescription!==undefined)report.userDescription=options.userDescription;
    if(closed||!state.settings.enabled||options.automatic&&!state.settings.autoSend)return null;
-   const clean=restrictPrivacy(report,{includeBodies:settings.includeBodies&&state.settings.includeBodies,includeNames:settings.includeNames&&state.settings.includeNames});
-   const item={id:randomUUID(),reportId:clean.reportId,...(options.incidentId?{incidentId:options.incidentId}:{}),createdAt:now(),status:'queued',attempts:0,nextAttemptAt:now(),lastError:null,receiptId:null,sentAt:null};
-   atomicJSON(outPath(item.id),clean);state.outbox.unshift(item);save();
+   const clean=restrictPrivacy(options.automatic?automaticSupportReport(report):report,{includeBodies:settings.includeBodies&&state.settings.includeBodies,includeNames:settings.includeNames&&state.settings.includeNames});
+   const item={id:randomUUID(),reportId:clean.reportId,automatic:Boolean(options.automatic),...(options.incidentId?{incidentId:options.incidentId}:{}),createdAt:now(),status:'queued',attempts:0,nextAttemptAt:now(),lastError:null,receiptId:null,sentAt:null};
+   atomicJSON(journalPath,{item,report:clean});
+   atomicJSON(outPath(item.id),clean);state.outbox.unshift(item);save();unlinkSync(journalPath);
    if(timer)void flush().catch(()=>{});
    return copy(item);
   });
@@ -160,14 +183,23 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   */
  async function transmit(item){
   item.status='sending';item.attempts++;save();
-  controller=new AbortController();const timeout=setTimeout(()=>controller?.abort(),timeoutMs);timeout.unref?.();
+  controller=new AbortController();activeAutomatic=automaticItem(item);const activeController=controller;
+  // fetch 구현 또는 응답 스트림이 abort에 협조하지 않아도 전송함 전체가 멈추지 않는다.
+  // 늦게 도착한 응답은 상태를 갱신하지 않으며 같은 reportId 재시도로 수신 측이 중복을 구분한다.
+  let rejectAbort;
+  const aborted=new Promise((_,reject)=>{rejectAbort=()=>reject(fail('제보 전송 시간이 초과되었거나 중단되었습니다.',504));activeController.signal.addEventListener('abort',rejectAbort,{once:true});});
+  const timeout=setTimeout(()=>activeController.abort(),timeoutMs);timeout.unref?.();
   try{
    const stored=readFileSync(outPath(item.id));if(stored.length>SUPPORT_REPORT_MAX_BYTES)throw fail('보고서가 16MiB를 초과합니다.',413);
    const policy={...state.settings},reporterToken=credentials.reporterToken;
-   const report=restrictPrivacy(JSON.parse(stored.toString('utf8')),policy);atomicJSON(outPath(item.id),report);
+   const original=JSON.parse(stored.toString('utf8'));
+   const report=restrictPrivacy(automaticItem(item)?automaticSupportReport(original):original,policy);atomicJSON(outPath(item.id),report);
    const payload=JSON.stringify(report);if(Buffer.byteLength(payload)>SUPPORT_REPORT_MAX_BYTES)throw fail('보고서가 16MiB를 초과합니다.',413);
-   const response=await postReport(policy.receiverUrl,report,reporterToken,controller.signal,fetchImpl);
-   const receipt=await receiptJSON(response);
+   const receipt=await Promise.race([(async()=>{
+    const response=await postReport(policy.receiverUrl,report,reporterToken,activeController.signal,fetchImpl);
+    if(activeController.signal.aborted){void response.body?.cancel().catch(()=>{});throw fail('중단된 제보 응답입니다.',504);}
+    return receiptJSON(response);
+   })(),aborted]);
    if(receipt?.ok===false){
     const reasons={UNAUTHORIZED:'이메일 중계 연결 키가 일치하지 않습니다. 관리자 수신 연결 설정을 확인하세요.',QUOTA:'이메일 중계의 오늘 전송 한도에 도달했습니다. 대기열을 보존하고 다시 시도합니다.',DELIVERY_UNCERTAIN:'이메일 중계가 발송 결과를 확정하지 못했습니다. 관리자 확인이 필요하며 중계는 중복 메일을 보내지 않습니다.',BUSY:'이메일 중계가 다른 제보를 처리 중입니다. 자동으로 다시 시도합니다.',INVALID:'이메일 중계가 보고서 형식 또는 크기를 거절했습니다.'};
     const code=Object.hasOwn(reasons,receipt.code)?receipt.code:'UNKNOWN';
@@ -177,8 +209,11 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
    item.status='sent';item.sentAt=now();item.receiptId=receipt.receiptId;item.nextAttemptAt=null;item.lastError=null;
   }catch(error){
    item.status='failed';item.lastError=error.code==='SUPPORT_RECEIVER_REJECTED'?error.message:'전송하지 못했습니다. 수신 주소·연결 키·네트워크를 확인하세요. 자동으로 다시 시도합니다.';
-   item.nextAttemptAt=now()+Math.min(3600000,retryBaseMs*2**Math.min(10,item.attempts-1));
-  }finally{clearTimeout(timeout);controller=null;save();}
+   // 무한 재시도는 오프라인 로그와 중계 요청만 누적한다. 한도 이후에도 원본은
+   // 보존하되 nextAttemptAt=null을 명시적 종료 상태로 저장하여 재시작에도 유지한다.
+   item.nextAttemptAt=item.attempts>=maxAttempts?null:now()+Math.min(3600000,retryBaseMs*2**Math.min(10,item.attempts-1));
+   if(item.nextAttemptAt===null)item.lastError=`${maxAttempts}회 전송 시도 후 자동 재시도를 종료했습니다. 보고서는 로컬 전송함에 보존됩니다.`;
+  }finally{clearTimeout(timeout);activeController.signal.removeEventListener('abort',rejectAbort);controller=null;activeAutomatic=false;save();}
  }
  /**
   * 전송 가능한 대기 항목을 처리합니다. 이미 flush가 진행 중이면 같은 작업을 공유합니다.
@@ -188,13 +223,19 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   flushing=(async()=>{
    for(const item of state.outbox){
     if(closed||!state.settings.enabled||!state.settings.receiverUrl||!credentials.reporterToken)break;
+    // 저장 당시 동의만 믿지 않고 재전송 직전에 현재 자동 전송 동의를 검사한다.
+    if(automaticItem(item)&&!state.settings.autoSend)continue;
     // Email receipts are retained for 90 days. Stop old retries well before
     // that boundary, even when the user explicitly flushes a stale queue.
     if(item.status!=='sent'&&emailRelayURL(state.settings.receiverUrl)&&now()-item.createdAt>=30*DAY){
      if(item.nextAttemptAt!==null){item.status='failed';item.nextAttemptAt=null;item.lastError='30일이 지난 이메일 제보는 중복 발송 방지를 위해 재전송하지 않습니다.';save();}
      continue;
     }
-    if(item.status==='sent'||!force&&item.nextAttemptAt>now())continue;
+    if(item.status==='sent'||item.nextAttemptAt===null)continue;
+    // 강제 flush는 대기 시간을 건너뛸 뿐, 종료된 항목이나 누적 시도 한도를 되살리지 않는다.
+    // 구형 상태 파일의 이미 초과한 시도 횟수도 실제 요청 전에 종료 처리한다.
+    if(item.attempts>=maxAttempts){item.status='failed';item.nextAttemptAt=null;item.lastError=`${maxAttempts}회 전송 시도 후 자동 재시도를 종료했습니다. 보고서는 로컬 전송함에 보존됩니다.`;save();continue;}
+    if(!force&&item.nextAttemptAt>now())continue;
     await transmit(item);
    }
    return status();

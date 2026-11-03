@@ -5,7 +5,7 @@ import type {SupportInspection} from './support-report'
 
 const defaults:AutomaticSupportSettings={enabled:false,autoSend:false,receiverUrl:'',includeBodies:false,includeNames:false,receiverEnabled:false,retentionDays:30}
 const date=(at:number|null|undefined)=>at?new Date(at).toLocaleString('ko-KR'):'—'
-export function AutomaticSupport({accessMode='local',disabled=false}:{accessMode?:AccessMode;disabled?:boolean}){
+export function AutomaticSupport({accessMode='local',disabled=false,diagnostic=true}:{accessMode?:AccessMode;disabled?:boolean;diagnostic?:boolean}){
   const [status,setStatus]=useState<AutomaticSupportStatus|null>(null),[draft,setDraft]=useState<AutomaticSupportSettings>(defaults),[reporterToken,setReporterToken]=useState('')
   const [loading,setLoading]=useState(false),[saving,setSaving]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[receiverKey,setReceiverKey]=useState(''),[inspection,setInspection]=useState<SupportInspection|null>(null)
   const alive=useRef(true),dirty=useRef(false),busy=useRef(false),inspectionGeneration=useRef(0)
@@ -21,7 +21,9 @@ export function AutomaticSupport({accessMode='local',disabled=false}:{accessMode
   const save=async()=>{
     if(blocked||!status||busy.current)return
     busy.current=true;setSaving(true);setError('');setNotice('')
-    try{const next=await updateAutomaticSupport({...draft,...(reporterToken?{reporterToken}:{})});if(alive.current){accept(next,true);setReporterToken('');setNotice('자동 제보 설정을 저장했습니다.')}}
+    // 과거 설정에 본문·이름 포함이 남아 있어도 자동 제보 저장 시 항상 제거한다.
+    // 수신 연결 값은 그대로 보존하여 사용자 모드에서도 기존 전송 엔진을 사용한다.
+    try{const next=await updateAutomaticSupport({...draft,includeBodies:false,includeNames:false,...(reporterToken?{reporterToken}:{})});if(alive.current){accept(next,true);setReporterToken('');setNotice('자동 제보 설정을 저장했습니다.')}}
     catch(e){if(alive.current)setError(requestErrorMessage(e))}finally{busy.current=false;if(alive.current)setSaving(false)}
   }
   const issueKey=async()=>{
@@ -36,15 +38,26 @@ export function AutomaticSupport({accessMode='local',disabled=false}:{accessMode
   }
   const copyKey=async()=>{try{await navigator.clipboard.writeText(receiverKey);if(alive.current)setNotice('수신 인증 키를 복사했습니다.')}catch{if(alive.current)setError('수신 인증 키를 복사하지 못했습니다. 키를 선택해 복사하세요.')}}
   const active=status?.settings.enabled&&status?.settings.autoSend
+  // 일반 사용자는 동의 여부와 결과만 확인한다. 수신 연결·인증 키·원시 오류는
+  // 진단 화면에만 남기고, 미설정 또는 대기 중인 제보를 전송 성공으로 표시하지 않는다.
+  // diagnostic 기본값은 기존 독립 사용처를 위한 것이며 App에서 사용자 모드를 지정한다.
+  if(!diagnostic)return <section className="support-controls" aria-label="자동 오류 제보">
+    <div className="panel-head"><div><h3>자동 오류 제보</h3><p>문제가 발생하면 메시지 본문과 표시 이름을 제외한 진단 정보를 자동으로 제보합니다.</p></div></div>
+    {!local&&<p className="editor-note">자동 제보 동의는 프로그램이 실행되는 컴퓨터에서 변경할 수 있습니다.</p>}
+    <label className="checkline"><input aria-label="문제 발생 시 자동 제보" type="checkbox" checked={draft.enabled&&draft.autoSend} disabled={blocked||!status} onChange={event=>edit({enabled:event.target.checked,autoSend:event.target.checked})}/> 문제 발생 시 자동 제보</label>
+    <div className="control-row"><button className="primary" disabled={blocked||!status||loading} onClick={()=>void save()}>자동 제보 설정 저장</button></div>
+    <div className="editor-note" role="status">{!status?'제보 설정을 확인하고 있습니다.':!status.configured?'자동 제보 연결이 준비되지 않아 아직 전송되지 않습니다.':active?'자동 제보 켜짐':'자동 제보 꺼짐'}{status&&<p>전송 대기 {status.counts.queued}건 · 수신 확인 {status.counts.sent}건 · 전송 실패 {status.counts.failed}건</p>}</div>
+    <p className="secondary">수신 확인은 제보 서비스가 전송을 확인한 상태이며, 담당자의 확인 여부를 뜻하지 않습니다.</p>
+    {error&&<p className="import-error" role="alert">제보 설정을 확인하거나 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.</p>}
+    {notice&&<p className="editor-note" role="status">{notice}</p>}
+  </section>
   return <section className="support-controls" aria-label="자동 오류 제보"><div className="panel-head"><div><h3>자동 오류 제보</h3><p>한 번 설정하면 문제가 발생할 때 진단을 수집하고 관리자 수신함으로 전송합니다.</p></div><button className="outline small" disabled={disabled||!local||loading||saving} onClick={()=>void refresh()}>제보 상태 새로고침</button></div>
     {!local&&<p className="editor-note">자동 제보와 관리자 수신 설정은 관리 프로그램이 실행되는 컴퓨터에서 변경할 수 있습니다.</p>}
     <label className="checkline"><input aria-label="관리자에게 진단 전송 허용" type="checkbox" checked={draft.enabled} disabled={blocked||!status} onChange={event=>edit({enabled:event.target.checked,...(!event.target.checked?{autoSend:false}:{})})}/> 관리자에게 진단 전송 허용</label>
     <label className="checkline"><input aria-label="문제 발생 시 자동 제보" type="checkbox" checked={draft.enabled&&draft.autoSend} disabled={blocked||!status} onChange={event=>edit({autoSend:event.target.checked,...(event.target.checked?{enabled:true}:{})})}/> 문제 발생 시 자동 제보</label>
     <p className="secondary">진단 전송 허용은 직접 제보할 때도 필요하며 기본으로 꺼져 있습니다. 자동 제보를 켜면 전송도 함께 허용됩니다. 켜서 저장하면 이후 발생한 문제의 버전·오류·전후 로그와 발송 시도 진단이 아래 수신 주소로 전달됩니다. 파일을 내려받아 직접 보낼 필요가 없습니다.</p>
     {/^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec$/.test(draft.receiverUrl)&&<p className="editor-note">이메일 중계 연결 · 기본 DICO 중계의 수신자는 didlsdydgh@gmail.com입니다. 수신 확인은 중계의 메일 발송 성공 응답을 뜻하며 받은편지함 도착 여부와는 다릅니다.</p>}
-    <label className="checkline"><input aria-label="자동 제보 메시지 본문 포함" type="checkbox" checked={draft.includeBodies} disabled={blocked||!status} onChange={event=>edit({includeBodies:event.target.checked})}/> 메시지 본문 포함</label>
-    <label className="checkline"><input aria-label="자동 제보 표시 이름 포함" type="checkbox" checked={draft.includeNames} disabled={blocked||!status} onChange={event=>edit({includeNames:event.target.checked})}/> 계정·채널·그룹·브라우저 표시 이름 포함</label>
-    <p className="secondary">본문과 이름에는 개인정보가 포함될 수 있습니다. 기본은 모두 제외하며 인증 토큰·쿠키·연결 비밀 키는 제보에서 제외합니다. 이름을 제외해도 사건을 연결하는 식별자는 포함됩니다.</p>
+    <p className="secondary">자동 제보에는 메시지 본문과 표시 이름 등 개인정보를 포함하지 않습니다. 인증 토큰·쿠키·연결 비밀 키도 제외하며 사건을 연결하는 식별자는 포함됩니다.</p>
     <details><summary>관리자 수신 연결 설정</summary><div className="support-controls"><label>관리자 제보 수신 주소<input aria-label="관리자 제보 수신 주소" type="url" value={draft.receiverUrl} disabled={blocked||!status} onChange={event=>edit({receiverUrl:event.target.value})} placeholder="관리자가 제공한 수신 주소"/></label><label>수신 인증 키<input aria-label="제보 전송용 수신 인증 키" type="password" autoComplete="off" value={reporterToken} disabled={blocked||!status} onChange={event=>{dirty.current=true;setReporterToken(event.target.value);setNotice('')}} placeholder={status?.hasReporterToken?'등록됨 · 변경할 때만 입력':'관리자가 제공한 키'}/></label><p className="secondary">수신 주소와 인증 키는 관리자가 한 번 제공해야 합니다. 인증 키를 비워 두면 등록된 키를 유지합니다.</p></div></details>
     <div className="control-row"><button className="primary" disabled={blocked||!status||loading} onClick={()=>void save()}>자동 제보 설정 저장</button></div>
     <div className="editor-note" role="status">{!status?'제보 설정을 확인하고 있습니다.':!status.configured?'수신 주소 또는 인증 키 미설정 · 제보는 아직 전송되지 않습니다.':active?'자동 제보 켜짐 · 문제 발생 시 진단을 전송합니다.':'자동 제보 꺼짐'}{status&&<p>전송 대기 {status.counts.queued}건 · 수신 확인 {status.counts.sent}건 · 전송 실패 {status.counts.failed}건</p>}</div>

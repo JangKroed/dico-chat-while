@@ -522,11 +522,11 @@ test('실행기는 불완전한 입력창 비움 증명을 성공으로 보고�
   await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'unknown');assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').outcome,'unknown');
  }
 });
-test('실행기의 명시적 무제한 재시도는 5회·누적 대기 상한을 넘기되 중지와 세션 제한을 지킨다',async()=>{
+test('기존 무제한 시도도 유한 기본 예산을 넘으면 재시도와 추가 Enter를 거절한다',async()=>{
  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));const a=r.client.state.attempts.attempt;
  Object.assign(a,{phase:'executing',permitId:'permit',enterRequested:true,sendRetryCount:6,maxSendRetries:null});r.transport.request=async()=>({allowed:true});
- assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:7,cooldownMs:0,elapsedMs:24_000_000},7),true);assert.equal(a.sendRetryCount,7);
- assert.equal(await r.client.canSend({id:'attempt',phase:'commit',retryCount:7},7),true);r.client.disconnect();assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:8,cooldownMs:0,elapsedMs:0},7),false);
+ assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:7,cooldownMs:0,elapsedMs:24_000_000},7),false);assert.equal(a.sendRetryCount,6);
+ assert.equal(await r.client.canSend({id:'attempt',phase:'commit',retryCount:6},7),false);
 });
 
 test('전송 응답만 유실되면 같은 content의 완료 영수증을 한 번 읽어 현재 시도를 확정한다',async()=>{
@@ -660,4 +660,18 @@ test('로컬 완료 저장 후 보고가 유실돼도 현재 복구 명령 ID로
  await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'confirmed');
  r.transport.request=original;await r.client.handleCommand(cmd('RECONCILE','recovery-now'));
  assert.ok(r.reports.some(m=>m.type==='DELIVERY_RESULT'&&m.outcome==='confirmed'&&m.recoveryCommandId==='recovery-now'));
+});
+
+
+test('구형 null 재시도 정책은 content 전달 전에 유한 기본값으로 정규화한다',async()=>{
+ const r=rig();await configured(r);const prepare=cmd('PREPARE');prepare.payload.maxSendRetries=null;await r.client.handleCommand(prepare);
+ assert.equal(r.messages.find(m=>m.type==='DICO_PREPARE').delivery.maxSendRetries,3);
+ const commit=cmd('COMMIT_PERMIT');commit.payload.maxSendRetries=null;await r.client.handleCommand(commit);
+ assert.equal(r.messages.find(m=>m.type==='DICO_DELIVER').delivery.maxSendRetries,3);
+});
+test('확장 재시작으로 불러온 기존 무제한 시도도 기본 예산을 회복하고 누적 횟수는 보존한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ Object.assign(r.client.state.attempts.attempt,{maxSendRetries:null,sendRetryCount:6,phase:'unknown'});await r.client.save();
+ const restarted=createCentralExecutor({chrome:r.chrome,transport:r.transport});await restarted.load();
+ assert.equal(restarted.state.attempts.attempt.maxSendRetries,3);assert.equal(restarted.state.attempts.attempt.sendRetryCount,6);assert.equal(restarted.state.attempts.attempt.phase,'unknown');
 });

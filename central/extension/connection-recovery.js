@@ -1,41 +1,50 @@
 import {currentRegistration} from './registration-state.js';
-// Restore only previously saved destinations, never infer new channel URLs.
-export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureManagedWindow=async()=>{},canRecover=async()=>true,onlyMissing=false}){
- const saved=currentRegistration(await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']),state.resetEpoch??0);
+/**
+ * 저장된 목적지만 복구합니다. 비동기 경계마다 세션·초기화 세대·긴급 중지를
+ * 재확인하여 이전 연결의 계정/탭 관찰이 새 상태를 변경하지 못하게 합니다.
+ * attempted는 실제 탭 생성/이동을 시도했는지이며, 안전 차단은 예산을 소모하지 않습니다.
+ */
+export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureManagedWindow=async()=>{},canRecover=async()=>true,isCurrent=()=>true,onlyMissing=false}){
+ const sessionId=state.sessionId,epoch=state.resetEpoch??0;
+ let attempted=false,completed=0;
+ const current=()=>!state.emergencyStopped&&state.sessionId===sessionId&&(state.resetEpoch??0)===epoch&&isCurrent();
+ const cancelled=()=>({status:'cancelled',attempted,completed,reasonCode:'STALE_SESSION'});
+ if(!current())return cancelled();
+ const saved=currentRegistration(await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']),epoch);
+ if(!current())return cancelled();
  const records=saved.dicoCentralTabs||[];
- // An empty registration is intentional after reset; open Discord tabs are
- // not authorization to recreate accounts or destinations automatically.
- if(!saved.dicoCentralAccount&&!records.length)return{skipped:true};
- const locallySafe=()=>!state.emergencyStopped&&!Object.values(state.attempts||{}).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase));
+ if(!saved.dicoCentralAccount&&!records.length)return{status:'skipped',skipped:true,attempted:false,completed};
+ const locallySafe=()=>current()&&!Object.values(state.attempts||{}).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase));
  const safe=async()=>locallySafe()&&await canRecover()&&locallySafe();
- const progress=(stage,completed=0,reasonCode)=>report({stage,total:records.length,completed,...(reasonCode?{reasonCode}:{})});
- if(!state.legacyDeclaration){await progress('blocked',0,'LEGACY_UNRESOLVED');return;}
+ const progress=(stage,reasonCode)=>current()?report({stage,total:records.length,completed,...(reasonCode?{reasonCode}:{})}):undefined;
+ const blocked=async reasonCode=>{if(!current())return cancelled();await progress('blocked',reasonCode);return{status:'blocked',attempted,completed,reasonCode};};
+ if(!state.legacyDeclaration)return blocked('LEGACY_UNRESOLVED');
  await progress('account');
+ if(!current())return cancelled();
  const seen=await findAccount(saved.dicoCentralAccount?.accountId,saved.dicoCentralAccount?.sourceTabId);
- if(!seen?.verified){await progress('blocked',0,'ACCOUNT_UNVERIFIED');return;}
- if(!await safe()){await progress('blocked',0,'ATTEMPT_UNRESOLVED');return;}
- if(!saved.dicoCentralAccount)await chrome.storage.local.set({dicoCentralAccount:{accountId:seen.accountId,sourceTabId:seen.tabId,resetEpoch:state.resetEpoch??0}});
- // New sessions may contain an old permit. Opening replacement tabs cannot
- // establish its past result and must wait for reconciliation instead.
- if(!await safe()){await progress('blocked',0,'ATTEMPT_UNRESOLVED');return;}
- let completed=0;
+ if(!current())return cancelled();
+ if(!seen?.verified||saved.dicoCentralAccount&&saved.dicoCentralAccount.accountId!==seen.accountId||records.some(r=>r.accountId!==seen.accountId))return blocked('ACCOUNT_UNVERIFIED');
+ if(!await safe())return blocked('ATTEMPT_UNRESOLVED');
+ if(!saved.dicoCentralAccount)await chrome.storage.local.set({dicoCentralAccount:{accountId:seen.accountId,sourceTabId:seen.tabId,resetEpoch:epoch}});
+ if(!await safe())return blocked('ATTEMPT_UNRESOLVED');
  for(const record of records){
-  await progress('channels',completed);
-  if(record.accountId!==seen.accountId){await progress('blocked',completed,'ACCOUNT_UNVERIFIED');return;}
+  await progress('channels');
+  if(!current())return cancelled();
   let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{}
-  // 주기 관찰에서 요청한 복구는 누락 탭만 대상으로 합니다.
-  // 다른 페이지로 이동한 기존 탭은 그대로 두며 뒤의 누락 탭 복구를 막지 않습니다.
+  if(!current())return cancelled();
+  // 누락 탭 복구는 사용자가 다른 페이지로 이동한 기존 탭을 변경하지 않습니다.
   if(tab&&onlyMissing){completed++;continue;}
   if(tab){
    let matching=false;try{const url=new URL(tab.url);matching=url.origin==='https://discord.com'&&url.pathname===`/channels/${record.guildId}/${record.channelId}`;}catch{}
-   if(!matching){await progress('blocked',completed,'TARGET_MISMATCH');return;}
-   if(!await safe()){await progress('blocked',completed,'ATTEMPT_UNRESOLVED');return;}
-   try{await ensureManagedWindow(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'WINDOW_CONSOLIDATION_PARTIAL');return;}
-  }else{
-   if(!await safe()){await progress('blocked',completed,'ATTEMPT_UNRESOLVED');return;}
-   try{await openChannel(record);}catch(error){await progress('blocked',completed,/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:'CHANNEL_NOT_READY');return;}
+   if(!matching)return blocked('TARGET_MISMATCH');
   }
+  if(!await safe())return blocked('ATTEMPT_UNRESOLVED');
+  attempted=true;
+  try{if(tab)await ensureManagedWindow(record);else await openChannel(record);}
+  catch(error){return blocked(/^[A-Z_]{1,64}$/.test(error.code||'')?error.code:tab?'WINDOW_CONSOLIDATION_PARTIAL':'CHANNEL_NOT_READY');}
+  if(!current())return cancelled();
   completed++;
  }
- await progress('configuration',completed);
+ await progress('configuration');
+ return current()?{status:'completed',attempted,completed}:cancelled();
 }

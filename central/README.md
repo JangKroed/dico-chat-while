@@ -1,6 +1,13 @@
-# DICO 중앙관리 0.4.27 개발판
+# DICO 중앙관리 0.4.33 개발판
 
-새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.27입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
+새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 소스 버전은 0.4.33입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
+
+## 0.4.33 사용자 화면·자동 복구
+- 일반 화면은 현재 작업과 최근 확인된 발송을 보여 줍니다. 실행 기록·로그는 설정의 개발자 진단 모드에서 확인합니다.
+- 발송 재시도 기본 3회, 최대 10회이며 불확실한 발송을 자동 재전송하지 않습니다.
+- 중지 재접속·탭 복구 경합을 보완하고 자동 제보 개인정보 제외·오프라인 큐 복원·전송 종료 조건을 강화했습니다.
+- 기존 업데이트 버튼으로 적용하며 별도 설치 패키지를 요구하지 않습니다.
+- [원인·검증·남은 범위](../docs/central-management/RELIABILITY-2026-11-03.md)
 
 ## 0.4.4 변경 사항
 

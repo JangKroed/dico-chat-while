@@ -3,6 +3,7 @@
  * 중앙 코어는 차례와 승인을 관리하고, 이 파일은 탭·세션·content script 요청을 연결합니다.
  * 메시지 입력과 완료 관찰은 원본 content.js를 읽으면 이어서 확인할 수 있습니다.
  */
+import {normalizeSendRetries} from './retry-policy.js';
 import {composerClearedEvidence} from './delivery-receipt.js';
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
@@ -29,7 +30,7 @@ const diagnostic=result=>({reasonCode:safeReason(result?.code)||safeReason(resul
 const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
 export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,lookupChannelName,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),commandJobs=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
-  const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
+  const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};for(const attempt of Object.values(state.attempts))attempt.maxSendRetries=normalizeSendRetries(attempt.maxSendRetries);return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
   const request=async message=>{if(state.resetPending)throw Error('초기화된 연결 정보를 저장하는 중입니다.');return transport.request({...message,sessionId:state.sessionId,resetEpoch:state.resetEpoch},state.instanceId);};
   /**
@@ -50,9 +51,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     return retryRequest({type:'ACK',commandId:c.id,status,...extra});
   }
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
-  const delivery=a=>({id:a.attemptId,sessionId:a.sessionId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??null,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
+  const delivery=a=>({id:a.attemptId,sessionId:a.sessionId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:normalizeSendRetries(a.maxSendRetries),...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
   const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
-  const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&(a.maxSendRetries??null)===(p.maxSendRetries??null);
+  const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&normalizeSendRetries(a.maxSendRetries)===normalizeSendRetries(p.maxSendRetries);
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
   function inputAllowed(message,tabId){
     const a=state?.attempts?.[message?.id];
@@ -79,6 +80,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(message.phase==='prepare')return{allowed:true};
     const retryCount=message.retryCount??0;
     if(!Number.isSafeInteger(retryCount)||retryCount!==(a.sendRetryCount??0))return denied('RETRY_COUNT_MISMATCH');
+    if(retryCount>normalizeSendRetries(a.maxSendRetries))return denied('RETRY_LIMIT_REACHED');
     const started=now(),monoStarted=monotonicNow();
     try{
       const response=await request({type:'AUTHORIZE_ENTER',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,retryCount});
@@ -133,7 +135,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(!Number.isSafeInteger(message.cooldownMs)||message.cooldownMs<0||message.cooldownMs>21600000)return denied('INVALID_WAIT');
       if(mode==='retry'){
         if(!Number.isSafeInteger(message.retryCount)||message.retryCount<1||message.retryCount<(a.sendRetryCount??0)||message.retryCount>(a.sendRetryCount??0)+1)return denied('RETRY_COUNT_MISMATCH');
-        if(a.maxSendRetries!=null&&message.retryCount>a.maxSendRetries)return denied('RETRY_LIMIT_REACHED');
+        if(message.retryCount>normalizeSendRetries(a.maxSendRetries))return denied('RETRY_LIMIT_REACHED');
         requestFields={retryPhase:true,retryCount:message.retryCount,cooldownMs:message.cooldownMs};
       }else{
         if(message.enterAttempted!==false||(a.sendRetryCount??0)!==0)return denied('RETRY_COUNT_MISMATCH');
@@ -251,7 +253,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       }
       if(!a) {
         delete state.stoppedGroups[p.groupId];volatileStops.delete(p.groupId);
-        a={...structuredClone(p),sessionId:state.sessionId,phase:'preparing',startedAt:now(),enterRequested:false};state.attempts[p.attemptId]=a;await save();
+        a={...structuredClone(p),maxSendRetries:normalizeSendRetries(p.maxSendRetries),sessionId:state.sessionId,phase:'preparing',startedAt:now(),enterRequested:false};state.attempts[p.attemptId]=a;await save();
       } else if(!matches(a,p) || a.sessionId!==state.sessionId || !['preparing','prepared'].includes(a.phase))throw Error('기존 발송 시도를 다시 준비할 수 없습니다.');
       if(a.phase!=='prepared') {
         let inspection;

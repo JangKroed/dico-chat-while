@@ -22,7 +22,8 @@ test('runtime incident automatically reaches the administrator inbox without a d
  for(let n=0;n<100&&receiver.supportDelivery.inbox().length===0;n++)await new Promise(r=>setTimeout(r,10));
  assert.equal(receiver.supportDelivery.inbox().length,1);
  const report=receiver.supportDelivery.get(receiver.supportDelivery.inbox()[0].receiptId).report;
- assert.equal(report.attempts[0].body,'Original diagnostic body');assert.equal(report.attempts[0].reasonCode,'CONTENT_EXCEPTION_AFTER_ENTER');assert.equal(report.privacy.credentialsExcluded,true);
+ // 수동 본문 공유 설정이 켜져 있어도 무인 진단에는 채팅 본문을 넣지 않는다.
+ assert.equal(report.attempts[0].body,undefined);assert.equal(report.privacy.includeBodies,false);assert.equal(report.privacy.includeNames,false);assert.doesNotMatch(JSON.stringify(report),/Original diagnostic body/);assert.equal(report.attempts[0].reasonCode,'CONTENT_EXCEPTION_AFTER_ENTER');assert.equal(report.privacy.credentialsExcluded,true);
  assert.doesNotMatch(JSON.stringify(report),new RegExp(token));
  for(let n=0;n<100&&sender.supportDelivery.status().counts.sent===0;n++)await new Promise(r=>setTimeout(r,10));
  assert.equal(sender.supportDelivery.status().counts.sent,1);

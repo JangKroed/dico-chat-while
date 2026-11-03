@@ -89,10 +89,25 @@ try {
   await cmd('Page.enable');await cmd('Runtime.enable');await cmd('Log.enable');
   const url=`${runtime.url}/#bootstrap=${runtime.app.issueBootstrap()}`;
   await cmd('Page.navigate',{url});
-  await visible('첫 발송을 준비해 볼까요?');
+  await visible('발송 작업을 준비하세요');
   assert.equal(await evalJS('location.hash'),'','Bootstrap fragment must be removed');
   await screenshot('desktop-empty.png');
   console.log('PASS bootstrap and empty dashboard');
+  // 일반 사용자는 진단 메뉴 없이 시작합니다. 직접 URL도 같은 화면 정책을 적용합니다.
+  assert.equal(await evalJS("Boolean([...document.querySelectorAll('.nav-item')].find(x=>x.textContent.includes('실행 기록')||x.textContent.includes('로그 · 분석')))"),false);
+  await cmd('Page.navigate',{url:runtime.url+'/logs'});
+  await visible('발송 작업을 준비하세요');
+  assert.equal(await evalJS('location.pathname'),'/');
+  await clickText('.nav-item','설정 · 도움말');
+  await visible('개발자 진단 모드');
+  assert.equal(await evalJS(`Boolean(document.querySelector('[aria-label="관리자 제보 수신 주소"]'))`),false);
+  assert.equal(await evalJS(`Boolean(document.querySelector('[aria-label="문제 발생 시 자동 제보"]'))`),true);
+  await evalJS(`document.querySelector('[aria-label="개발자 진단 모드"]').click()`);
+  await until(async()=>await evalJS("Boolean([...document.querySelectorAll('.nav-item')].find(x=>x.textContent.includes('실행 기록')))"));
+  await cmd('Page.reload');
+  await visible('개발자 진단 모드');
+  assert.equal(await evalJS(`document.querySelector('[aria-label="개발자 진단 모드"]').checked`),true);
+  console.log('PASS default user mode, direct route guard, simple consent and persistent diagnostic opt-in');
 
   await clickText('.nav-item','메시지 보관함');await visible('메시지 보관함');
   await clickText('button','새 메시지');
@@ -127,6 +142,12 @@ try {
     console.log(`PASS route ${heading}`);
   }
   await checkLongAttemptModal();console.log('PASS desktop long attempt modal scroll');
+  await clickText('.nav-item','설정 · 도움말');await visible('개발자 진단 모드');
+  await evalJS(`document.querySelector('[aria-label="개발자 진단 모드"]').click()`);
+  await cmd('Page.navigate',{url:runtime.url+'/history'});
+  await visible('최근 확인된 발송');
+  assert.equal(await evalJS('location.pathname'),'/');
+  console.log('PASS disabling diagnostic mode protects history route after reload');
   await cmd('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
   await until(async()=>await evalJS('innerWidth===390'));
   await checkLongAttemptModal();console.log('PASS narrow long attempt modal scroll');

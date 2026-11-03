@@ -51,15 +51,18 @@ test('report action opens a preview workflow without claiming delivery',async()=
   assert.equal(button.props.children,'관리자에게 제보');
 });
 
-test('history, incident list and settings each expose the support workflow',async()=>{
+test('diagnostic history, incidents and settings expose support while user settings use consent',async()=>{
   const {History,Logs,Settings,createElement,renderToStaticMarkup}=await components();
   const s={schemaVersion:1,stateVersion:1,messages:[],instances:[],accounts:[],channels:[],groups:[],attempts:[],incidents:[],events:[]};
-  const common={s,go:()=>{},run:async()=>true,busy:false,retryNotSent:async()=>null,retryWaitingId:null,supportReport:()=>{}};
+  const common={s,diagnostic:true,changeDiagnostic:()=>{},go:()=>{},run:async()=>true,busy:false,retryNotSent:async()=>null,retryWaitingId:null,supportReport:()=>{}};
   const oldWindow=globalThis.window,oldDocument=globalThis.document;
   globalThis.window={location:{href:'http://127.0.0.1:43128/'}};globalThis.document={documentElement:{dataset:{},style:{}}};
   try{for(const [Component,props] of [[History,{}],[Logs,{period:'24h',refresh:async()=>{}}],[Settings,{draftStatus:{current:false},accessMode:'local',notify:async()=>{}}]]){
     const html=renderToStaticMarkup(createElement(Component,{...common,...props}));assert.match(html,/관리자에게 제보/);
-  }}finally{globalThis.window=oldWindow;globalThis.document=oldDocument;}
+  }
+    const user=renderToStaticMarkup(createElement(Settings,{...common,diagnostic:false,draftStatus:{current:false},accessMode:'local',notify:async()=>{}}));
+    assert.match(user,/문제 발생 시 자동 제보/);assert.doesNotMatch(user,/>관리자에게 제보<|관리자 제보 수신 주소|수신 인증 키 표시/);
+  }finally{globalThis.window=oldWindow;globalThis.document=oldDocument;}
 });
 
 function hookRenderer(internals,Component,props){

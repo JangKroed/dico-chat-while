@@ -19,7 +19,8 @@ test('an unresolved attempt appearing during tab lookup prevents automatic repla
 test('emergency stop during recovery prevents opening the next missing tab',async()=>{
   const f=fixture();
   f.chrome.tabs.get=async()=>{f.state.emergencyStopped=true;throw Error('missing');};
-  await recoverConnections(f);
+  const result=await recoverConnections(f);
   assert.equal(f.opened.length,0);
-  assert.equal(f.progress.at(-1).stage,'blocked');
+  assert.equal(result.status,'cancelled');
+  assert.equal(f.progress.at(-1).stage,'channels');
 });

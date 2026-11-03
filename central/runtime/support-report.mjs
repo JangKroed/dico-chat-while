@@ -130,3 +130,16 @@ export function inspectSupportReport(input){
   report.configuration.service??={};report.summary=summary(report);report.checks=checksFor(report);
   return bounded({report,summary:report.summary,findings:[{code:'IMPORTED_REPORT_UNVERIFIED',severity:'info',message:'가져온 파일의 기록을 분석한 결과입니다. 실제 실행 환경이나 게시 여부를 별도로 검증한 것은 아닙니다.'},...report.checks]});
 }
+
+/**
+ * 무인 제보는 수동 내보내기 동의와 독립적으로 최소 진단 자료만 남긴다.
+ * 오류의 message/detail에는 서버 응답, 쿠키, 실제 채팅이 섞일 수 있으므로
+ * 비밀 키 이름을 거르는 것만으로는 부족하다. 자유 텍스트 자체를 제거하고
+ * 상태 코드·시간·횟수·식별자 등 구조화된 관찰값만 보존한다.
+ */
+export function automaticSupportReport(input){
+ const source=inspectSupportReport(input).report;
+ const omitted=new Set(['body','message','description','userDescription','detail','error','reason','verificationReason','checks','summary',...NAME_FIELDS]);
+ const scrub=value=>Array.isArray(value)?value.map(scrub):object(value)?Object.fromEntries(Object.entries(value).filter(([key])=>!omitted.has(key)).map(([key,item])=>[key,scrub(item)])):value;
+ return inspectSupportReport({...scrub(source),privacy:{includeBodies:false,includeNames:false,credentialsExcluded:true}}).report;
+}
