@@ -28,3 +28,25 @@ test('prebuilt verifier rejects stale source, altered assets and missing assets'
  await rm(join(dir,'central/ui/dist/assets/main.js'));
  await assert.rejects(verifyUI(dir),/asset/);
 });
+
+test('legacy updater builds using bundled Node and npm CLI with no global npm in PATH', {skip:process.platform==='win32'}, async t=>{
+ const {cp,copyFile,chmod,symlink}=await import('node:fs/promises');
+ const {spawnSync}=await import('node:child_process');
+ const {updateEnvironment}=await import('../central/runtime/updater.mjs');
+ const {findNpmCli}=await import('../scripts/setup-central.mjs');
+ const dir=await mkdtemp(join(tmpdir(),'dico portable '));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const checkout=join(dir,'checkout'),bin=join(dir,'bin');
+ await mkdir(checkout);await mkdir(bin);await symlink('/bin/sh',join(bin,'sh'));
+ const node=join(bin,'node');await copyFile(process.execPath,node);await chmod(node,0o700);
+ for(const path of ['central','scripts','package.json','content.js','emoji-data.js']){
+  await cp(new URL(path,root),join(checkout,path),{recursive:true,filter:p=>!p.split(/[\\/]/).includes('node_modules')});
+ }
+ const env=updateEnvironment(node,dir,{PATH:''}),npmCli=await findNpmCli();
+ env.NPM_CONFIG_OFFLINE='true';
+ for(const name of ['empty-config','empty-global-config'])await writeFile(join(dir,name),'');
+ for(const args of [['--prefix','central/ui','ci'],['run','central:build'],['run','central:check']]){
+  const result=spawnSync(node,[npmCli,...args],{cwd:checkout,env,encoding:'utf8',timeout:60000});
+  assert.equal(result.status,0,args.join(' ')+'\n'+result.stdout+'\n'+result.stderr);
+ }
+ assert.match(await readFile(join(checkout,'central/extension/build-info.js'),'utf8'),/BUILD_ID/);
+});
