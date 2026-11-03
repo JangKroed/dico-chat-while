@@ -760,3 +760,20 @@ test('승인 복구 하트비트의 중지는 즉시 끝내고 일시 거절은 
   if(stopped){assert.equal(result.code,'EXECUTION_STOPPED');assert.equal(authorizations,1);}
  }
 });
+
+
+test('빠른 채팅의 다른 작성자 전송 중 표시는 내 초안 재시도를 막지 않는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);let posted=false,observations=0;
+ r.onTick(()=>{if(!posted&&r.events.some(e=>e.type==='keydown')){posted=true;for(let i=0;i<100;i++)r.post({text:i%2?'다른 채팅':'A',author:'999999999999999999',sending:true});}});
+ // Bound the faulty implementation's endless observation without changing send authorization.
+ r.onRuntime(m=>m.type==='DICO_OBSERVE_WAIT'&&++observations>4?{allowed:false,code:'TEST_OBSERVATION_LIMIT',retryable:false}:undefined);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,2);assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+});
+
+test('빠른 채팅에서 본인 게시가 화면 밖으로 사라져도 비워진 입력창으로 한 번만 완료한다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);
+ r.onSubmit(()=>{for(let i=0;i<200;i++)r.post({text:'채팅 '+i,author:'999999999999999999'});r.removePosts();});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});

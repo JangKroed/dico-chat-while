@@ -266,17 +266,22 @@
     if(ids.size)return ids.size===1&&ids.has(target.ownUserId);
     return proofMatchesPanel(ownIdentityProof,panel)&&ownIdentityProof.accountId===target.ownUserId;
   }
-  function authorId(row) {
-    // Consecutive messages can omit the avatar; their group inherits the
-    // nearest preceding message header. Never scan outside the chat list.
-    let current = row;
+  function authorId(row, cache = null) {
+    // Consecutive messages omit avatars. Memoize only within one DOM scan:
+    // busy lists otherwise walk the same preceding rows quadratically. Never
+    // reuse identity across mutations, where virtualized rows can change owner.
+    let current = row, result = null;
+    const visited = [];
     while (current) {
+      if (cache?.has(current)) { result = cache.get(current); break; }
+      visited.push(current);
       const avatar = avatarUserId(current);
-      if (avatar) return avatar;
-      if (current.querySelector('[id^="message-username-"]')) return null;
+      if (avatar) { result = avatar; break; }
+      if (current.querySelector('[id^="message-username-"]')) break;
       current = current.previousElementSibling;
     }
-    return null;
+    if (cache) for (const item of visited) cache.set(item,result);
+    return result;
   }
   // Read only the composer countdown, never message text or the channel's
   // configured slowmode duration (which may not apply to this member).
@@ -530,10 +535,19 @@
       // the composer. Never advance A/B merely because dispatchEvent returned.
       if (submissionOnly && empty) { finish({status:'unverified'}); return; }
       let sendingActive=false;
+      const authorCache = new Map();
       for (const node of document.querySelectorAll(selector)) {
         if (existing.has(node.id)) continue;
         evidence.newMessage = true;
         const row = node.closest('li') || node;
+        // A busy channel can render the same text from another account. Resolve
+        // ownership before any sending/failure state or optimistic provenance;
+        // foreign traffic must never keep our retained draft in observation.
+        const author = authorId(row,authorCache);
+        if (author && ((userId && author !== userId) || (localAuthors.size>0 && !localAuthors.has(author)))) {
+          evidence.authorMismatch = true;
+          continue;
+        }
         // Keep failure diagnostics even when emoji/Markdown text differs.
         // Managed completion still follows the verified submitted composer.
         if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
@@ -550,7 +564,7 @@
         if (isSending) {
           evidence.sendingSeen = true;sendingActive=true;
           locallySending.add(node.id); localNodes.add(node); localRows.add(row);
-          const sendingAuthor=authorId(row);
+          const sendingAuthor=author;
           if(sendingAuthor && (!userId || sendingAuthor===userId))localAuthors.add(sendingAuthor);
           detail = '메시지가 아직 전송 중으로 표시됩니다.';
           continue;
@@ -560,11 +574,6 @@
         if (!id || created < startedAt - 2000 || created > Date.now() + 2000) {
           evidence.timeMismatch = true;
           detail = '메시지 생성 시각을 이번 전송과 연결하지 못했습니다.'; continue;
-        }
-        const author = authorId(row);
-        if (author && ((userId && author !== userId) || (localAuthors.size>0 && !localAuthors.has(author)))) {
-          evidence.authorMismatch = true;
-          detail = '일치하는 메시지의 작성자가 본인과 다릅니다.'; continue;
         }
         const sameNode=localNodes.has(node),sameRow=localRows.has(row),sameReplacement=replacementNodes.has(node);
         const observedAuthor=Boolean(author && localAuthors.has(author));

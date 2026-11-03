@@ -128,3 +128,13 @@ test('기본 아바타·행 전체 교체: 같은 DOM 위치의 제거/추가만
   assert.equal((await watcher.promise).status,fault?'uncertain':'confirmed',fault || 'replacement');
  }
 });
+
+test('빠른 연속 채팅의 작성자 상속 조회는 메시지 수에 비례하고 다음 관찰에 갱신된다',async()=>{
+ const r=rig(),own='123456789012345678';let reads=0,headerAuthor=own;
+ let previous={querySelectorAll:()=>{reads++;return[{getAttribute:()=>`/avatars/${headerAuthor}/a.png`}]},querySelector:()=>null};
+ const nodes=Array.from({length:200},(_,i)=>{const row={previousElementSibling:previous,querySelectorAll:()=>{reads++;return[]},querySelector:()=>null,matches:()=>false};previous=row;return{id:'message-content-'+(BigInt(snowflake().slice(16))+BigInt(i)),innerText:'공지',closest:()=>row};});
+ const watcher=r.api.watchMessage(r.editor,'공지',own,Date.now());r.setNodes(nodes);r.check();
+ assert.ok(reads<=401,`작성자 DOM 조회가 ${reads}회로 반복됨`);
+ headerAuthor='999999999999999999';nodes.at(-1).innerText='공지';nodes.at(-1).id=snowflake();r.editor.innerText='';r.check();r.timeout();
+ assert.equal((await watcher.promise).status,'uncertain','이전 관찰의 작성자를 재사용해 확정하지 않음');
+});
