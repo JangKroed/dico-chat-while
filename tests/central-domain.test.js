@@ -106,10 +106,13 @@ test('restart automatically readies the service while blocking automatic group r
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
-test('referenced revisions cannot be deleted and editing library does not change applied body', () => {
+test('referenced revisions cannot be deleted and saved library edits sync before the next send', () => {
   const f=fixture(),c=f.connect(),m=f.message('Fixed');f.apply(c,[m]);f.manager.execute('message.update',{id:m.id,expectedVersion:1,body:'New'});
   assert.throws(()=>f.manager.execute('message.delete',{id:m.id,expectedVersion:2}),{code:'MESSAGE_IN_USE'});
-  const g=f.group([c]);f.start(g);assert.equal(f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE').payload.body,'Fixed');f.manager.close();
+  const g=f.group([c]);assert.throws(()=>f.start(g),{code:'CONFIG_PENDING'});
+  const config=f.manager.commands(c.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');
+  f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:config.id,status:'applied'},c.instanceId);
+  f.start(g);assert.equal(f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE').payload.body,'New');f.manager.close();
 });
 
 test('wall-clock jump and loop stall require group resume only, never catch-up permits', () => {

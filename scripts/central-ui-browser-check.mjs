@@ -139,9 +139,12 @@ try {
   await cmd('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',modifiers:4});
   await cmd('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA'});
   await cmd('Input.insertText',{text:'수정한 검사 문구'});
-  await clickText('button','수정본 저장');
+  await clickText('button','변경사항 저장');
   await until(()=>runtime.manager.snapshot().messages[0].revisions.length===2);
-  console.log('PASS message revision save through browser UI');
+  await visible('연결된 채널의 다음 발송에 자동 반영됩니다.');
+  assert.equal(await evalJS("Boolean([...document.querySelectorAll('.editor-bottom details')].find(el=>el.textContent.includes('수정 이력')&&!el.open))"),true,'Reference history remains collapsed');
+  assert.equal(await evalJS("document.querySelector('.editor-panel').innerText.includes('채널에는 별도로 적용')"),false);
+  console.log('PASS message save through browser UI with automatic-sync guidance and collapsed history');
   await screenshot('desktop-messages.png');
 
   for(const [nav,heading] of [['계정 · 브라우저','계정 · 브라우저'],['채널 설정','채널 설정'],['발송 그룹','발송 그룹'],['실행 기록','실행 기록'],['로그 · 분석','로그 · 분석'],['설정 · 도움말','설정 · 도움말'],['대시보드','대시보드']]) {

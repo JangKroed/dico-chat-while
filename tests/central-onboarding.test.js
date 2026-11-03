@@ -36,7 +36,7 @@ test('unapplied and missing revisions block group readiness',()=>{
   const s=snapshot();s.channels[0].appliedVersion=0;
   assert.ok(groupBlockers(s,s.groups[0],now).includes('확장 적용 확인 대기'));
   s.channels[0].appliedVersion=1;s.messages=[];
-  assert.ok(groupBlockers(s,s.groups[0],now).includes('메시지 수정본 확인 필요'));
+  assert.ok(groupBlockers(s,s.groups[0],now).includes('메시지 연결 정보 확인 필요'));
 });
 test('a browser without a heartbeat cannot be shown as fresh or ready',()=>{
   const s=snapshot();delete s.instances[0].lastSeenAt;

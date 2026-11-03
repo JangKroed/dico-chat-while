@@ -417,9 +417,30 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(c.lastConfirmedMono!==undefined)c.nextMono=Math.max(c.nextMono||0,c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c));
     event('channel.interval_updated',{channelId:c.id,intervalMode:c.intervalMode,intervalMs:c.intervalMs,pending:!!c.pendingIntervalSync});return true;
   }
-  function applyPlaylist(c,items){
-    c.playlist=items;c.playlistIndex=0;c.configVersion++;c.appliedVersion=0;c.version++;c.updatedAt=now();delete c.pendingIntervalSync;delete c.intervalSyncBaseMs;
-    queueConfiguration(c);event('channel.playlist_applied',{channelId:c.id,configVersion:c.configVersion});
+  function latestPlaylist(items){return items.map(item=>({messageId:item.messageId,revisionId:get('messages',item.messageId).revisionId}));}
+  function refreshMessageAssignments(messageId){
+    for(const c of state.channels){
+      // 수동으로 편집 중인 다음 목록을 우선합니다. 여기서 빠진 문구를 현재
+      // 목록에 있다는 이유로 되살리거나 순서를 초기화하지 않습니다.
+      const source=c.pendingPlaylist||c.playlist;
+      if(messageId&&!source.some(item=>item.messageId===messageId))continue;
+      const items=latestPlaylist(source);
+      if(!messageId&&items.every((item,index)=>item.revisionId===source[index].revisionId))continue;
+      if(state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){
+        // 현재 초안/허가의 body, revision, configVersion은 불변입니다.
+        // 미확인 결과에도 새 입력을 만들지 않고 정상 종료 후 최신본만 적용합니다.
+        if(!c.pendingPlaylist)c.pendingPlaylistPreserveIndex=true;
+        c.pendingPlaylist=items;c.updatedAt=now();
+        event('channel.message_refresh_pending',{channelId:c.id,...(messageId?{messageId}:{})});
+      }else applyPlaylist(c,items,{preserveIndex:true});
+    }
+  }
+  function applyPlaylist(c,items,{preserveIndex=false}={}){
+    c.playlist=items;if(!preserveIndex)c.playlistIndex=0;c.configVersion++;c.appliedVersion=0;if(!preserveIndex)c.version++;c.updatedAt=now();delete c.pendingIntervalSync;delete c.intervalSyncBaseMs;
+    // 자동 갱신은 사용자 목록 편집 version을 바꾸지 않습니다. 오프라인이면 다음
+    // 연결 관찰에서 최신 config를 보내며 사라진 예전 탭의 명령을 만들지 않습니다.
+    const instance=state.instances.find(i=>i.id===c.instanceId);
+    if(!preserveIndex||c.verified&&instance?.connected&&c.sessionId===instance.sessionId)queueConfiguration(c);event('channel.playlist_applied',{channelId:c.id,configVersion:c.configVersion});
   }
   /**
    * 발송 시도를 끝내고 그룹·채널의 다음 상태를 계산합니다.
@@ -438,7 +459,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)))cmd.status='completed';
     resolveIncidents(a.id);
-    if(c.pendingPlaylist){applyPlaylist(c,c.pendingPlaylist);delete c.pendingPlaylist;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
+    if(c.pendingPlaylist){applyPlaylist(c,latestPlaylist(c.pendingPlaylist),{preserveIndex:c.pendingPlaylistPreserveIndex===true});delete c.pendingPlaylist;delete c.pendingPlaylistPreserveIndex;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
     if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){g.status='paused';release(g);}
     else if(['stopped','paused'].includes(g.status)){g.waitReason=null;release(g);}
     event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual,...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{})});return a;
@@ -493,7 +514,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function execute(action,p={}){return transact(()=>{
     switch(action){
       case 'message.create':{const at=now(),r={id:id(),version:1,body:body(p.body),at};const m={id:id(),name:text(p.name,'name'),tags:tags(p.tags),archived:false,version:1,revisionId:r.id,body:r.body,revisions:[r],createdAt:at,updatedAt:at};state.messages.push(m);event('message.created',{messageId:m.id});return m;}
-      case 'message.update':{const m=get('messages',p.id);expected(m,p);if(p.name!==undefined)m.name=text(p.name,'name');if(p.tags!==undefined)m.tags=tags(p.tags);if(p.body!==undefined){const r={id:id(),version:m.revisions.length+1,body:body(p.body),at:now()};m.revisions.push(r);m.revisionId=r.id;m.body=r.body;}m.version++;m.updatedAt=now();event('message.updated',{messageId:m.id});return m;}
+      case 'message.update':{const m=get('messages',p.id);expected(m,p);if(p.name!==undefined)m.name=text(p.name,'name');if(p.tags!==undefined)m.tags=tags(p.tags);if(p.body!==undefined){const r={id:id(),version:m.revisions.length+1,body:body(p.body),at:now()};m.revisions.push(r);m.revisionId=r.id;m.body=r.body;}m.version++;m.updatedAt=now();if(p.body!==undefined||p.name!==undefined)refreshMessageAssignments(m.id);event('message.updated',{messageId:m.id});return m;}
       case 'message.duplicate':{const original=get('messages',p.id),at=now(),r={id:id(),version:1,body:original.body,at};const m={...clone(original),id:id(),name:text(p.name||`${original.name.slice(0,190)} 복사`,'name'),version:1,archived:false,revisionId:r.id,revisions:[r],createdAt:at,updatedAt:at};state.messages.push(m);event('message.created',{messageId:m.id});return m;}
       case 'message.archive':{const m=get('messages',p.id);expected(m,p);m.archived=p.archived!==false;m.version++;event('message.archived',{messageId:m.id});return m;}
       case 'message.delete':{const m=get('messages',p.id);expected(m,p);ensure(!state.channels.some(c=>[...c.playlist,...(c.pendingPlaylist||[])].some(i=>i.messageId===m.id))&&!state.attempts.some(a=>a.messageIdRef===m.id&&ACTIVE.has(a.status)),'MESSAGE_IN_USE','This message is referenced. Archive it or remove its channel assignments.',409);state.messages=state.messages.filter(x=>x.id!==m.id);event('message.deleted',{messageId:m.id});return {id:m.id,deleted:true};}
@@ -555,8 +576,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         }
         c.version++;event('channel.updated',{channelId:c.id});return publicChannel(c);
       }
-      case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&ACTIVE.has(a.status));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
-        if(active){c.pendingPlaylist=items;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
+      case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId:m.revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&ACTIVE.has(a.status));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
+        if(active){c.pendingPlaylist=items;delete c.pendingPlaylistPreserveIndex;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
       case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??20000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
       case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}
       case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);for(const attempt of state.attempts.filter(a=>a.groupId===g.id))attempt.groupName??=g.name;release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
@@ -691,7 +712,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const channels=backup.channels.map(c=>{
       ensure(instances.some(i=>i.id===c.instanceId),'VALIDATION','Channel references a missing browser.');
       ensure(Array.isArray(c.playlist)&&c.playlist.length<=50,'VALIDATION','Invalid playlist.');
-      const playlist=c.playlist.map(item=>{const m=messages.find(m=>m.id===item.messageId);ensure(m&&m.revisions.some(r=>r.id===item.revisionId),'VALIDATION','Playlist references a missing message revision.');return{messageId:m.id,revisionId:item.revisionId};});
+      const playlist=c.playlist.map(item=>{const m=messages.find(m=>m.id===item.messageId);ensure(m&&m.revisions.some(r=>r.id===item.revisionId),'VALIDATION','Playlist references a missing message revision.');return{messageId:m.id,revisionId:m.revisionId};});
       if(c.intervalMode!==undefined)ensure(['auto','custom'].includes(c.intervalMode),'VALIDATION','Invalid interval mode.');
       if(c.customIntervalMs!==undefined)duration(c.customIntervalMs,'customIntervalMs');
       if(c.slowmodeObservedAt!==undefined)ensure(Number.isSafeInteger(c.slowmodeObservedAt)&&c.slowmodeObservedAt>=0,'VALIDATION','Invalid slowmode observation time.');
@@ -1211,7 +1232,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const c of state.channels){c.verified=false;c.appliedVersion=0;delete c.tabId;delete c.sessionId;delete c.nextMono;delete c.lastConfirmedMono;}
     for(const g of state.groups){delete g.nextMono;if(g.status==='running')g.status='resume_required';}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
+    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
   else transact(()=>{state.retryPolicyVersion=3;event('service.started');});
   return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};

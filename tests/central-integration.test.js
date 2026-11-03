@@ -8,7 +8,7 @@ import {createCentralExecutor} from '../central/extension/executor.js';
 import {startCentralRuntime,acquireLock} from '../central/runtime/main.mjs';
 
 test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·중지·허가 검사를 확인한다',async()=>{
-  let time=100000;const manager=createCentralManager({now:()=>time,monotonicNow:()=>time}),clients=[],order=[];
+  let time=100000;const manager=createCentralManager({now:()=>time,monotonicNow:()=>time}),clients=[],order=[],sentBodies=[];let edited=false;
   const guildId='11111111111111111',channelId='22222222222222222';
   try {
     for(let i=0;i<3;i++) {
@@ -22,7 +22,13 @@ test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·�
         if(m.type==='DICO_INSPECT')return {ok:true,draftMatches:true,cooldownMs:0,cooldownKnown:true};
         const allowed=await executor.canSend({id:m.delivery.id,phase:m.type==='DICO_PREPARE'?'prepare':'commit'},id);
         assert.equal(allowed,true,'현재 중앙 상태에서도 허가돼야 함');
-        if(m.type==='DICO_PREPARE')return {status:'prepared'};
+        if(m.type==='DICO_PREPARE'){
+          // 실제 코어·실행기가 준비를 시작한 뒤 보관함을 수정해도 현재 초안은
+          // 보존하고 다음 차례부터 모든 계정에 최신 문구가 전달되어야 한다.
+          if(order.length===5&&!edited){edited=true;const saved=manager.snapshot().messages[0];manager.execute('message.update',{id:saved.id,expectedVersion:saved.version,body:'자동 반영된 새 문구'});}
+          return {status:'prepared'};
+        }
+        sentBodies.push(m.delivery.text);
         order.push(i);return {status:'confirmed',messageId:String(44444444444444444n+BigInt(order.length))};
       }}};
       executor=createCentralExecutor({chrome,transport,now:()=>time});await executor.load();await executor.setSession(hello);
@@ -50,6 +56,10 @@ test('실제 중앙 코어와 세 확장 실행기를 연결해 A B C 순환·�
       manager.tick();await drain();
     }
     assert.equal(order.length,36);assert.ok(order.every((account,index)=>account===index%3));
+    assert.equal(edited,true);
+    assert.deepEqual(sentBodies.slice(0,6),Array(6).fill('실제 Discord로 보내지 않는 검증 문구'));
+    assert.deepEqual(sentBodies.slice(6),Array(30).fill('자동 반영된 새 문구'));
+    assert.equal(manager.snapshot().groups[0].status,'running','보관함 수정만으로 그룹을 중지하지 않습니다.');
     assert.ok(manager.snapshot().attempts.every(a=>a.status==='confirmed'));
     manager.execute('group.stop',{id:group.id});await drain();
     assert.equal(manager.snapshot().groups[0].status,'stopped');

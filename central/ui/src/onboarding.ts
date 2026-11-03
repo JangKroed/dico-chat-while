@@ -23,7 +23,7 @@ export function bindingBlockers(s:Snapshot,c:Channel,now=Date.now()):string[] {
   if(!c.verified)reasons.push('계정·채널 검증 필요')
   if(s.accounts!==undefined&&!s.accounts.some(a=>a.instanceId===c.instanceId&&a.accountId===c.accountId&&a.verified))reasons.push('계정 등록·검증 필요')
   if(!c.playlist.length)reasons.push('메시지 적용 필요')
-  else if(c.playlist.some(p=>!s.messages.some(m=>m.id===p.messageId&&m.revisions.some(r=>r.id===p.revisionId))))reasons.push('메시지 수정본 확인 필요')
+  else if(c.playlist.some(p=>!s.messages.some(m=>m.id===p.messageId&&m.revisions.some(r=>r.id===p.revisionId))))reasons.push('메시지 연결 정보 확인 필요')
   if(c.playlist.length&&c.configVersion!==c.appliedVersion)reasons.push('확장 적용 확인 대기')
   return reasons
 }
