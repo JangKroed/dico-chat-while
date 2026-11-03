@@ -28,6 +28,18 @@ function receiverURL(input){
  return url.href;
 }
 function tokenValue(value){if(typeof value!=='string'||value.length>512||value!==''&&!/^[a-zA-Z0-9._~-]{24,512}$/.test(value))throw fail('수신 서버에서 발급한 연결 키를 확인하세요.');return value;}
+function emailRelayURL(value){return /^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec$/.test(value);}
+async function postReport(url,report,token,signal,fetchImpl){
+ if(!emailRelayURL(url))return fetchImpl(url,{method:'POST',redirect:'error',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify(report),signal});
+ let response=await fetchImpl(url,{method:'POST',redirect:'manual',headers:{'content-type':'application/json'},body:JSON.stringify({key:token,report}),signal});
+ if(response.status===302||response.status===303){
+  const location=response.headers.get('location');await response.body?.cancel();
+  const target=new URL(location);
+  if(target.protocol!=='https:'||target.hostname!=='script.googleusercontent.com'||target.port||target.username||target.password||target.pathname!=='/macros/echo')throw fail('이메일 중계 응답 주소를 확인하지 못했습니다.',502);
+  response=await fetchImpl(target.href,{method:'GET',redirect:'error',signal});
+ }
+ return response;
+}
 function settingsPatch(settings,patch){
  if(!patch||typeof patch!=='object'||Array.isArray(patch))throw fail('자동 제보 설정을 확인하세요.');
  const next={...settings};
@@ -54,7 +66,7 @@ function restrictPrivacy(input,policy){
 // This store is owned by the runtime's single-instance lock. All disk mutations
 // are synchronous and atomic; report creation is serialized separately because
 // it reads async build metadata. Credentials never enter the report/state file.
-export function createSupportDelivery({dir,createReport,now=Date.now,fetchImpl=globalThis.fetch,timeoutMs=15000,retryBaseMs=30000,pollMs=5000}={}){
+export function createSupportDelivery({dir,createReport,connection,now=Date.now,fetchImpl=globalThis.fetch,timeoutMs=15000,retryBaseMs=30000,pollMs=5000}={}){
  if(!dir||typeof createReport!=='function')throw Error('Support delivery requires dir and createReport.');
  const directory=resolve(dir),outDir=join(directory,'outbox'),inDir=join(directory,'inbox');
  for(const path of [directory,outDir,inDir]){mkdirSync(path,{recursive:true,mode:0o700});if(process.platform!=='win32')chmodSync(path,0o700);}
@@ -65,6 +77,17 @@ export function createSupportDelivery({dir,createReport,now=Date.now,fetchImpl=g
  let credentials=readJSON(credentialPath,null);
  if(!credentials){credentials={receiverToken:randomBytes(32).toString('hex'),reporterToken:''};atomicJSON(credentialPath,credentials);}
  tokenValue(credentials.receiverToken);tokenValue(credentials.reporterToken);
+ // A distributor can preconnect its receiver; privacy consent always stays
+ // with the user. Import once and never replace an existing destination.
+ if(connection&&!state.connectionInitialized){
+  if(!state.settings.receiverUrl&&!credentials.reporterToken){
+   const url=receiverURL(connection.receiverUrl),token=tokenValue(connection.reporterToken);
+   if(!url||!token)throw fail('배포본의 제보 수신 연결 정보가 비어 있습니다.');
+   credentials={...credentials,reporterToken:token};atomicJSON(credentialPath,credentials);
+   state.settings.receiverUrl=url;
+  }
+  state.connectionInitialized=true;
+ }
  if(process.platform!=='win32')chmodSync(credentialPath,0o600);
  for(const entry of state.outbox)if(entry.status==='sending'){entry.status='queued';entry.nextAttemptAt=now();}
  const save=()=>atomicJSON(statePath,state);
@@ -131,7 +154,7 @@ export function createSupportDelivery({dir,createReport,now=Date.now,fetchImpl=g
    const policy={...state.settings},reporterToken=credentials.reporterToken;
    const report=restrictPrivacy(JSON.parse(stored.toString('utf8')),policy);atomicJSON(outPath(item.id),report);
    const payload=JSON.stringify(report);if(Buffer.byteLength(payload)>SUPPORT_REPORT_MAX_BYTES)throw fail('보고서가 16MiB를 초과합니다.',413);
-   const response=await fetchImpl(policy.receiverUrl,{method:'POST',redirect:'error',headers:{'content-type':'application/json',authorization:`Bearer ${reporterToken}`},body:payload,signal:controller.signal});
+   const response=await postReport(policy.receiverUrl,report,reporterToken,controller.signal,fetchImpl);
    const receipt=await receiptJSON(response);
    if(receipt.reportId!==item.reportId||!safeId(receipt.receiptId)||!Number.isSafeInteger(receipt.receivedAt)||receipt.receivedAt<0)throw fail('수신 서버의 접수 확인을 검증하지 못했습니다.',502);
    item.status='sent';item.sentAt=now();item.receiptId=receipt.receiptId;item.nextAttemptAt=null;item.lastError=null;

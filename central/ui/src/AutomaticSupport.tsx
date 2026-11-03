@@ -40,7 +40,8 @@ export function AutomaticSupport({accessMode='local',disabled=false}:{accessMode
     {!local&&<p className="editor-note">자동 제보와 관리자 수신 설정은 관리 프로그램이 실행되는 컴퓨터에서 변경할 수 있습니다.</p>}
     <label className="checkline"><input aria-label="관리자에게 진단 전송 허용" type="checkbox" checked={draft.enabled} disabled={blocked||!status} onChange={event=>edit({enabled:event.target.checked,...(!event.target.checked?{autoSend:false}:{})})}/> 관리자에게 진단 전송 허용</label>
     <label className="checkline"><input aria-label="문제 발생 시 자동 제보" type="checkbox" checked={draft.enabled&&draft.autoSend} disabled={blocked||!status} onChange={event=>edit({autoSend:event.target.checked,...(event.target.checked?{enabled:true}:{})})}/> 문제 발생 시 자동 제보</label>
-    <p className="secondary">진단 전송 허용은 직접 제보할 때도 필요하며 기본으로 꺼져 있습니다. 자동 제보를 켜면 전송도 함께 허용됩니다. 켜서 저장하면 이후 발생한 문제의 버전·오류·전후 로그와 발송 시도 진단이 아래 수신 주소로 전달됩니다.</p>
+    <p className="secondary">진단 전송 허용은 직접 제보할 때도 필요하며 기본으로 꺼져 있습니다. 자동 제보를 켜면 전송도 함께 허용됩니다. 켜서 저장하면 이후 발생한 문제의 버전·오류·전후 로그와 발송 시도 진단이 아래 수신 주소로 전달됩니다. 파일을 내려받아 직접 보낼 필요가 없습니다.</p>
+    {/^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec$/.test(draft.receiverUrl)&&<p className="editor-note">이메일 중계 연결 · 기본 DICO 중계의 수신자는 didlsdydgh@gmail.com입니다. 수신 확인은 중계의 메일 발송 성공 응답을 뜻하며 받은편지함 도착 여부와는 다릅니다.</p>}
     <label className="checkline"><input aria-label="자동 제보 메시지 본문 포함" type="checkbox" checked={draft.includeBodies} disabled={blocked||!status} onChange={event=>edit({includeBodies:event.target.checked})}/> 메시지 본문 포함</label>
     <label className="checkline"><input aria-label="자동 제보 표시 이름 포함" type="checkbox" checked={draft.includeNames} disabled={blocked||!status} onChange={event=>edit({includeNames:event.target.checked})}/> 계정·채널·그룹·브라우저 표시 이름 포함</label>
     <p className="secondary">본문과 이름에는 개인정보가 포함될 수 있습니다. 기본은 모두 제외하며 인증 토큰·쿠키·연결 비밀 키는 제보에서 제외합니다. 이름을 제외해도 사건을 연결하는 식별자는 포함됩니다.</p>

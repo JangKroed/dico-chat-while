@@ -23,7 +23,7 @@ test('account ready is distinct from whole-group readiness and stopped groups re
 });
 test('active and unknown attempts never promise another send countdown',()=>{
   const channel={id:'binding',nextEligibleAt:null},group={status:'running',members:['binding'],cursor:0};
-  assert.equal(accountTimingState(channel,group,{status:'unknown'},null),'실제 게시 여부 확인 필요');
+  assert.equal(accountTimingState(channel,group,{status:'unknown'},null),'발송 복구 대기');
   assert.equal(accountTimingState(channel,group,{status:'permitted'},null),'발송 확인 중');
   assert.equal(groupTimingState({...group,activeAttemptId:'attempt'},null),'입력 준비 중');
 });
@@ -31,7 +31,7 @@ test('only a running current-member group ETA produces a next-permit estimate',(
   assert.equal(groupTimingState({status:'running'},63),'입력 준비까지 약 63초');
   assert.equal(groupTimingState({status:'running'},0),'입력 준비 대기');
   assert.equal(groupTimingState({status:'running'},null),'연결·설정 확인 필요');
-  assert.equal(groupTimingState({status:'needs_review'},null),'실제 게시 여부 확인 필요');
+  assert.equal(groupTimingState({status:'needs_review'},null),'발송 복구 대기');
 });
 test('early preparation explains scheduled and actual Discord cooldown waits',()=>{
   const group={status:'running',activeAttemptId:'attempt',waitReason:'scheduled_input_ready'};
@@ -75,5 +75,14 @@ test('preparation recovery holds the current account and explains its automatic 
 });
 
 test('group and account waits use readable Korean state labels',()=>{
- for(const [reason,expected] of [['group_interval','그룹 최소 간격 대기'],['account_interval','계정 주기 대기'],['preparing','입력 준비 중'],['delivery_unknown','실제 게시 여부 확인 필요'],['manual_resume','실행 조건 다시 확인 필요']])assert.equal(waitReasonText(reason),expected);
+ for(const [reason,expected] of [['group_interval','그룹 최소 간격 대기'],['account_interval','계정 주기 대기'],['preparing','입력 준비 중'],['delivery_unknown','발송 복구 대기'],['manual_resume','실행 조건 다시 확인 필요']])assert.equal(waitReasonText(reason),expected);
+});
+
+
+test('authorization recovery waits describe automatic progress for the current attempt',()=>{
+ const group={status:'running',waitReason:'authorization_retry',activeAttemptId:'attempt',members:['current','next'],cursor:0};
+ assert.equal(waitReasonText('authorization_retry'),'전송 허가 연결 자동 복구 중');
+ assert.equal(groupTimingState(group,null),'전송 허가 연결 자동 복구 중');
+ assert.equal(accountTimingState({id:'current'},group,{status:'permitted'},null),'전송 허가 연결 자동 복구 중');
+ assert.equal(accountTimingState({id:'next'},group,undefined,null),'차례 대기');
 });

@@ -1085,6 +1085,13 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
   function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(ACTIVE.has(a.status)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
+    // Older releases persisted 5 as the default without recording whether it
+    // was chosen explicitly. Move that legacy value to continuous retry once;
+    // subsequent user choices (including 5) remain intact across restarts.
+    if(!state.retryPolicyVersion){
+      if(state.settings.maxSendRetries===5){state.settings.maxSendRetries=null;event('settings.retry_policy_migrated',{reasonCode:'LEGACY_FIVE_RETRY_DEFAULT',maxSendRetries:null});}
+      state.retryPolicyVersion=1;
+    }
     state.service={status:'ready',reasonCode:null,startedAt:now()};
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
     for(const i of state.instances){invalidateAccounts(i.id);i.connected=false;i.sessionId=id();delete i.lastSeenMono;}
@@ -1093,6 +1100,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
-  else transact(()=>event('service.started'));
+  else transact(()=>{state.retryPolicyVersion=1;event('service.started');});
   return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
 }

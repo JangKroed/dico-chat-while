@@ -34,7 +34,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     const packageInfo=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')),appVersion=packageInfo.version;
     manager=createCentralManager({databasePath:resolve(directory,'central.sqlite')});
     // Diagnostics must never take down the primary delivery service.
-    try{supportDelivery=createSupportDelivery({dir:resolve(directory,'support'),createReport:options=>createSupportReport({manager,appVersion,...options})});supportDelivery.start();}catch{supportDelivery=undefined;}
+    try{const connection=await readJSON(fileURLToPath(new URL('../support-connection.json',import.meta.url)));supportDelivery=createSupportDelivery({dir:resolve(directory,'support'),connection,createReport:options=>createSupportReport({manager,appVersion,...options})});supportDelivery.start();}catch{supportDelivery=undefined;}
     const dispatcher=createNotificationDispatcher({load:()=>readJSON(resolve(directory,'notification-state.json')),save:v=>atomicJSON(resolve(directory,'notification-state.json'),v)});
     const closeRuntime=async({forUpdate=false}={})=>{
       if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();let shutdownError;
