@@ -168,3 +168,11 @@ The primary runtime/native bridge stays on its existing `127.0.0.1` origin. A se
 Local authenticated UI endpoints are `GET /api/lan-access`, `POST /api/lan-access {enabled,address?,port?}`, and `POST /api/lan-access/pair {}`. Mutations require the existing local CSRF token. Pairing returns `{code,expiresAt,url}`; the 48-bit code is single-use, expires after two minutes, and has a bounded attempt count.
 
 `GET /api/access-mode` exposes only `{mode:'local'|'lan'}` before login. LAN `POST /api/session {pairingCode}` creates a separate `dico_lan_session` HttpOnly/SameSite cookie plus CSRF token. LAN sessions are memory-only and reset when the listener stops or the program restarts. SSE revalidates sessions on pushes and heartbeats, including idle expiry. LAN requests to native bridge, LAN configuration, and the legacy SSH link issuer are rejected. A direct LAN controller otherwise controls the current owner's workspace; it does not register a remote Discord executor.
+
+## Administrator support packages and immutable message logs (0.4.23)
+
+Authenticated `GET /api/support/report` accepts optional attemptId/from/to and includeBodies/includeNames flags. `download=true` returns a named JSON attachment. Reports include immutable attempt text, runtime/build versions, configuration/order/cooldown/retry state, related retained events, safe diagnostics and checks. Bodies and names can be omitted. Current message revisions never replace a missing historical attempt body. Native credentials, session/cookie/CSRF/permit secrets and draft backups are excluded.
+
+`POST /api/support/inspect {report}` requires UI authentication/CSRF and validates a maximum16MiB report without evaluating content. Other request bodies retain the existing1MiB limit. Imported reports are unverified diagnostic data and cannot change configuration or delivery state. There is no configured external recipient; users download the file and deliver it through their chosen channel.
+
+`DELIVERY_TRACE` binds a monotonically increasing sequence, stage, observedAt and allowlisted scalar data to the exact instance/session/attempt. It grants no send authority, drops textContext/body/credentials and samples repeated stage telemetry. The native bridge accepts this type in addition to existing delivery messages.

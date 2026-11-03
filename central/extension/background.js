@@ -1,3 +1,4 @@
+import {createDeliveryTracer} from './delivery-trace.js';
 import {currentRegistration} from './registration-state.js';
 import {managedPageDelay} from './managed-delay.js';
 import {recoverConnections} from './connection-recovery.js';
@@ -16,6 +17,7 @@ import {lookupExistingChannelName} from './channel-name.js';
 
 const windowController=createManagedWindowController({chrome});
 const transport=createNativeTransport(chrome),executor=createCentralExecutor({chrome,transport,openChannel:openManagedChannel,manageChannelWindow,lookupChannelName:target=>lookupExistingChannelName(chrome,observe,target)});
+const traceDelivery=createDeliveryTracer({executor});
 const observation=createObservationQueue(collectObservation,publishObservation);
 const heartbeat=createSingleFlight(runHeartbeat);
 let channelOpening=Promise.resolve();
@@ -214,7 +216,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(message?.type==='DICO_ACCOUNT_IDENTITY'&&sender.tab){void observe(sender.tab.id).then(respond).catch(()=>respond({verified:false,reason:'SCRIPT_UNAVAILABLE'}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){authorizeAccountInput({chrome,executor,message,tabId:sender.tab.id}).then(respond).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_TIMING_SAMPLE'&&sender.tab){executor.cooldownSample(message,sender.tab.id).then(ok=>respond({ok})).catch(()=>respond({ok:false}));return true;}
-  if(sender.tab){if(message?.type==='DICO_TRACE'){respond({ok:true});return true;}return false;}
+  if(sender.tab){if(message?.type==='DICO_TRACE'){void traceDelivery(message,sender.tab.id).then(recorded=>respond({ok:true,recorded})).catch(()=>respond({ok:false}));return true;}return false;}
   if(!sender.url?.startsWith(chrome.runtime.getURL('')))return false;
   const action=async()=>{
     await executor.load();

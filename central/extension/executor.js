@@ -9,7 +9,7 @@ function deliveryEvidence(value) {
   const evidence={};
   if(['prepare','commit','send'].includes(value.phase))evidence.phase=value.phase;
   if(['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage))evidence.stage=value.stage;
-  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')evidence[key]=value[key];
+  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','sameComposer','editorReacquired','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')evidence[key]=value[key];
   if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)evidence.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))evidence.submitMethod=value.submitMethod;
   for(const key of ['retryCount','maxSendRetries'])if(Number.isSafeInteger(value[key])&&value[key]>=0)evidence[key]=value[key];
@@ -25,7 +25,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const request=async message=>{if(state.resetPending)throw Error('초기화된 연결 정보를 저장하는 중입니다.');return transport.request({...message,sessionId:state.sessionId,resetEpoch:state.resetEpoch},state.instanceId);};
   const ack=(c,status,extra={})=>request({type:'ACK',commandId:c.id,status,...extra});
   const target=a=>({tabId:a.tabId,guildId:a.guildId,channelId:a.channelId,ownUserId:a.accountId,coordinated:true,managed:true,skipConfirmation:false,messages:[a.body,a.body],expectedText:a.body});
-  const delivery=a=>({id:a.attemptId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??null,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
+  const delivery=a=>({id:a.attemptId,sessionId:a.sessionId,index:0,text:a.body,startedAt:a.startedAt,scheduledAt:a.startedAt,strictAuthorization:true,maxSendRetries:a.maxSendRetries??null,...(a.phase==='preparing'?{phase:'prepare'}:{phase:'commit'})});
   const isIdle=()=>Boolean(state)&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase));
   const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&(a.maxSendRetries??null)===(p.maxSendRetries??null);
   const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
@@ -223,6 +223,13 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         a.permitId=p.permitId;a.phase='executing';a.enterRequested=true;await save();
         let result;
         try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVER',target:target(a),delivery:delivery(a)});}catch{}
+        if(!result&&transport.connected&&a.phase==='executing'&&a.sessionId===state.sessionId&&await tabMatches(a)){
+          // A response port can close after content already observed completion.
+          // Query that exact operation's cached result once; never resend Enter
+          // or reconstruct completion from today's empty editor/history.
+          let receipt;try{receipt=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVERY_RECEIPT',target:target(a),delivery:delivery(a)});}catch{}
+          if(transport.connected&&a.phase==='executing'&&a.sessionId===state.sessionId&&receipt?.status==='confirmed'&&receipt.confirmationBasis==='composer_cleared'&&composerClearedEvidence(receipt.deliveryEvidence))result=receipt;
+        }
         if(result?.status==='confirmed' && (result.confirmationBasis==='composer_cleared'?composerClearedEvidence(result.deliveryEvidence):(!result.confirmationBasis||result.confirmationBasis==='message_observed')&&/^\d{17,20}$/.test(result.messageId || ''))) {
           a.phase='confirmed';a.result={outcome:'confirmed',...(result.messageId?{messageId:result.messageId}:{}),confirmationBasis:result.confirmationBasis||'message_observed',confirmationMs:result.timing?.confirmationMs,...diagnostic(result)};
         } else if(result?.status==='blocked' || result?.status==='deferred') {

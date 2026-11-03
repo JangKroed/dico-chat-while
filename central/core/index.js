@@ -1,3 +1,4 @@
+import {traceData,validTraceStage} from '../extension/delivery-trace.js';
 import {composerClearedEvidence} from '../extension/delivery-receipt.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { CentralStore } from './store.js';
@@ -14,7 +15,7 @@ const clone = value => structuredClone(value);
 function deliveryEvidence(value){
   if(!value||typeof value!=='object'||!['prepare','commit','send'].includes(value.phase)||!['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage)||typeof value.enterAttempted!=='boolean')return undefined;
   const result={phase:value.phase,stage:value.stage,enterAttempted:value.enterAttempted};
-  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')result[key]=value[key];
+  for(const key of ['composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','sameComposer','editorReacquired','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')result[key]=value[key];
   if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)result.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))result.submitMethod=value.submitMethod;
   for(const key of ['retryCount','maxSendRetries'])if(Number.isSafeInteger(value[key])&&value[key]>=0)result[key]=value[key];
@@ -686,6 +687,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
       if(message.type==='HEARTBEAT'&&state.resetEpoch>0&&message.resetEpoch!==state.resetEpoch)return{ok:false,resetRequired:true,resetEpoch:state.resetEpoch};
       const i=ensureSession(message,instanceId);
+      if(message.type==='DELIVERY_TRACE'){
+        const a=get('attempts',message.attemptId);ensure(a.instanceId===i.id&&a.sessionId===i.sessionId,'STALE_ATTEMPT','Trace belongs to another execution session.',409);
+        ensure(validTraceStage(message.stage)&&Number.isSafeInteger(message.sequence)&&message.sequence>0&&Number.isSafeInteger(message.observedAt)&&message.observedAt>=0,'VALIDATION','Invalid delivery trace.');
+        if(message.sequence<=(a.lastTraceSequence||0))return{ok:true,recorded:false};a.lastTraceSequence=message.sequence;
+        if(!a.traceWindowAt||now()-a.traceWindowAt>=60000){a.traceWindowAt=now();a.traceWindowCount=0;}
+        if(a.traceWindowCount>=120&&!['finished','exception'].includes(message.stage))return{ok:true,recorded:false};a.traceWindowCount++;
+        event('delivery.trace',{attemptId:a.id,groupId:a.groupId,instanceId:i.id,stage:message.stage,observedAt:message.observedAt,sequence:message.sequence,data:traceData(message.data)});return{ok:true,recorded:true};
+      }
       if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&ACTIVE.has(a.status))};
       if(message.type==='CONNECTION_PROGRESS'){
         ensure(['account','channels','configuration','blocked'].includes(message.stage)&&Number.isInteger(message.total)&&message.total>=0&&message.total<=100&&Number.isInteger(message.completed)&&message.completed>=0&&message.completed<=message.total,'VALIDATION','Invalid connection progress.');
@@ -997,7 +1006,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     return{...clone(dto),nextEligibleAt,nextPreparationAt};
   }
-  function publicAttempt(a){const{sessionId,body,readyMono,preparedObservedAt,preEnterWaitObservedAt,permitId,...dto}=a;return clone(dto);}
+  function publicAttempt(a){const{sessionId,readyMono,preparedObservedAt,preEnterWaitObservedAt,permitId,...dto}=a;return {...clone(dto),bodyAvailable:typeof a.body==='string'};}
   function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}
   function analytics({from=0,to=Number.MAX_SAFE_INTEGER,groupId,instanceId,accountId,channelId}={}){
     const matches=a=>!a.pruned&&(!groupId||a.groupId===groupId)&&(!instanceId||a.instanceId===instanceId)&&(!accountId||a.accountId===accountId)&&(!channelId||a.channelId===channelId);
@@ -1025,6 +1034,27 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     const hasMore=items.length>size;return{items:items.slice(0,size),nextCursor:hasMore?items[size-1].id:null,retentionDays:state.settings.retentionDays};
   }
+  function supportData({attemptId,from=0,to=now()}={}){
+    ensure(Number.isFinite(from)&&Number.isFinite(to)&&from>=0&&to>=from,'VALIDATION','보고서 조회 기간을 확인하세요.');
+    const selected=attemptId?[get('attempts',attemptId)]:state.attempts.filter(a=>!a.pruned&&(a.createdAt>=from&&a.createdAt<=to||ACTIVE.has(a.status)));
+    const contextFrom=attemptId&&from===0?Math.max(0,selected[0].createdAt-300000):from,contextTo=attemptId&&from===0?Math.min(to,(selected[0].finalizedAt||to)+120000):to;
+    const attemptIds=new Set(selected.map(a=>a.id)),groupIds=new Set(selected.map(a=>a.groupId)),instanceIds=new Set(selected.map(a=>a.instanceId));
+    const relatedCommands=state.commands.filter(c=>attemptIds.has(c.payload.attemptId)||!c.payload.attemptId&&c.createdAt>=contextFrom&&c.createdAt<=contextTo&&(!attemptId||groupIds.has(c.payload.groupId)||instanceIds.has(c.instanceId)));
+    const commandIds=new Set(relatedCommands.map(c=>c.id)),events=[];let after=0,eventBytes=0;
+    // Retained unresolved attempts can predate a selected period. Include their
+    // full attempt/command evidence as well as context within the selected period.
+    for(;;){
+      const batch=store.events({after,limit:1000});
+      for(const e of batch){
+        const related=attemptIds.has(e.attemptId)||commandIds.has(e.commandId),inPeriod=e.at>=contextFrom&&e.at<=contextTo;
+        const context=!e.attemptId&&(groupIds.has(e.groupId)||instanceIds.has(e.instanceId)||['service.clock_gap','service.started','service.stopped','settings.updated'].includes(e.type));
+        if(!related&&(!inPeriod||attemptId&&!context))continue;
+        eventBytes+=Buffer.byteLength(JSON.stringify(e));ensure(eventBytes<=16*1024*1024,'SUPPORT_REPORT_TOO_LARGE','보고서가 너무 큽니다. 조회 기간을 줄이거나 특정 발송 시도를 선택하세요.',413);events.push(e);
+      }
+      if(batch.length<1000)break;after=batch.at(-1).eventId;
+    }
+    return{contextFrom,contextTo,serverNow:now(),stateVersion:state.stateVersion,retainedFrom:state.prunedBefore||null,service:clone(state.service),settings:clone(state.settings),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c)),groups:state.groups.map(g=>publicGroup(g)),attempts:selected.map(a=>({...publicAttempt(a),bodyAvailable:typeof a.body==='string'})),commands:relatedCommands.map(publicCommand),events,incidents:state.incidents.filter(i=>!attemptId||attemptIds.has(i.attemptId)||commandIds.has(i.commandId)||groupIds.has(i.groupId)||instanceIds.has(i.instanceId)).map(clone),intervals:state.intervals.filter(span=>(!attemptId||groupIds.has(span.targetId)||instanceIds.has(span.targetId))&&(span.to===null||span.to>=contextFrom)&&span.from<=contextTo).map(clone),locks:clone(state.locks)};
+  }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
   function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(ACTIVE.has(a.status)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
@@ -1037,5 +1067,5 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
   else transact(()=>event('service.started'));
-  return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
+  return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
 }

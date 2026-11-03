@@ -528,3 +528,18 @@ test('실행기의 명시적 무제한 재시도는 5회·누적 대기 상한�
  assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:7,cooldownMs:0,elapsedMs:24_000_000},7),true);assert.equal(a.sendRetryCount,7);
  assert.equal(await r.client.canSend({id:'attempt',phase:'commit',retryCount:7},7),true);r.client.disconnect();assert.equal(await r.client.retryWait({id:'attempt',phase:'commit',retryCount:8,cooldownMs:0,elapsedMs:0},7),false);
 });
+
+test('전송 응답만 유실되면 같은 content의 완료 영수증을 한 번 읽어 현재 시도를 확정한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);if(m.type==='DICO_DELIVER')throw Error('lost response');if(m.type==='DICO_DELIVERY_RECEIPT')return clearedComposerReceipt();throw Error('unexpected');};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));await r.client.handleCommand(cmd('COMMIT_PERMIT','again'));
+ assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVERY_RECEIPT').length,1);
+ assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').outcome,'confirmed');
+});
+test('전송 중 세션이 바뀌거나 연결이 끊기면 content 완료 영수증 복구를 새로 요청하지 않는다',async()=>{
+ for(const mode of ['session','connection']){
+  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+  r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);if(m.type==='DICO_DELIVER'){if(mode==='session')await r.client.setSession({instanceId:'instance',sessionId:'new'});else r.transport.connected=false;throw Error('lost response');}return clearedComposerReceipt();};
+  await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVERY_RECEIPT').length,0);assert.equal(r.state.attempts.attempt.phase,'unknown');
+ }
+});

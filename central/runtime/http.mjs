@@ -3,16 +3,18 @@ import {readFile,realpath} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
 import {safeToUpdate} from './updater.mjs';
 import {normalizeSessions,UI_SESSION_TTL} from './ui-state.mjs';
+import {createSupportReport,inspectSupportReport,SUPPORT_REPORT_MAX_BYTES} from './support-report.mjs';
 
 const secret=()=>randomBytes(32).toString('hex');
 const equal=(a,b)=>typeof a==='string' && typeof b==='string' && Buffer.byteLength(a)===Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.json':'application/json'};
 const spaRoutes=new Set(['/','/messages','/connections','/channels','/groups','/history','/logs','/settings','/tutorial']);
 const fail=(code,message)=>Object.assign(Error(message),{status:code});
-async function body(req) {
+async function body(req,maxBytes=1024*1024) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw fail(415,'JSON 요청이 필요합니다.');
-  let text='';
-  for await (const chunk of req) {text+=chunk;if(Buffer.byteLength(text)>1024*1024)throw fail(413,'요청 크기가 제한을 초과했습니다.');}
+  const chunks=[];let bytes=0;
+  for await (const chunk of req) {const buffer=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);bytes+=buffer.length;if(bytes>maxBytes)throw fail(413,'요청 크기가 제한을 초과했습니다.');chunks.push(buffer);}
+  const text=Buffer.concat(chunks,bytes).toString('utf8');
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
@@ -111,6 +113,13 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           return json(res,200,await updates.status());
         }
         if (path==='/api/snapshot' && req.method==='GET')return json(res,200,manager.snapshot());
+        if (path==='/api/support/report' && req.method==='GET'){
+          const boolean=key=>{const value=url.searchParams.get(key);if(value!==null&&!['true','false','1','0'].includes(value))throw fail(400,'보고서 포함 옵션을 확인하세요.');return value===null||value==='true'||value==='1';};
+          const timestamp=(key,fallback)=>{const raw=url.searchParams.get(key);if(raw===null)return fallback;const value=Number(raw);if(!raw||!Number.isSafeInteger(value)||value<0)throw fail(400,'보고서 조회 기간을 확인하세요.');return value;};
+          const report=await createSupportReport({manager,appVersion,attemptId:url.searchParams.get('attemptId')||undefined,from:timestamp('from',0),to:timestamp('to',now()),includeBodies:boolean('includeBodies'),includeNames:boolean('includeNames'),now});
+          if(['true','1'].includes(url.searchParams.get('download')))res.setHeader('Content-Disposition',`attachment; filename="dico-support-${report.reportId}.json"`);
+          return json(res,200,report);
+        }
         if (path==='/api/analytics' && req.method==='GET')return json(res,200,manager.analytics({from:Number(url.searchParams.get('from')) || undefined,to:Number(url.searchParams.get('to')) || undefined}));
         if (req.method==='GET'&&(path==='/api/history'||path==='/api/logs'&&url.searchParams.get('paged')==='1')){
           const options={cursor:url.searchParams.get('cursor')||undefined,limit:Math.min(500,Math.max(1,Number(url.searchParams.get('limit'))||100)),from:Number(url.searchParams.get('from'))||0,to:Number(url.searchParams.get('to'))||Number.MAX_SAFE_INTEGER,query:(url.searchParams.get('query')||'').slice(0,200),status:url.searchParams.get('status')||undefined,level:url.searchParams.get('level')||undefined};
@@ -132,8 +141,9 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           heartbeat=setInterval(()=>{if(authorized())res.write(': keepalive\n\n');},15000);heartbeat.unref?.();return;
         }
         if (req.method==='POST') {
-          checkMutation(req,session);const payload=await body(req);
+          checkMutation(req,session);const payload=await body(req,path==='/api/support/inspect'?SUPPORT_REPORT_MAX_BYTES:1024*1024);
           if(closed)throw fail(503,'접속이 종료됐습니다. 중앙 PC에서 접속 상태를 확인해 주세요.');
+          if(path==='/api/support/inspect')return json(res,200,inspectSupportReport(payload.report));
           if(updates?.isApplying())throw fail(503,'업데이트를 적용하고 있습니다. 관리 화면이 다시 열릴 때까지 기다려 주세요.');
           if(path==='/api/lan-access'||path==='/api/lan-access/pair'){
             if(!lanAccess)throw fail(404,'내부망 접속 기능이 준비되지 않았습니다.');

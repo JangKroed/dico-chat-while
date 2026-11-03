@@ -1307,3 +1307,10 @@ test('입력 상태별 종료 사유와 제한 없는 재시도 진단은 원문
   }finally{f.manager.close();}
  }
 });
+test('delivery stage telemetry is scoped, deduplicated, redacted and never advances a sending turn',()=>{
+ const f=fixture();try{const c=f.connect('111','222');f.apply(c,[f.message('Actual immutable text')]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];const trace={type:'DELIVERY_TRACE',sessionId:c.sessionId,attemptId:a.id,sequence:1,stage:'before-enter',observedAt:a.createdAt,data:{draftLength:21,draftEmpty:false,textContext:{actual:'private draft'},body:'never trace this',token:'secret',sameComposer:true,editorReacquired:true}};
+ assert.equal(f.manager.bridge(trace,c.instanceId).recorded,true);assert.equal(f.manager.bridge(trace,c.instanceId).recorded,false);
+ const events=f.manager.events({type:'delivery.trace'});assert.equal(events.length,1);assert.equal(events[0].data.draftLength,21);assert.equal(events[0].data.sameComposer,true);assert.equal(events[0].data.editorReacquired,true);assert.equal(events[0].data.body,undefined);assert.equal(events[0].data.textContext,undefined);assert.equal(events[0].data.token,undefined);assert.equal(f.manager.snapshot().groups[0].cursor,0);assert.equal(f.manager.snapshot().attempts[0].status,'preparing');
+ const other=f.connect('333','444');assert.throws(()=>f.manager.bridge({...trace,sessionId:other.sessionId,sequence:2},other.instanceId),{code:'STALE_ATTEMPT'});
+ }finally{f.manager.close();}
+});
