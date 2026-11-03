@@ -15,7 +15,7 @@ test('dry-run prints ordered setup without spawning commands or checking mutable
   let called=false;
   const result=await runSetup({root:'/tmp/한글 folder',npmCli:'/tool/npm-cli.js',dryRun:true,install:true,open:true,platform:'darwin',execute:()=>{called=true;throw Error();},preflight:()=>{called=true;throw Error();}});
   assert.equal(called,false);assert.equal(result.dryRun,true);
-  assert.deepEqual(result.steps.slice(0,6).map(x=>x.id),['dependencies','build','central-check','extension-check','tests','package']);
+  assert.deepEqual(result.steps.slice(0,5).map(x=>x.id),['dependencies','build','central-check','extension-check','package']);
 });
 test('setup stops before any write when central service is active',async()=>{
   let called=false;

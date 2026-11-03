@@ -19,7 +19,7 @@ export function setupPlan({root,npmCli,install=false,open=false,platform=process
   if(open&&!install)throw Error('--open requires --install');
   if(!['darwin','win32'].includes(platform))throw Error('macOS / Windows에서 실행하세요.');
   const npm=(id,args)=>({id,command:process.execPath,args:[npmCli,...args],cwd:root});
-  const steps=[npm('dependencies',['--prefix','central/ui','ci']),npm('build',['run','central:build']),npm('central-check',['run','central:check']),npm('extension-check',['run','check']),npm('tests',['test']),{id:'package',command:process.execPath,args:[join(root,'scripts/package-central.mjs')],cwd:root}];
+  const steps=[npm('dependencies',['--prefix','central/ui','ci']),npm('build',['run','central:build']),npm('central-check',['run','central:check']),npm('extension-check',['run','check']),{id:'package',command:process.execPath,args:[join(root,'scripts/package-central.mjs')],cwd:root}];
   if(install)steps.push({id:'install',description:'실제 package destination의 네이티브 호스트를 현재 OS 사용자에게 등록'});
   if(open)steps.push({id:'open',description:'설치된 런타임으로 중앙 페이지 열기 (Ctrl+C로 종료)'});
   return steps;

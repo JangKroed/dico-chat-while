@@ -14,7 +14,8 @@
     "check": "node scripts/check.mjs",
     "build": "python3 scripts/build-release.py",
     "central:setup": "node scripts/setup-central.mjs",
-    "central:doctor": "node scripts/setup-central.mjs --doctor"
+    "central:doctor": "node scripts/setup-central.mjs --doctor",
+    "central:compile": "node central/node_modules/typescript/bin/tsc -b central/ui && node central/node_modules/vite/bin/vite.js build central/ui && node scripts/prebuilt-central-ui.mjs --seal && node scripts/build-central-extension.mjs"
   },
   "engines": {
     "node": ">=20"

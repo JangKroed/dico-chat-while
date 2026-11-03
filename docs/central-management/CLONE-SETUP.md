@@ -119,7 +119,7 @@ npm test
 npm run central:package
 ```
 
-각 명령이 성공한 뒤 다음 단계로 진행합니다. `central:build`는 UI와 새 확장에 필요한 content·emoji 파일을 준비합니다. 클론 직후에는 생성 파일이 없으므로 이 단계를 생략할 수 없습니다. UI만 개발 서버로 띄우는 `npm --prefix central/ui run dev`는 중앙관리 설치를 대신하지 않습니다.
+각 명령이 성공한 뒤 다음 단계로 진행합니다. `central:build`는 배포된 사전 빌드 UI의 무결성을 검사하고 새 확장에 필요한 content·emoji 파일을 준비합니다. 클론 직후에는 생성 파일이 없으므로 이 단계를 생략할 수 없습니다. UI만 개발 서버로 띄우는 `npm --prefix central/ui run dev`는 중앙관리 설치를 대신하지 않습니다.
 
 패키징 마지막 JSON의 `destination`이 생성 폴더입니다. 예를 들어 M 계열 Mac + Node 24.13.0은 다음 경로입니다.
 

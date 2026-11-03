@@ -18,7 +18,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
-      - run: npm --prefix central/ui ci
+      - run: npm --prefix central/ui ci --offline
+      - run: npm run central:build
+      - run: npm --prefix central ci
+      - run: npm run central:compile
+      - run: git diff --exit-code -- central/ui/dist central/ui/prebuilt.json
       - run: npm run central:build
       - run: npm run central:check
       - run: npm test

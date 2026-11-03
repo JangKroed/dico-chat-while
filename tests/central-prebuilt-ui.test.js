@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile,mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+const root=new URL('../',import.meta.url);
+test('legacy update dependency installation has no packages or install hooks',async()=>{
+ const pkg=JSON.parse(await readFile(new URL('central/ui/package.json',root)));
+ const lock=JSON.parse(await readFile(new URL('central/ui/package-lock.json',root)));
+ assert.deepEqual(Object.keys(pkg.dependencies||{}),[]);
+ assert.deepEqual(Object.keys(pkg.devDependencies||{}),[]);
+ assert.deepEqual(Object.keys(lock.packages),['']);
+ for(const hook of ['preinstall','install','postinstall','prepare'])assert.equal(pkg.scripts?.[hook],undefined);
+});
+test('prebuilt verifier rejects stale source, altered assets and missing assets',async t=>{
+ const {sealUI,verifyUI}=await import('../scripts/prebuilt-central-ui.mjs');
+ const dir=await mkdtemp(join(tmpdir(),'dico-prebuilt-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+ await mkdir(join(dir,'central/ui/src'),{recursive:true});await mkdir(join(dir,'central/ui/dist/assets'),{recursive:true});
+ await writeFile(join(dir,'central/ui/src/main.tsx'),'source');
+ await writeFile(join(dir,'central/ui/dist/index.html'),'<script src="/assets/main.js"></script>');
+ await writeFile(join(dir,'central/ui/dist/assets/main.js'),'compiled');
+ await sealUI(dir);await verifyUI(dir);
+ await writeFile(join(dir,'central/ui/src/main.tsx'),'changed');
+ await assert.rejects(verifyUI(dir),/source/);
+ await writeFile(join(dir,'central/ui/src/main.tsx'),'source');
+ await writeFile(join(dir,'central/ui/dist/assets/main.js'),'tampered');
+ await assert.rejects(verifyUI(dir),/asset/);
+ await rm(join(dir,'central/ui/dist/assets/main.js'));
+ await assert.rejects(verifyUI(dir),/asset/);
+});

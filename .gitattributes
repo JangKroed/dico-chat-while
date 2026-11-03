@@ -1,0 +1,4 @@
+central/ui/** text eol=lf
+central/package.json text eol=lf
+central/package-lock.json text eol=lf
+scripts/prebuilt-central-ui.mjs text eol=lf

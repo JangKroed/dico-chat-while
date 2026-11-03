@@ -2,7 +2,6 @@
 node_modules/
 /central/extension/content.js
 /central/extension/emoji-data.js
-/central/ui/dist/
 
 # Build and release artifacts
 /dist/
