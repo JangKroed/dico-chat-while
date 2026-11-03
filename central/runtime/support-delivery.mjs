@@ -168,6 +168,12 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   flushing=(async()=>{
    for(const item of state.outbox){
     if(closed||!state.settings.enabled||!state.settings.receiverUrl||!credentials.reporterToken)break;
+    // Email receipts are retained for 90 days. Stop old retries well before
+    // that boundary, even when the user explicitly flushes a stale queue.
+    if(item.status!=='sent'&&emailRelayURL(state.settings.receiverUrl)&&now()-item.createdAt>=30*DAY){
+     if(item.nextAttemptAt!==null){item.status='failed';item.nextAttemptAt=null;item.lastError='30일이 지난 이메일 제보는 중복 발송 방지를 위해 재전송하지 않습니다.';save();}
+     continue;
+    }
     if(item.status==='sent'||!force&&item.nextAttemptAt>now())continue;
     await transmit(item);
    }

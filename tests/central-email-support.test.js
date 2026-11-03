@@ -17,9 +17,9 @@ function relay(){
  const post=runInNewContext(readFileSync(new URL('../mail-relay/Central.gs',import.meta.url),'utf8')+'\ndoPost',context);
  return {sent,props,post:body=>post({postData:{contents:JSON.stringify(body)}}),reject:()=>{reject=true;}};
 }
-function sender(t,fetchImpl){
+function sender(t,fetchImpl,options={}){
  const dir=mkdtempSync(join(tmpdir(),'dico-email-'));
- const delivery=createSupportDelivery({dir,fetchImpl,createReport:opts=>createSupportReport({manager:{supportData:sample},appVersion:'test',...opts})});
+ const delivery=createSupportDelivery({dir,fetchImpl,createReport:opts=>createSupportReport({manager:{supportData:sample},appVersion:'test',...opts}),...options});
  t.after(async()=>{await delivery.close();rmSync(dir,{recursive:true,force:true});});
  delivery.configure({enabled:true,autoSend:true,receiverUrl:url,reporterToken:key});return delivery;
 }
@@ -50,6 +50,15 @@ test('Apps Script response redirect is read with GET without resending report or
 test('email response cannot redirect to an unrelated host',async t=>{
  let calls=0;const delivery=sender(t,async()=>{calls++;return new Response(null,{status:302,headers:{location:'https://attacker.example/steal'}});});
  await delivery.queue({automatic:true});await delivery.flush();assert.equal(calls,1);assert.equal(delivery.status().counts.failed,1);
+});
+test('old email reports stop retrying before relay dedup receipts can expire, including forced flush',async t=>{
+ let clock=1800000000000,calls=0;
+ const delivery=sender(t,async()=>{calls++;throw Error('lost receipt');},{now:()=>clock});
+ await delivery.queue({automatic:true});await delivery.flush();assert.equal(calls,1);
+ clock+=30*86400000;
+ await delivery.flush({force:true});await delivery.flush({force:true});
+ assert.equal(calls,1);assert.equal(delivery.status().counts.sent,0);assert.equal(delivery.status().outbox[0].nextAttemptAt,null);
+ assert.match(delivery.status().outbox[0].lastError,/30일/);
 });
 test('relay refuses invalid auth, malformed reports, over-quota mail and ambiguous sends',async()=>{
  const server=relay(),report=await createSupportReport({manager:{supportData:sample},appVersion:'test'});

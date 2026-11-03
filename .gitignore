@@ -47,3 +47,6 @@ Thumbs.db
 
 # Generated identity of the built central extension
 /central/extension/build-info.js
+
+# Private custom support destinations
+/central/support-connection.json
