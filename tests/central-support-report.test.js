@@ -95,3 +95,26 @@ test('history, snapshot and report keep the exact attempt body after the message
  manager.execute('message.update',{id:message.id,expectedVersion:message.version,body:'edited library body'});
  assert.equal(manager.snapshot().messages[0].body,'edited library body');for(const preserved of [manager.snapshot().attempts[0],manager.historyPage().items[0],(await createSupportReport({manager,attemptId:attempt.id,to:at})).attempts[0]]){assert.equal(preserved.body,'exact\n original body');assert.equal(preserved.bodyAvailable,true);assert.equal(preserved.sessionId,undefined);assert.equal(preserved.permitId,undefined);}
 });
+
+test('large generated diagnostics are bounded automatically and disclose omissions through inspection',async()=>{
+ const input=data();input.attempts=Array.from({length:2000},(_,i)=>({id:'large-'+i,status:i===1999?'unknown':'confirmed',createdAt:at+i,body:'가'.repeat(9000)}));
+ const r=await createSupportReport({manager:{supportData:()=>input},to:at});
+ assert.ok(Buffer.byteLength(JSON.stringify(r))<4*1024*1024);assert.ok(r.attempts.some(a=>a.id==='large-1999'));
+ assert.equal(r.selection.omittedCounts.attempts,2000-r.attempts.length);assert.ok(r.selection.partialRecords);
+ const checked=inspectSupportReport(r).report;assert.equal(checked.selection.omittedCounts.attempts,r.selection.omittedCounts.attempts);assert.ok(checked.checks.some(x=>x.code==='REPORT_COMPACTED'));
+});
+
+test('large stored logs preserve recent errors without requiring the user to narrow the range',async t=>{
+ const directory=mkdtempSync(join(tmpdir(),'dico-support-budget-')),databasePath=join(directory,'state.sqlite');let manager=createCentralManager({databasePath,now:()=>at});manager.close();
+ const store=new CentralStore(databasePath),state=store.read();state.stateVersion++;
+ store.commit(state,[{type:'service.stopped',at:at-100,reasonCode:'IMPORTANT_ERROR'},...Array.from({length:900},(_,i)=>({type:'delivery.trace',at:at+i,data:{message:'x'.repeat(20000)}}))]);store.close();
+ manager=createCentralManager({databasePath,now:()=>at+1000});t.after(()=>{manager.close();rmSync(directory,{recursive:true,force:true});});
+ const r=await createSupportReport({manager,to:at+1000});assert.ok(r.events.some(e=>e.reasonCode==='IMPORTANT_ERROR'));assert.ok(r.selection.omittedCounts.events>0);assert.ok(r.checks.some(c=>c.code==='REPORT_COMPACTED'));assert.doesNotThrow(()=>inspectSupportReport(r));
+});
+
+test('compaction prioritizes old unresolved and active group attempts and preserves timeline omission counts',async()=>{
+ const input=data();input.attempts=[{id:'critical-old',status:'unknown',createdAt:at-999999},...Array.from({length:2600},(_,i)=>({id:'ok-'+i,status:'confirmed',createdAt:at+i}))];input.groups[0].activeAttemptId='critical-old';
+ input.intervals=Array.from({length:2600},(_,i)=>({id:'span-'+i,scope:'group',targetId:'g',from:at+i,to:at+i+1}));
+ const r=await createSupportReport({manager:{supportData:()=>input},to:at});assert.ok(r.attempts.some(a=>a.id==='critical-old'));assert.ok(r.checks.some(c=>c.code==='DELIVERY_UNKNOWN'&&c.attemptId==='critical-old'));
+ assert.ok(r.selection.omittedCounts.timeline>0);assert.equal(inspectSupportReport(r).report.selection.omittedCounts.timeline,r.selection.omittedCounts.timeline);
+});

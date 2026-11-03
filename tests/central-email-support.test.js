@@ -68,3 +68,10 @@ test('relay refuses invalid auth, malformed reports, over-quota mail and ambiguo
  delete server.props.REPORT_BUDGET;server.reject();
  assert.equal(server.post({key,report}).ok,false);assert.equal(server.post({key,report}).ok,false);assert.equal(server.sent.length,0);
 });
+
+test('email relay rejection codes are surfaced instead of a generic network error',async t=>{
+ for(const code of ['UNAUTHORIZED','QUOTA','DELIVERY_UNCERTAIN','BUSY','INVALID']){
+  const delivery=sender(t,async()=>Response.json({ok:false,code}));await delivery.queue();await delivery.flush();
+  const item=delivery.status().outbox[0];assert.equal(item.status,'failed');assert.match(item.lastError,new RegExp(code));assert.notEqual(item.receiptId,undefined);
+ }
+});

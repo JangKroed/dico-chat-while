@@ -134,7 +134,7 @@ export type SupportOutboxItem={id:string;reportId:string;incidentId?:string;crea
 export type SupportInboxItem={receiptId:string;reportId:string;receivedAt:number;createdAt:number;summary:Record<string,number>}
 export type AutomaticSupportStatus={settings:AutomaticSupportSettings;configured:boolean;hasReporterToken:boolean;transportWarning:string|null;outbox:SupportOutboxItem[];counts:{queued:number;sent:number;failed:number;inbox:number};inbox:SupportInboxItem[]}
 export type AutomaticSupportPatch=Partial<AutomaticSupportSettings>&{reporterToken?:string}
-export type SendSupportOptions={attemptId?:string;description?:string;includeBodies?:boolean;includeNames?:boolean}
+export type SendSupportOptions={from?:number;to?:number;attemptId?:string;description?:string;includeBodies?:boolean;includeNames?:boolean}
 export const getAutomaticSupport=(signal?:AbortSignal)=>request<AutomaticSupportStatus>('/api/support/automatic',{signal:signal??AbortSignal.timeout(10000)})
 export const updateAutomaticSupport=(settings:AutomaticSupportPatch,signal?:AbortSignal)=>request<AutomaticSupportStatus>('/api/support/automatic',{method:'POST',body:JSON.stringify(settings),signal:signal??AbortSignal.timeout(10000)})
 export const sendSupportReport=(options:SendSupportOptions,signal?:AbortSignal)=>request<SupportOutboxItem>('/api/support/send',{method:'POST',body:JSON.stringify(options),signal:signal??AbortSignal.timeout(20000)})

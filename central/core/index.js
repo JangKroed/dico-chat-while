@@ -1,3 +1,4 @@
+import {supportRecordBuffer} from './support-budget.js';
 import {traceData,validTraceStage} from '../extension/delivery-trace.js';
 import {composerClearedEvidence} from '../extension/delivery-receipt.js';
 import { randomUUID, createHash } from 'node:crypto';
@@ -1067,7 +1068,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const contextFrom=attemptId&&from===0?Math.max(0,selected[0].createdAt-300000):from,contextTo=attemptId&&from===0?Math.min(to,(selected[0].finalizedAt||to)+120000):to;
     const attemptIds=new Set(selected.map(a=>a.id)),groupIds=new Set(selected.map(a=>a.groupId)),instanceIds=new Set(selected.map(a=>a.instanceId));
     const relatedCommands=state.commands.filter(c=>attemptIds.has(c.payload.attemptId)||!c.payload.attemptId&&c.createdAt>=contextFrom&&c.createdAt<=contextTo&&(!attemptId||groupIds.has(c.payload.groupId)||instanceIds.has(c.instanceId)));
-    const commandIds=new Set(relatedCommands.map(c=>c.id)),events=[];let after=0,eventBytes=0;
+    const commandIds=new Set(relatedCommands.map(c=>c.id)),importantEvents=supportRecordBuffer(),traceEvents=supportRecordBuffer();let after=0;
     // Retained unresolved attempts can predate a selected period. Include their
     // full attempt/command evidence as well as context within the selected period.
     for(;;){
@@ -1076,11 +1077,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const related=attemptIds.has(e.attemptId)||commandIds.has(e.commandId),inPeriod=e.at>=contextFrom&&e.at<=contextTo;
         const context=!e.attemptId&&(groupIds.has(e.groupId)||instanceIds.has(e.instanceId)||['service.clock_gap','service.started','service.stopped','settings.updated'].includes(e.type));
         if(!related&&(!inPeriod||attemptId&&!context))continue;
-        eventBytes+=Buffer.byteLength(JSON.stringify(e));ensure(eventBytes<=16*1024*1024,'SUPPORT_REPORT_TOO_LARGE','보고서가 너무 큽니다. 조회 기간을 줄이거나 특정 발송 시도를 선택하세요.',413);events.push(e);
+        (e.type==='delivery.trace'?traceEvents:importantEvents).add(e);
       }
       if(batch.length<1000)break;after=batch.at(-1).eventId;
     }
-    return{contextFrom,contextTo,serverNow:now(),stateVersion:state.stateVersion,retainedFrom:state.prunedBefore||null,service:clone(state.service),settings:clone(state.settings),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c)),groups:state.groups.map(g=>publicGroup(g)),attempts:selected.map(a=>({...publicAttempt(a),bodyAvailable:typeof a.body==='string'})),commands:relatedCommands.map(publicCommand),events,incidents:state.incidents.filter(i=>!attemptId||attemptIds.has(i.attemptId)||commandIds.has(i.commandId)||groupIds.has(i.groupId)||instanceIds.has(i.instanceId)).map(clone),intervals:state.intervals.filter(span=>(!attemptId||groupIds.has(span.targetId)||instanceIds.has(span.targetId))&&(span.to===null||span.to>=contextFrom)&&span.from<=contextTo).map(clone),locks:clone(state.locks)};
+    const events=[...importantEvents.values(),...traceEvents.values()].sort((a,b)=>a.eventId-b.eventId);
+    return{omittedEvents:importantEvents.omitted+traceEvents.omitted,contextFrom,contextTo,serverNow:now(),stateVersion:state.stateVersion,retainedFrom:state.prunedBefore||null,service:clone(state.service),settings:clone(state.settings),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c)),groups:state.groups.map(g=>publicGroup(g)),attempts:selected.map(a=>({...publicAttempt(a),bodyAvailable:typeof a.body==='string'})),commands:relatedCommands.map(publicCommand),events,incidents:state.incidents.filter(i=>!attemptId||attemptIds.has(i.attemptId)||commandIds.has(i.commandId)||groupIds.has(i.groupId)||instanceIds.has(i.instanceId)).map(clone),intervals:state.intervals.filter(span=>(!attemptId||groupIds.has(span.targetId)||instanceIds.has(span.targetId))&&(span.to===null||span.to>=contextFrom)&&span.from<=contextTo).map(clone),locks:clone(state.locks)};
   }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
   function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(ACTIVE.has(a.status)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}

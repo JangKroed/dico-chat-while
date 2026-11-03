@@ -1,6 +1,6 @@
-# DICO 중앙관리 0.4.26 개발판
+# DICO 중앙관리 0.4.27 개발판
 
-새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.26입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
+새 컴퓨터와 비개발자 전달용 안내는 [처음 설치 안내](../docs/central-management/FIRST-SETUP.html)를 엽니다. macOS Apple Silicon 배포본은 START-HERE.html → check-installation.command → 필요한 경우 install.command 순서입니다. 현재 관리 프로그램과 확장은 모두 0.4.27입니다. 기존 0.4.14 전달용 패키지는 설치 후 중앙 페이지에서 업데이트하세요.
 
 ## 0.4.4 변경 사항
 
@@ -183,8 +183,10 @@ node scripts/central-ui-browser-check.mjs
 
 다른 PC에서 관리 화면을 여는 방법은 [원격 접속 안내](../docs/central-management/REMOTE-ACCESS.md)를 따릅니다. 프로그램의 설정·도움말에도 같은 안내와 내부망 주소·일회용 연결 코드 발급 기능이 있습니다.
 
-## 0.4.26 자동 이메일 제보
+## 0.4.27 자동 이메일 제보
 
 기존 관리 화면에서 업데이트하면 이메일 중계 연결이 기본 제공됩니다. 자동 제보를 켜서 저장하면 이후 오류 진단을 didlsdydgh@gmail.com으로 자동 전송합니다. 기존 동의와 별도 수신처 설정은 유지합니다. [이메일 제보 운영 안내](../docs/central-management/EMAIL-SUPPORT.md)를 참고하세요.
 
 빠른 채팅의 작성자 판별 및 반복 DOM 조회 개선: [조사·검증 기록](../docs/central-management/BUSY-CHAT-2026-11-03.md).
+
+제보 용량 자동 조정·전송 결과 표시: [조사·검증 기록](../docs/central-management/SUPPORT-SIZE-2026-11-03.md).

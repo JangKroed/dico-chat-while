@@ -99,3 +99,23 @@ test('imported server findings are displayed once when also present in report ch
   const html=renderToStaticMarkup(createElement(SupportReportPreview,{report,findings:[...report.checks,{code:'OTHER',severity:'info',message:'별도 분석'}]}));
   assert.equal(html.split('확장과 관리 프로그램 버전 불일치').length-1,1);assert.match(html,/별도 분석/);
 });
+
+test('manual report dialog shows relay rejection and receipt status in the same dialog',async()=>{
+ const {SupportReportDialog,ReactInternals}=await components(),previous=globalThis.fetch;
+ let sent=false,status='failed';
+ globalThis.fetch=async path=>{
+  if(String(path).startsWith('/api/support/report'))return Response.json(report);
+  if(path==='/api/support/send'){sent=true;return Response.json({id:'out-1',reportId:'report-1',status:'queued'});}
+  if(path==='/api/support/automatic')return Response.json({configured:true,outbox:sent?[{id:'out-1',reportId:'report-1',status,lastError:status==='failed'?'[QUOTA] 오늘 전송 한도 도달':null,receiptId:status==='sent'?'receipt-1':null}]:[]});
+  throw Error('Unexpected request '+path);
+ };
+ const render=hookRenderer(ReactInternals,SupportReportDialog,{attemptId:'a',onClose(){}});
+ try{
+  elements(render()).find(n=>n.type==='button'&&n.props.children==='제보 내용 미리보기').props.onClick();await settle();
+  elements(render()).find(n=>n.type==='button'&&n.props.children==='관리자에게 바로 전송').props.onClick();await settle();
+  let tree=render(),button=elements(tree).find(n=>n.type==='button'&&n.props.children==='전송 결과 확인');assert.ok(button);await button.props.onClick();await settle();
+  const allText=tree=>elements(tree).flatMap(n=>[n.props?.children].flat()).filter(x=>typeof x==='string').join(' ');
+  tree=render();assert.match(allText(tree),/QUOTA/);assert.doesNotMatch(allText(tree),/수신 서버 접수 확인/);
+  status='sent';await elements(tree).find(n=>n.type==='button'&&n.props.children==='전송 결과 확인').props.onClick();await settle();assert.match(allText(render()),/수신 서버 접수 확인/);
+ }finally{globalThis.fetch=previous;}
+});
