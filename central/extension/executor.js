@@ -1,3 +1,8 @@
+/**
+ * 중앙 명령을 브라우저 작업으로 번역하는 실행기입니다.
+ * 중앙 코어는 차례와 승인을 관리하고, 이 파일은 탭·세션·content script 요청을 연결합니다.
+ * 메시지 입력과 완료 관찰은 원본 content.js를 읽으면 이어서 확인할 수 있습니다.
+ */
 import {composerClearedEvidence} from './delivery-receipt.js';
 import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
@@ -27,6 +32,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const load=()=>loading??=(async()=>{state={...fresh(),...(await chrome.storage.local.get('dicoCentral')).dicoCentral};return state;})();
   const save=()=>{const snapshot=structuredClone(state);const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot}));writes=task.catch(()=>{});return task;};
   const request=async message=>{if(state.resetPending)throw Error('초기화된 연결 정보를 저장하는 중입니다.');return transport.request({...message,sessionId:state.sessionId,resetEpoch:state.resetEpoch},state.instanceId);};
+  /**
+   * 중앙과의 요청 통신을 재시도합니다. 통신 재요청을 메시지 재발송과 혼동하지 않습니다.
+   */
   async function retryRequest(message){
     const sessionId=state.sessionId,instanceId=state.instanceId;
     for(let count=0;;count++){
@@ -62,6 +70,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(!transport.connected)return denied('NATIVE_DISCONNECTED',true);
     return denied('AUTHORIZATION_DENIED');
   }
+  /**
+   * content script의 입력 요청이 현재 탭·시도에 속하는지 확인한 뒤 중앙 승인을 받습니다.
+   */
   async function authorizeInput(message,tabId) {
     await load();const a=state.attempts[message?.id],localAllowed=()=>inputAllowed(message,tabId);
     if(!localAllowed())return localDenial(message,tabId);
@@ -80,11 +91,14 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const canSend=async(message,tabId)=>(await authorizeInput(message,tabId)).allowed;
   async function report(a) {
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
-    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
+    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',...(a.result?.recoveryCommandId?{recoveryCommandId:a.result.recoveryCommandId}:{}),messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
     const samples=pendingCooldownSamples.get(a.attemptId)||[];pendingCooldownSamples.delete(a.attemptId);
     if(a.phase==='confirmed')for(const sample of samples)await cooldownSample({deliveryId:a.attemptId,sample},a.tabId);
   }
+  /**
+   * 재연결 때 이전 시도를 먼저 대조합니다. 응답이 사라졌다는 이유로 이미 실행한 요청을 새로 보내지 않습니다.
+   */
   async function synchronizePreviousAttempts(p) {
     const knownAttemptIds=Object.values(state.attempts).filter(a=>a.attemptId!==p.attemptId&&a.bindingId===p.bindingId&&['preparing','prepared','executing','unknown'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
     if(!knownAttemptIds.length)return;
@@ -102,6 +116,10 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     }
     if(changed)await save();
   }
+  /**
+   * 쿨다운·재시도·결과 관찰 동안 현재 시도가 계속 유효한지 중앙에 확인합니다.
+   * 관찰 하트비트가 있어야 긴 대기를 단순 응답 유실로 판단하지 않을 수 있습니다.
+   */
   async function authorizeWait(message,tabId,mode){
     await load();const a=state.attempts[message?.id];
     const allowed=()=>inputAllowed(message,tabId);
@@ -169,6 +187,10 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       await wait(Math.min(1000,Math.max(500,response.retryAfterMs)));
     }
   }
+  /**
+   * 명령 종류별 실제 처리입니다. 준비와 실행 결과를 content script에서 받은 뒤 중앙에 보고합니다.
+   * 오류가 Enter 이전인지 이후인지에 따라 미발송을 확정할 수 있는 범위가 달라집니다.
+   */
   async function perform(c) {
     const p=c.payload || {};
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
@@ -302,10 +324,28 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(a && !a.enterRequested){a.phase='cancelled';await save();}
     } else if(c.type==='RECONCILE') {
       const prior=state.attempts[p.attemptId];
-      if(prior?.result?.outcome==='confirmed'){await report(prior);await ack(c,'applied');}
+      if(prior?.result?.outcome==='confirmed'&&(prior.result.confirmationBasis!=='composer_cleared'||prior.sessionId===state.sessionId&&composerClearedEvidence(prior.result.deliveryEvidence))){
+        // 완료를 저장한 뒤 보고만 유실된 경우에도 이번 조회 ID로 재보고합니다.
+        // 과거 조회 ID는 이미 끝났을 수 있으므로 현재 명령의 ID로 갱신합니다.
+        if(prior.result.confirmationBasis==='composer_cleared')prior.result.recoveryCommandId=c.id;
+        await report(prior);await ack(c,'applied');
+      }
       else {
         const a=prior || {...p,startedAt:now(),phase:'unknown'};
-        let result;try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_RECONCILE',target:target(a),delivery:delivery(a)});}catch{}
+        // 복구에서는 Enter를 재실행하지 않습니다. 동일 시도의 실제 완료 영수증을
+        // 먼저 조회하고, 없을 때만 기존 게시 기록 대조로 넘어갑니다.
+        // 현재 빈 입력창으로 성공을 추측하지 않으며 content가 시도/세션/초안을 검증합니다.
+        let result;
+        if(prior&&a.sessionId===state.sessionId){
+          try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVERY_RECEIPT',target:target(a),delivery:delivery(a)});}catch{}
+          // 조회 중 재연결/초기화가 일어났다면 과거 세션 영수증을 현재 결과로 저장하지 않습니다.
+          if(!transport.connected||c.sessionId!==state.sessionId||a.sessionId!==state.sessionId||state.attempts[p.attemptId]!==a)return;
+          if(result?.status==='confirmed'&&result.confirmationBasis==='composer_cleared'&&composerClearedEvidence(result.deliveryEvidence)){
+            a.phase='confirmed';a.result={outcome:'confirmed',confirmationBasis:'composer_cleared',recoveryCommandId:c.id,...diagnostic(result)};
+            await save();await report(a);await ack(c,'applied');state.processed[c.id]=true;await save();return;
+          }
+        }
+        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_RECONCILE',target:target(a),delivery:delivery(a)});}catch{}
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationBasis:'message_observed'};state.attempts[p.attemptId]=a;await save();await report(a);}
         else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});
@@ -314,14 +354,31 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     } else throw Error('지원하지 않는 중앙 명령입니다.');
     state.processed[c.id]=true;state.lastError=null;await save();
   }
+  /**
+   * 중앙에서 받은 명령의 실행 진입점입니다. 중복 명령과 실행 중인 작업 상태를 관리합니다.
+   */
   function handleCommand(c) {
     // Native push and heartbeat can deliver the same command while its content
     // response is pending. Coalesce before enqueueing, including during load.
     const commandKey=`${c?.sessionId}:${c?.id}`;
     if(commandJobs.has(commandKey))return commandJobs.get(commandKey);
-    if(c?.type==='CONTROL'){volatileStops.add(c.payload?.groupId);if(c.payload?.runId)volatileStoppedRuns.add(c.payload.runId);}
+    /**
+     * 중단은 발송 응답과 같은 대기열에 넣기 전에 입력 게이트부터 닫습니다.
+     * 단, 과거 세션의 중단이 새 실행까지 막지 않도록 소유자/세션을 먼저 확인합니다.
+     * content에 보내는 신호는 대기를 깨우는 용도이며 적용 ACK의 근거가 아닙니다.
+     * 적용 ACK는 아래 기존 lane이 끝나 실제 작업이 반환된 뒤에만 보냅니다.
+     */
+    const interrupt=()=>{
+      if(c?.type!=='CONTROL'||c.sessionId!==state?.sessionId||c.instanceId!==state?.instanceId||state.processed[c.id])return;
+      volatileStops.add(c.payload?.groupId);if(c.payload?.runId)volatileStoppedRuns.add(c.payload.runId);
+      for(const a of Object.values(state.attempts)){
+        if(a.groupId!==c.payload?.groupId||(c.payload?.runId&&a.runId!==c.payload.runId)||a.sessionId!==state.sessionId||!['preparing','prepared','executing'].includes(a.phase))continue;
+        void Promise.resolve().then(()=>chrome.tabs.sendMessage(a.tabId,{type:'DICO_CANCEL_DELIVERY',delivery:{id:a.attemptId,sessionId:a.sessionId}})).catch(()=>{});
+      }
+    };
+    if(state)interrupt();
     const job=(async()=>{
-      inFlight++;try {await load();const key=c.type==='CLOSE_CHANNEL'?'config':c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
+      inFlight++;try {await load();interrupt();const key=c.type==='CLOSE_CHANNEL'?'config':c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
       const lane=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
         state.lastError=String(error.message || error).slice(0,250);
         const attempt=state.attempts[c.payload?.attemptId];

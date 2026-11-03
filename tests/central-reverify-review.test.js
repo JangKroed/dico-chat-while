@@ -55,3 +55,17 @@ test('queued window consolidation blocks starting a group until the move is ackn
     assert.doesNotThrow(()=>f.manager.execute('group.start',{id:f.groups[0].id}));
   }finally{f.manager.close();}
 });
+
+test('거절된 설정 동기화가 후속 성공하면 주기 검사로 자동 해결한다',()=>{
+ const f=fixture();try{
+  const channel=f.manager.snapshot().channels[0],message=f.manager.execute('message.create',{name:'new',body:'new'});
+  f.manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:message.id}]});
+  const failed=f.manager.commands(f.session.instanceId).findLast(c=>c.type==='CONFIG_SYNC');
+  f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:failed.id,status:'rejected',rejectionCode:'CHANNEL_NOT_READY'},f.session.instanceId);
+  f.advance();f.observe(f.records);
+  const recovered=f.manager.commands(f.session.instanceId).findLast(c=>c.type==='CONFIG_SYNC');assert.notEqual(recovered.id,failed.id);
+  f.manager.tick();assert.ok(f.manager.snapshot().incidents.some(i=>i.commandId===failed.id&&i.status==='open'));
+  f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:recovered.id,status:'applied'},f.session.instanceId);
+  f.manager.tick();assert.equal(f.manager.snapshot().incidents.find(i=>i.commandId===failed.id).status,'resolved');
+ }finally{f.manager.close();}
+});

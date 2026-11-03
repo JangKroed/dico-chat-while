@@ -1,3 +1,11 @@
+/**
+ * Discord 페이지 안에서 실행되는 입력·관찰 담당 코드입니다.
+ * 중앙 관리와 단독 확장이 공유하는 원본이며 central/extension/content.js는 빌드 시 복사됩니다.
+ * 읽는 순서: deliver → performDelivery → watchMessage.
+ * 중앙 관리에서는 prepare가 초안 준비, commit이 승인 확인 후 실제 Enter 단계입니다.
+ * confirmed의 의미는 confirmationBasis로 구분합니다. composer_cleared는 제출한 입력창이
+ * 비워졌다는 근거이며, Discord 서버의 게시물을 직접 조회했다는 뜻은 아닙니다.
+ */
 (() => {
   const CONTENT_BUILD_ID = 'unmanaged';
   const loadedRuntime=typeof chrome!=='undefined'?chrome.runtime:null;
@@ -9,22 +17,36 @@
   }
   globalThis.__dicoWhileLoaded = true;
   let busy = false;
+  // 현재 작업에만 취소를 귀속합니다. 다른 시도/이전 세션의 신호는 무시합니다.
+  // 취소는 초안을 지우지 않으며 이미 실행한 Enter를 미발송으로 바꾸지 않습니다.
+  let activeOperation=null;
+  const assertOperationActive=()=>{if(activeOperation?.cancelled)throw Object.assign(Error('중단 요청으로 입력을 차단했습니다.'),{code:'EXECUTION_STOPPED'});};
   const seenDeliveries = new Set();
   const completedDeliveries = new Map();
   const RECEIPT_TTL_MS=600000;
   const managedTiming=target=>target?.managed===true&&target?.coordinated===true;
+  /**
+   * 숨겨진 탭은 페이지 타이머가 지연될 수 있어 중앙 관리 대기는 확장 worker에 맡깁니다.
+   * 대기 종료 자체는 발송 승인이 아닙니다. 이후 계정·채널·초안과 승인을 다시 확인합니다.
+   */
   async function deliveryDelay(target,durationMs){
+    assertOperationActive();
     if(!managedTiming(target))return new Promise(resolve=>setTimeout(resolve,durationMs));
     // Hidden Chromium tabs can throttle chained page timers to once a minute.
     // The extension worker supplies bounded wakeups; every resumed operation
     // still checks the editor, clock, target and current send authorization.
     const response=await chrome.runtime.sendMessage({type:'DICO_DELAY',durationMs});
+    assertOperationActive();
     if(response?.ok!==true)throw Object.assign(Error('전송 창의 대기 연결이 끊겼습니다.'),{code:'MANAGED_DELAY_UNAVAILABLE'});
   }
 
   const normalize = text => text.replace(/\r\n/g, '\n').replace(/\u200b/g, '').replace(/(\p{Emoji})\uFE0F/gu, '$1').trim();
   // Support heading/list rendering without weakening author or freshness checks.
   const comparableLines = text => normalize(text).split('\n').map(line => line.trim()).filter(Boolean).join('\n');
+  /**
+   * 원문과 Discord 표시 문구를 비교합니다. 지원하는 Markdown·이모지 차이만 허용합니다.
+   * 문구가 같아도 다른 사용자의 메시지일 수 있으므로 작성자·시각 검증은 별도로 필요합니다.
+   */
   const matchesRenderedText = (source, rendered) => {
     if (normalize(source) === normalize(rendered)) return true;
     // Parse only supported, paired emphasis; code/links/escapes stay conservative.
@@ -62,6 +84,10 @@
     .filter(element => element.getClientRects().length > 0 && element.getAttribute('aria-disabled') !== 'true');
   const matchesTarget = target => location.origin === 'https://discord.com' &&
     new RegExp(`^/channels/${target.guildId}/${target.channelId}(?:/\\d+)?/?$`).test(location.pathname);
+  /**
+   * Slate 입력창에서 실제 초안 내용을 읽습니다. 단순 innerText만 사용하면 이모지나
+   * 지원하지 않는 요소를 놓칠 수 있습니다. unsupported는 초안을 덮어쓰지 않기 위한 신호입니다.
+   */
   function editorContent(editor) {
     const raw=editor?.innerText || editor?.textContent || '';
     if(!editor?.childNodes)return {text:raw,mode:'rendered',unsupported:Boolean(editor?.querySelector?.('[data-slate-void="true"]'))};
@@ -134,6 +160,10 @@
   const editorText=editor=>{const result=editorContent(editor);return result.unsupported?'\u0000'+result.text:result.text;};
   // Only actual emoji image positions may match a source shortcode. Literal
   // text elsewhere (including code, URLs and private drafts) is not rewritten.
+  /**
+   * 현재 초안이 이번 작업의 예상 문구와 같은지 검사합니다.
+   * 사용자가 수정한 초안을 우리 초안으로 오인하면 덮어쓰기·중복 전송이 생길 수 있습니다.
+   */
   function composerMatches(editor, expected) {
     const content=editorContent(editor);
     if(content.unsupported || typeof expected!=='string')return false;
@@ -199,6 +229,11 @@
     ownIdentityProof=identity?.verified===true&&/^\d{17,20}$/.test(identity.accountId||'')&&identity.guildId===target.guildId&&identity.channelId===target.channelId&&panel
       ?{...identity,panel,root:ownPanelRoot(panel),path:location.pathname,checkedAt:Date.now()}:null;
   }
+  /**
+   * 계정 증명을 현재 사용자 패널과 연결합니다. 일반 검증에는 2초 유효기간을 적용합니다.
+   * ignoreAge는 실제 계정 변경을 판단할 때만 사용합니다. 만료는 미확인 상태이지
+   * 계정 변경의 증거가 아니며, 오래된 증명으로 발송이나 완료를 허용하는 옵션도 아닙니다.
+   */
   function proofMatchesPanel(proof,panel,ignoreAge=false){
     if(!proof||proof.panel!==panel||proof.root!==ownPanelRoot(panel)||proof.path!==location.pathname||Date.now()-proof.checkedAt<0||(!ignoreAge&&Date.now()-proof.checkedAt>2000))return false;
     const clean=value=>typeof value==='string'?value.replace(/[\u200b-\u200d\ufeff]/g,'').trim():'';
@@ -212,6 +247,10 @@
     const title=root.querySelector?.('[class*="panelTitleContainer"], [class*="displayName"], [data-display-name]');
     return proof.identitySource==='own-panel-current-user'&&Boolean(proof.accountName)&&clean(title?.textContent)===proof.accountName;
   }
+  /**
+   * 패널에서 사용자 ID를 직접 읽을 수 없으면 확장에 계정 확인을 요청합니다.
+   * 기본 아바타처럼 이미지 URL에 ID가 없는 경우에도 현재 계정을 검증하기 위한 경로입니다.
+   */
   async function refreshOwnIdentity(target,force=false){
     if(!target?.coordinated)return;
     const panel=ownPanel(),ids=ownPanelIds(panel);
@@ -227,6 +266,10 @@
     if(target?.coordinated&&response?.identity)rememberOwnIdentity(target,response.identity);
     return response;
   }
+  /**
+   * 실제 입력을 하기 전에 현재 시도에 대한 허가를 요청합니다.
+   * 통신이 늦거나 복구된 뒤에는 같은 계정·채널·초안인지 다시 확인해야 합니다.
+   */
   async function requestDeliveryPermission(target,delivery,message,guard=null) {
     let retried=false;
     const original=editors()[0],originalForm=original?.closest?.('form');
@@ -266,6 +309,11 @@
     if(ids.size)return ids.size===1&&ids.has(target.ownUserId);
     return proofMatchesPanel(ownIdentityProof,panel)&&ownIdentityProof.accountId===target.ownUserId;
   }
+  /**
+   * 연속 메시지는 아바타를 생략하므로 앞 행에서 작성자를 찾을 수 있습니다.
+   * cache는 한 번의 DOM 검사에서만 공유하여 반복 탐색 비용을 줄입니다.
+   * 다음 검사까지 재사용하면 가상 스크롤로 바뀐 행의 작성자를 잘못 판단할 수 있습니다.
+   */
   function authorId(row, cache = null) {
     // Consecutive messages omit avatars. Memoize only within one DOM scan:
     // busy lists otherwise walk the same preceding rows quadratically. Never
@@ -345,6 +393,10 @@
     return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0,cooldownKnown, cooldownMs:Math.min(seconds,21600)*1000};
   }
   let cooldownProbeCancel = null;
+  /**
+   * Enter 뒤 실제 쿨다운 변화를 관찰하여 타이밍 보정에 사용할 측정값을 만듭니다.
+   * 채널·계정 변경이나 시계 이상이 있으면 측정 근거로 사용하지 않습니다.
+   */
   function observeCooldown(target, delivery, enterAt, enterMono) {
     cooldownProbeCancel?.();
     const mono=()=>globalThis.performance?.now() ?? Date.now(),originalEditor=editors()[0];
@@ -462,6 +514,14 @@
       return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
+  /**
+   * Enter 전부터 메시지 DOM과 입력창을 관찰하는 상태 기계입니다.
+   * 기존 메시지는 기준 목록으로 제외하고, 새 메시지의 문구·작성자·시각을 함께 살핍니다.
+   * sendingActive는 현재 화면의 전송 중 표시, sendingSeen은 이번 관찰에서 본 누적 근거입니다.
+   * 행이 화면 밖으로 사라져도 sendingSeen을 지우면 안 됩니다. 삭제가 미전송을 뜻하지 않습니다.
+   * 중앙 관리 완료는 같은 계정·채널·제출한 입력창이 유지되며 초안이 비워진 경우입니다.
+   * 초안이 남아 있고 전송 근거가 없을 때만 재시도 후보가 됩니다. 전송 근거가 있으면 관찰을 유지합니다.
+   */
   function watchMessage(editor, text, userId, startedAt, report = () => {}, submissionOnly = false, keepWatching = false, managed = false, submissionTarget = null, observationPermission = null) {
     const selector = '[data-list-id="chat-messages"] [id^="message-content-"]';
     const existing = new Set([...document.querySelectorAll(selector)].map(node => node.id));
@@ -476,6 +536,10 @@
     // React can replace the entire optimistic row. Only transfer provenance
     // across a unique remove/add at the same DOM slot in one observer batch.
     // A matching message elsewhere (or a whole-list rerender) is not evidence.
+    /**
+     * React가 전송 중 행 전체를 교체하는 경우 이전 행의 근거를 연결합니다.
+     * 같은 DOM 위치의 단일 교체만 연결하고, 문구가 같다는 이유만으로 다른 행을 연결하지 않습니다.
+     */
     const linkReplacements = records => {
       const slots=[];
       const messages=root=>root?.id?.startsWith('message-content-')?[root]:[...(root?.querySelectorAll?.('[id^="message-content-"]') || [])];
@@ -518,6 +582,10 @@
       clearTimeout(timer);deadline=null;latest={...value,deliveryEvidence};resolve(latest);
     };
     const currentEditor = () => editor.isConnected ? editor : editors()[0];
+    /**
+     * DOM 변화 또는 주기적 확인 때 호출됩니다. freshIdentity는 계정 갱신 후 검사라는 뜻입니다.
+     * 일시적인 증명 만료와 실제 계정·채널 변경을 구분하여 같은 입력창의 관찰을 보존합니다.
+     */
     const check = (freshIdentity=false) => {
       if (finished) return;
       if(submissionTarget){
@@ -614,6 +682,10 @@
     observer = new MutationObserver(records=>{linkReplacements(records);check();});
     observer.observe(document.querySelector('main') || document.body, {subtree:true,childList:true,characterData:true,attributes:true});
     // Read-only checks: no additional Enter, reload or retransmission.
+    /**
+     * 관찰 기한이 끝났을 때의 판단입니다. 기한 만료만으로 미발송을 확정하지 않습니다.
+     * 중앙 관리에서 본인 전송 근거가 있고 같은 초안이면 관찰 기한을 연장합니다.
+     */
     const expire = (freshIdentity=false) => {
       check(freshIdentity);if(finished||deadline===null)return;
       const liveEditor = currentEditor();
@@ -664,9 +736,13 @@
       },
       rearm(){if(finished)return false;promise=new Promise(done=>{resolve=done;});armTimeout();return true;},
       stop(){finished=true;observer?.disconnect();clearTimeout(timer);clearInterval(poll);},
-      cancel:()=>finish({status:'uncertain',error:'입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.'})
+      cancel:code=>finish({status:'uncertain',...(code?{code}:{}),error:'입력 중 오류가 발생했습니다. 입력창과 채널을 확인해 주세요.'})
     };
   }
+  /**
+   * 응답 유실 등의 상황에서 현재 화면과 기존 발송 정보를 대조합니다.
+   * 채널·초안·작성자가 불명확하면 uncertain을 반환하며 새 Enter를 실행하지 않습니다.
+   */
   function reconcile(target, delivery) {
     const unknown = (reason, messageId) => ({status:'uncertain', reason, ...(messageId ? {messageId} : {})});
     if (!target || !matchesTarget(target)) return unknown('wrong-channel');
@@ -718,6 +794,10 @@
     }
     return {status:'confirmed',draftAction,messageId:[...candidates][0]};
   }
+  /**
+   * 입력창이 일정 시간 같은 상태로 유지되는지 확인합니다.
+   * 렌더링 중 교체된 editor 참조나 사용자의 입력을 그대로 재사용하지 않기 위한 단계입니다.
+   */
   async function stableEditor(target, text, editor, duration, report, allowDelayRecovery=false) {
     const began=Date.now(); let stableSince=null,maxStableMs=0,textStableSince=null,repaired=false;
     const failureCounts={};let lastFailedChecks=[];
@@ -773,6 +853,10 @@
     }
     return fail();
   }
+  /**
+   * 실제 입력창의 쿨다운을 확인하며 commit 직전까지 기다립니다.
+   * 예약 시각이 지났다는 사실과 Discord에서 실제 전송 가능한 상태는 구분합니다.
+   */
   async function waitForCommitCooldown(target,delivery,editor,trace,state) {
     const maxWaitMs=21630000,mono=()=>globalThis.performance?.now() ?? Date.now();
     for(;;){
@@ -806,6 +890,11 @@
       await deliveryDelay(target,500);
     }
   }
+  /**
+   * 발송 진입점입니다. 단계별 근거를 모으고 performDelivery 결과에 합칩니다.
+   * 완료 영수증은 실제로 관찰한 동일 시도의 결과만 짧게 보관합니다.
+   * 나중에 빈 입력창을 발견했다는 이유로 과거 시도의 성공 영수증을 만들지 않습니다.
+   */
   async function deliver(target, delivery) {
     const evidence={phase:delivery?.phase==='prepare'?'prepare':delivery?.phase==='commit'?'commit':'send',stage:'inspect',enterAttempted:false};
     evidence.retryCount=0;
@@ -823,10 +912,16 @@
     }
     return completed;
   }
+  /**
+   * 실제 작업 순서: 중복 차단 → 대상/초안 검사 → 준비 → 승인/쿨다운 확인 → Enter → 관찰.
+   * busy는 동시 실행, seenDeliveries는 같은 요청 ID 재실행을 막습니다.
+   * 재시도는 같은 시도와 초안을 유지하며, 이미 전송된 가능성이 있으면 Enter를 반복하지 않습니다.
+   */
   async function performDelivery(target, delivery, evidence) {
     if (busy || seenDeliveries.has(delivery?.id)) return { status: 'uncertain', ...(delivery?.phase==='prepare'?{code:'PREPARE_BUSY'}:{}), error: '중복 전송 요청을 차단했습니다. 채널에서 확인해 주세요.' };
     if (!delivery?.id || typeof delivery.text !== 'string' || !delivery.text.trim() || delivery.text.length > 2000) return { status: 'blocked', error: '전송할 문구가 올바르지 않습니다.' };
     busy = true;
+    const operation=activeOperation={id:delivery.id,sessionId:delivery.sessionId,cancelled:false,cancel:null};
     let entered = false;
     let watcher, originalEditor, priorAcknowledgedId;
     const trace = (stage, extra = {}) => {
@@ -921,6 +1016,7 @@
         if (!(await requestInputAuthorization(target,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase }))?.allowed) {
           return { status: 'blocked', error: '문구 입력 전에 예약이 취소되었습니다.' };
         }
+        assertOperationActive();
         const live = editors()[0];
         if (live !== editor) return {status:'blocked',error:'입력창이 교체되었습니다. 다음 시작 때 다시 확인해 주세요.'};
         result=inspectForDelivery(target,delivery);
@@ -1010,9 +1106,12 @@
         }
         cooldownProbeCancel?.();
         enterAt=Date.now();enterMono=globalThis.performance?.now() ?? enterAt;
+        assertOperationActive();
         if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries===null||evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null,()=>requestDeliveryPermission(target,delivery,{type:'DICO_OBSERVE_WAIT',id:delivery.id,phase:'commit',retryCount,elapsedMs:Math.max(0,Date.now()-enterAt)}));
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
         trace('before-enter');
+        operation.cancel=()=>watcher?.cancel('EXECUTION_STOPPED');
+        assertOperationActive();
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
         const keyup = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
         // The latch records an actual submission attempt, never mere waiting.
@@ -1037,11 +1136,20 @@
     } catch(error) {
       trace('exception',{exception:{name:error?.name,message:error?.message,stack:error?.stack}});
       watcher?.cancel();
-      return { status: evidence.enterAttempted || entered ? 'uncertain' : 'blocked',code:error?.code==='MANAGED_DELAY_UNAVAILABLE'?'MANAGED_DELAY_UNAVAILABLE':evidence.enterAttempted?'CONTENT_EXCEPTION_AFTER_ENTER':'CONTENT_EXCEPTION_BEFORE_ENTER', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
-    } finally { watcher?.stop();busy = false; }
+      return { status: evidence.enterAttempted || (entered&&error?.code!=='EXECUTION_STOPPED') ? 'uncertain' : 'blocked',code:error?.code==='EXECUTION_STOPPED'?'EXECUTION_STOPPED':error?.code==='MANAGED_DELAY_UNAVAILABLE'?'MANAGED_DELAY_UNAVAILABLE':evidence.enterAttempted?'CONTENT_EXCEPTION_AFTER_ENTER':'CONTENT_EXCEPTION_BEFORE_ENTER', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
+    } finally { watcher?.stop();if(activeOperation===operation)activeOperation=null;busy = false; }
   }
+  /**
+   * 확장이 보내는 검사·준비·발송·영수증 조회 요청의 입구입니다.
+   * 비동기 응답은 respond로 돌려주며, 각 요청의 실제 처리는 위 함수들로 분리합니다.
+   */
   const messageListener=(message, sender, respond) => {
     if (sender.id !== chrome.runtime.id) return false;
+    if(message?.type==='DICO_CANCEL_DELIVERY'){
+      const matches=Boolean(activeOperation&&message.delivery?.id===activeOperation.id&&message.delivery?.sessionId===activeOperation.sessionId);
+      if(matches){activeOperation.cancelled=true;activeOperation.cancel?.();}
+      respond({cancelRequested:matches});return false;
+    }
     if(message?.type==='DICO_CONTENT_STATUS'){respond({buildId:CONTENT_BUILD_ID,busy});return false;}
     if(message?.type==='DICO_CONTENT_DISPOSE'){respond({disposed:globalThis.__dicoWhileLifecycle.dispose()});return false;}
     if(message?.type==='DICO_DELIVERY_RECEIPT'){

@@ -65,3 +65,38 @@ test('tick reconciles persisted all-applied controls but never accepts missing o
     assert.equal(s.attempts[0].executionBlocked,true);assert.equal(s.attempts.length,1);
   }finally{reopened?.close();rmSync(dir,{recursive:true,force:true});}}
 });
+
+test('거절된 중단은 자동 재시도하고 후속 적용으로 중단 알림을 해결한다',()=>{
+ const f=fixture();try{
+  f.unknown();f.manager.execute('group.stop',{id:f.group.id});
+  const owner=f.owners[0],failed=f.manager.commands(owner.instanceId).findLast(c=>c.type==='CONTROL');
+  f.manager.bridge({type:'ACK',sessionId:owner.sessionId,commandId:failed.id,status:'rejected',rejectionCode:'NATIVE_REQUEST_TIMEOUT'},owner.instanceId);
+  f.ack(1);f.manager.tick();
+  const retry=f.manager.commands(owner.instanceId).findLast(c=>c.type==='CONTROL');assert.ok(retry,'자동 재시도 명령이 필요합니다.');assert.notEqual(retry.id,failed.id);
+  f.ack(0);const s=f.manager.snapshot();assert.equal(s.groups[0].status,'stopped');
+  assert.equal(s.incidents.find(i=>i.commandId===failed.id).status,'resolved');assert.equal(s.attempts[0].status,'unknown');
+ }finally{f.manager.close();}
+});
+
+test('중단 자동 복구는 3회로 제한하고 새 발송을 만들지 않는다',()=>{
+ let time=1_800_000_000_000;const f=fixture({now:()=>time,monotonicNow:()=>time-1_799_999_999_000});
+ try{
+  f.unknown();f.manager.execute('group.stop',{id:f.group.id});f.ack(1);const owner=f.owners[0];
+  for(let n=0;n<4;n++){
+   const command=f.manager.commands(owner.instanceId).findLast(c=>c.type==='CONTROL');assert.ok(command);
+   f.manager.bridge({type:'ACK',sessionId:owner.sessionId,commandId:command.id,status:'rejected',rejectionCode:'NATIVE_REQUEST_TIMEOUT'},owner.instanceId);
+   time+=3000;f.manager.tick();
+  }
+  assert.equal(f.manager.commands(owner.instanceId).filter(c=>c.type==='CONTROL').length,0);
+  assert.equal(f.manager.snapshot().groups[0].status,'stop_pending');assert.equal(f.manager.snapshot().attempts.length,1);
+ }finally{f.manager.close();}
+});
+
+test('실행이 끝난 미확인 시도는 자동 조회하고 같은 세션 완료 근거로 해결한다',()=>{
+ const f=fixture();try{
+  const o=f.owners[0];f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'unknown',executionBlocked:true},o.instanceId);
+  f.manager.tick();assert.ok(f.manager.commands(o.instanceId).some(c=>c.type==='RECONCILE'));
+  f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'confirmed',confirmationBasis:'composer_cleared',recoveryCommandId:f.manager.commands(o.instanceId).find(c=>c.type==='RECONCILE').id,deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true}},o.instanceId);
+  const s=f.manager.snapshot();assert.equal(s.attempts[0].status,'confirmed');assert.equal(s.incidents.find(i=>i.code==='delivery_unknown').status,'resolved');
+ }finally{f.manager.close();}
+});

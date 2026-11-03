@@ -1,3 +1,9 @@
+/**
+ * 중앙 관리의 업무 규칙과 상태 전이를 담당합니다. DOM이나 브라우저 입력은 직접 다루지 않습니다.
+ * UI 명령은 execute, 확장 응답은 bridge, 주기적인 예약 판단은 tick으로 들어옵니다.
+ * instance=연결된 확장, account=계정, target=목적지, channel/binding=계정과 채널의 실행 연결,
+ * group=발송 순서, attempt=한 번의 발송 시도, command=확장에 전달할 명령입니다.
+ */
 import {supportRecordBuffer} from './support-budget.js';
 import {traceData,validTraceStage} from '../extension/delivery-trace.js';
 import {composerClearedEvidence} from '../extension/delivery-receipt.js';
@@ -38,6 +44,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
   let pending=[];
+  /**
+   * 상태 복사본에서 변경한 뒤 상태와 이벤트를 저장합니다. 처리 실패 시 이전 상태로 돌아갑니다.
+   * 저장에 실패하면 새 실행을 차단합니다. 메모리에서만 성공한 발송을 진행하면 재시작 후 중복될 수 있습니다.
+   * 구독자 알림은 저장 성공 후에 보내며, 구독자의 오류로 이미 저장한 작업을 취소하지 않습니다.
+   */
   function transact(fn){
     ensure(!closed,'CLOSED','Central manager is closed.',503);ensure(!storageFailure,'STORAGE_FAILURE','Storage failed. New commands are blocked.',503);
     const before=state;state=clone(state);state.stateVersion++;pending=[];
@@ -218,7 +229,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const after=problem.lastSeenAt??problem.createdAt;
     return channels.length>0&&channels.every(c=>c.verified&&c.sessionId===instance.sessionId&&Number.isFinite(c.observedAt)&&c.observedAt>=after&&c.observedAt<=now()&&now()-c.observedAt<=15000);
   }
-  function recheckIncidents(incidentId){
+  function recheckIncidents(incidentId,{automatic=false}={}){
     const selected=incidentId===undefined?state.incidents:[get('incidents',incidentId)];
     let resolved=0;const blocked=[];
     for(const i of selected.filter(i=>i.status==='open')){
@@ -226,13 +237,26 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       const attemptId=c?.payload?.attemptId||i.attemptId,a=state.attempts.find(a=>a.id===attemptId);
       const groupId=c?.payload?.groupId||i.groupId||a?.groupId,g=state.groups.find(g=>g.id===groupId);
       let reasonCode=null,block='EVIDENCE_REQUIRED',message='해결을 확인할 기록이 부족합니다. 해당 알림의 안내를 확인하세요.',page='logs';
-      if(a&&ACTIVE.has(a.status)){
+      // 미발송 확정과 원인 복구는 다릅니다. 준비 재시도 소진으로 멈춘 경고는
+      // 자동 검사에서 지우지 않고, 사용자의 명시적 재검사/후속 실행 근거를 기다립니다.
+      if(automatic&&type==='PREPARE'&&a?.status==='not_sent'&&g?.waitReason==='preparation_failed'){
+        block='PREPARATION_FAILED';message='입력 준비 실패 원인이 아직 해소되지 않았습니다.';page='channels';
+      }else if(a&&ACTIVE.has(a.status)){
         block='ATTEMPT_UNRESOLVED';message='전송 결과가 아직 확정되지 않았습니다. 기록에서 결과를 확인하세요.';page='history';
       }else if((i.code==='delivery_unknown'||i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(type))&&a&&TERMINAL.has(a.status)){
         reasonCode='terminal_attempt';
       }else if(['channel_unverified','account_mismatch'].includes(i.code)){
         if(identityRecovered(i))reasonCode='connection_reverified';
         else{block='CONNECTION_UNVERIFIED';message='해당 전송용 탭의 현재 계정·채널 확인이 필요합니다. 전송 창 보기로 상태를 확인하세요.';page='channels';}
+      }else if(i.code==='command_rejected'&&type==='CONFIG_SYNC'){
+        // 과거 거절은 현재 동일 연결의 설정이 실제 적용됐을 때만 해결합니다.
+        // 단순 연결 성공이나 다른 채널의 ACK는 설정 적용의 증거가 아닙니다.
+        const channel=state.channels.find(channel=>channel.id===c?.payload.bindingId);
+        const instance=state.instances.find(instance=>instance.id===c?.instanceId);
+        const after=Math.max(i.lastSeenAt||i.createdAt,c?.rejectedAt||0);
+        const applied=channel&&state.commands.some(next=>next.type==='CONFIG_SYNC'&&next.instanceId===c.instanceId&&next.sessionId===instance?.sessionId&&next.payload.bindingId===channel.id&&next.payload.configVersion===channel.configVersion&&next.status==='applied'&&next.appliedAt>=after&&next.appliedAt<=now());
+        if(instance?.connected&&channel?.verified&&channel.sessionId===instance.sessionId&&now()-instance.lastSeenAt>=0&&now()-instance.lastSeenAt<=15000&&channel.appliedVersion===channel.configVersion&&applied)reasonCode='configuration_applied';
+        else{block='CONFIGURATION_PENDING';message='현재 설정의 브라우저 적용 확인을 기다리고 있습니다.';page='channels';}
       }else if(i.code==='command_rejected'&&type==='OPEN_CHANNEL'){
         block='CONNECTION_UNVERIFIED';message='거절된 계정·채널의 현재 연결을 확인하지 못했습니다. 채널 관리에서 해당 브라우저의 계정을 다시 연결하고 연결됨 표시를 확인하세요.';page='channels';
         const payload=c?.payload,instance=state.instances.find(instance=>instance.id===c?.instanceId);
@@ -301,11 +325,29 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       resolveControlIncidents(g.id);event('group.control_applied',{groupId:g.id,status:g.status});
     }
   }
+  /**
+   * 중단/일시정지는 재적용해도 새 메시지를 보내지 않는 제어 명령입니다.
+   * 명시적으로 거절된 명령만 최대 3회 재발급하며, 수신 대기 중 명령은 중복 생성하지 않습니다.
+   * 이전 거절은 superseded로 남겨 완료 판정을 막지 않게 하되 진단 이력은 유지합니다.
+   * 발송 결과 unknown은 이 복구로 해결하지 않습니다. 실행 차단과 과거 발송 결과는 별개입니다.
+   */
+  function recoverControl(g){
+    if(!g.controlIntent||(g.controlRecoveryCount||0)>=3||now()<(g.controlRecoveryAfter||0))return;
+    const failed=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status==='rejected');
+    if(!failed.length)return;
+    g.controlRecoveryCount=(g.controlRecoveryCount||0)+1;g.controlRecoveryAfter=now()+3000;
+    for(const previous of failed){
+      previous.status='superseded';previous.supersededAt=now();
+      command('CONTROL',previous.instanceId,controlPayload(g,previous.instanceId));
+    }
+    event('group.control_retried',{groupId:g.id,retryCount:g.controlRecoveryCount});
+  }
   function controlPayload(g,instanceId){
     const attempt=state.attempts.find(a=>a.id===g.activeAttemptId);
     return{action:g.controlIntent,groupId:g.id,runId:g.runId||null,controlGeneration:g.controlGeneration,attemptId:attempt?.instanceId===instanceId?attempt.id:null};
   }
   function control(g,intent){
+    g.controlRecoveryCount=0;g.controlRecoveryAfter=0;
     g.controlIntent=intent;g.controlGeneration=(g.controlGeneration||0)+1;g.status=intent==='stop'?'stop_pending':'pause_pending';g.nextEligibleAt=null;
     for(const instanceId of new Set(g.members.map(m=>get('channels',m).instanceId)))command('CONTROL',instanceId,controlPayload(g,instanceId));
     event(`group.${intent}_requested`,{groupId:g.id});controlComplete(g);
@@ -322,6 +364,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const cs=members.map(m=>get('channels',m));ensure(cs.every(c=>c.channelId===cs[0].channelId&&c.guildId===cs[0].guildId),'CHANNEL_MISMATCH','Group members must belong to the same Discord channel.');
     ensure(new Set(cs.map(c=>c.accountId)).size===cs.length,'DUPLICATE_ACCOUNT','A Discord account may appear only once per group.');return cs;
   }
+  /**
+   * 그룹 실행에 필요한 잠금을 확보합니다. 동일 자원을 여러 그룹이 동시에 사용해
+   * 계정별 발송 순서가 섞이지 않도록 하는 경계입니다.
+   */
   function acquire(g){
     const keys=[`channel:${g.guildId}:${g.channelId}`,...g.members.map(m=>{const c=get('channels',m);return `account:${c.accountId}:${c.channelId}`;})];
     ensure(!state.locks.some(l=>keys.includes(l.key)&&l.groupId!==g.id),'RESOURCE_BUSY','This channel or account is already controlled by another group.',409);
@@ -358,6 +404,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     c.playlist=items;c.playlistIndex=0;c.configVersion++;c.appliedVersion=0;c.version++;c.updatedAt=now();delete c.pendingIntervalSync;delete c.intervalSyncBaseMs;
     queueConfiguration(c);event('channel.playlist_applied',{channelId:c.id,configVersion:c.configVersion});
   }
+  /**
+   * 발송 시도를 끝내고 그룹·채널의 다음 상태를 계산합니다.
+   * 순서와 대기 시각의 변경은 이 결과 처리에 모입니다. Enter 요청을 보낸 순간과 완료 시각을 혼동하지 않습니다.
+   */
   function finish(a,outcome,{messageId,manual=false,confirmationMs,confirmationBasis}={}){
     if(outcome==='confirmed')ensure(a.permitId||a.permitIssued,'PERMIT_REQUIRED','No commit permit was issued for this attempt.',409);
     if(TERMINAL.has(a.status)){ensure(a.status===outcome,'RESULT_CONFLICT','This attempt already has a different final result.',409);return a;}
@@ -419,6 +469,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
     delete g.prepareRetryCount;delete g.prepareRetryAfterMono;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
   }
+  /**
+   * 화면에서 요청한 설정·실행·중지 등 업무 명령의 입구입니다.
+   * 각 action 분기에서 입력과 현재 상태를 검사하고 transact 안에서 저장합니다.
+   */
   function execute(action,p={}){return transact(()=>{
     switch(action){
       case 'message.create':{const at=now(),r={id:id(),version:1,body:body(p.body),at};const m={id:id(),name:text(p.name,'name'),tags:tags(p.tags),archived:false,version:1,revisionId:r.id,body:r.body,revisions:[r],createdAt:at,updatedAt:at};state.messages.push(m);event('message.created',{messageId:m.id});return m;}
@@ -652,6 +706,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   function importBackup(backup){return transact(()=>restore(backup));}
   function attemptPayload(a){return{attemptId:a.id,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:a.maxSendRetries??null};}
+  /**
+   * 확장 프로토콜의 입구입니다. 세션과 시도 식별자를 확인한 뒤 응답에 맞춰 상태를 전이합니다.
+   * 연결 응답, 명령 수신 확인, 실제 발송 결과는 서로 다른 근거이므로 같은 성공으로 취급하지 않습니다.
+   */
   function bridge(message,instanceId){
     ensure(message&&typeof message==='object'&&!Array.isArray(message),'VALIDATION','Bridge message must be an object.');
     return transact(()=>{
@@ -923,14 +981,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.executionBlocked===true)a.executionBlocked=true;
         if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
         if(message.outcome==='unknown'){
-          const allowedReasons=new Set(['RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
+          const allowedReasons=new Set(['EXECUTION_STOPPED','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
         if(message.outcome==='confirmed'){
           ensure(message.confirmationBasis===undefined||['message_observed','composer_cleared'].includes(message.confirmationBasis),'VALIDATION','Invalid delivery confirmation basis.');
           if(message.confirmationBasis==='composer_cleared'){
-            ensure(a.status==='permitted'&&a.sessionId===i.sessionId&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
+            // unknown 복구는 중앙이 발급한 현재 조회 명령에 대한 영수증만 받습니다.
+            // 예전 미확인 시도에 새 입력창의 상태를 소급 적용하지 않습니다.
+            const recovery=state.commands.find(c=>c.id===message.recoveryCommandId&&c.type==='RECONCILE'&&c.instanceId===i.id&&c.sessionId===i.sessionId&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status));
+            ensure((a.status==='permitted'||a.status==='unknown'&&a.executionBlocked===true&&recovery)&&a.sessionId===i.sessionId&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
           }else ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
         }
         else {
@@ -938,6 +999,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(['deferred','blocked','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED'].includes(message.reasonCode))a.reasonCode=message.reasonCode;
           if(['deferred','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent){g.status='needs_review';g.waitReason='discord_cooldown';}}
         }
+        if(message.outcome==='confirmed'&&message.confirmationBasis==='composer_cleared')a.deliveryEvidence=deliveryEvidence(message.deliveryEvidence);
         return{ok:true,attempt:publicAttempt(finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs,confirmationBasis:message.confirmationBasis}))};
       }
       if(message.type==='EMERGENCY_STOP'){
@@ -967,11 +1029,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();
     event('service.resume_required',{reasonCode:'clock_or_sleep_gap',clockDiagnostic},'warning');
   }
+  /**
+   * 런타임의 주기 호출로 연결 유효성·중지 완료·시도 제한시간·다음 차례를 검사합니다.
+   * 실제 대기는 monotonic 시계를 사용하고 화면에 보여 줄 날짜는 wall clock으로 계산합니다.
+   * 그룹 간격과 계정 간격을 모두 충족해야 하며, 조기 준비는 계정 대기 종료 최대 5초 전부터 가능합니다.
+   * PREPARE를 큐에 넣는 단계이며 여기서 직접 Enter를 누르거나 다음 계정으로 넘어가지 않습니다.
+   */
   function tick(){return transact(()=>{
     const wall=now(),mono=monotonicNow(),wallDelta=wall-lastWall,monoDelta=mono-lastMono;
     if(monoDelta>15000||monoDelta<0||Math.abs(wallDelta-monoDelta)>2000)suspendForClockGap();
     lastWall=wall;lastMono=mono;
-    for(const g of state.groups.filter(g=>g.controlIntent))controlComplete(g);
+    for(const g of state.groups.filter(g=>g.controlIntent)){recoverControl(g);controlComplete(g);}
     for(const i of state.instances.filter(i=>i.connected&&mono-(i.lastSeenMono??mono)>15000)){
       blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
       for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status)))markUnknown(a,'connection_lost');
@@ -989,6 +1057,22 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(stale&&!failPreparation(a,'PREPARE_TIMEOUT'))markUnknown(a,'result_timeout');
     }
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
+    /**
+     * 실행 종료가 확인된 미확인 시도만 읽기 전용으로 자동 대조합니다.
+     * 같은 세션/탭/설정 연결이 유지된 경우에 한해 5초 간격, 최대 3회 조회합니다.
+     * 발송 실행 중인 시도나 교체된 탭을 건드리지 않고 PREPARE/Enter도 재발급하지 않습니다.
+     */
+    for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true)){
+      const owner=state.instances.find(i=>i.id===a.instanceId),channel=state.channels.find(c=>c.id===a.bindingId);
+      if(!owner?.connected||owner.sessionId!==a.sessionId||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||channel.tabId!==a.tabId||channel.sessionId!==a.sessionId)continue;
+      if((a.recoveryCount||0)>=3||now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;
+      a.recoveryCount=(a.recoveryCount||0)+1;a.recoveryAfter=now()+5000;
+      command('RECONCILE',a.instanceId,attemptPayload(a));
+      event('delivery.recovery_requested',{attemptId:a.id,groupId:a.groupId,retryCount:a.recoveryCount});
+    }
+    // 자동 재검사도 수동 재검사와 같은 근거 규칙을 사용합니다.
+    // 경고를 숨기거나 미확인 발송을 성공으로 바꾸지 않고, 후속 복구가 증명된 알림만 해결합니다.
+    recheckIncidents(undefined,{automatic:true});
     if(state.service.status!=='ready')return{ok:true};
     for(const g of state.groups.filter(g=>g.status==='running'&&!g.activeAttemptId&&!g.controlIntent)){
       const c=get('channels',g.members[g.cursor]);

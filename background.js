@@ -1,3 +1,7 @@
+/**
+ * 기존 단독 확장의 service worker입니다. 중앙 관리 전용 worker는 central/extension/background.js입니다.
+ * 채널별 작업 큐, 알람, 탭 준비 상태, 설정·진단 요청을 연결합니다.
+ */
 import {createAutoUpdater,updateBusy} from './auto-update.js';
 import { installUpdateChecks } from './update-check.js';
 import { diagnosticRequest } from './diagnostic-request.js';
@@ -19,6 +23,10 @@ const stopRequested = new Set();
 let stopAllRequested = false;
 const startsAfterStopAll = new Set();
 const isStopped = id => autoUpdater?.locked || stopRequested.has(id) || (stopAllRequested && !startsAfterStopAll.has(id));
+/**
+ * 같은 key의 작업을 큐로 직렬화합니다.
+ * 실행 오류는 진단에 남기고 호출자에게도 반환하여 실패가 조용히 성공으로 바뀌지 않게 합니다.
+ */
 const enqueue = (action, operation = 'background-event', key = 'control') => {
   const next = queue.run(key, action);
   void next.catch(async error => {

@@ -1,3 +1,8 @@
+/**
+ * 중앙 상태와 이벤트를 SQLite에 함께 저장하는 영속 계층입니다.
+ * WAL과 synchronous=FULL을 사용하며, 트랜잭션으로 상태와 이력의 불일치를 방지합니다.
+ * 이 파일은 저장을 담당하고 발송 순서 등 업무 판단은 core/index.js에서 담당합니다.
+ */
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -35,6 +40,10 @@ export class CentralStore {
     } catch (error) { this.db.close(); throw error; }
   }
   read() { const row = this.db.prepare('SELECT data FROM central_state WHERE singleton=1').get(); return row ? JSON.parse(row.data) : null; }
+  /**
+   * 현재 저장 버전과 새 상태 버전을 비교하여 다른 쓰기 작업의 덮어쓰기를 감지합니다.
+   * 이벤트 삽입과 상태 갱신을 하나의 트랜잭션으로 완료하거나 함께 되돌립니다.
+   */
   commit(state, events) {
     this.db.exec('BEGIN IMMEDIATE');
     try {

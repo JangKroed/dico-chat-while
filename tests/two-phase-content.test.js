@@ -801,3 +801,23 @@ test('본인 전송 중 메시지가 실패하면 무한 관찰과 추가 Enter�
  r.onRuntime(m=>m.type==='DICO_OBSERVE_WAIT'&&r.now()-started>60000?{allowed:false,code:'TEST_STOP'}:undefined);
  const result=await r.request('DICO_DELIVER');assert.equal(result.code,'DISCORD_SEND_FAILED');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
 });
+
+test('중단 신호는 메시지 표시가 없는 결과 관찰도 즉시 끝내고 초안을 보존한다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreEnter:true,maxSendRetries:0});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let cancelledAt;
+ r.onTick(()=>{if(cancelledAt===undefined&&r.events.some(e=>e.type==='keydown')){cancelledAt=r.now();void r.requestMessage({type:'DICO_CANCEL_DELIVERY',delivery:{id:r.delivery.id,sessionId:r.delivery.sessionId}});}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.code,'EXECUTION_STOPPED');assert.ok(r.now()-cancelledAt<1000);assert.equal(r.editor.innerText,'A');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+test('최종 승인 대기 중 중단 신호가 오면 늦은 허가로 Enter를 실행하지 않는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true});r.target.coordinated=true;r.delivery.strictAuthorization=true;
+ await r.request('DICO_PREPARE');r.tick(3000);
+ r.onAuthorization(()=>{void r.requestMessage({type:'DICO_CANCEL_DELIVERY',delivery:{id:r.delivery.id,sessionId:r.delivery.sessionId}});});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.code,'EXECUTION_STOPPED');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);assert.equal(r.editor.innerText,'A');
+});
+test('다른 시도 중단 신호는 현재 발송을 취소하지 않는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;r.delivery.strictAuthorization=true;
+ await r.request('DICO_PREPARE');r.tick(3000);
+ r.onAuthorization(()=>{void r.requestMessage({type:'DICO_CANCEL_DELIVERY',delivery:{id:'other',sessionId:r.delivery.sessionId}});});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});

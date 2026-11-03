@@ -1,3 +1,8 @@
+/**
+ * 기존 설치 폴더 안에서 수행하는 업데이트와 실패 진단입니다.
+ * 컨트롤러는 요청·상태·종료 승인을 관리하고, 독립 worker가 준비·검사·교체·재시작을 수행합니다.
+ * worker는 자신과 Node를 별도 작업 폴더로 복사하여 실행하므로 교체할 앱 파일에 실행 중 의존하지 않습니다.
+ */
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {access,chmod,copyFile,cp,lstat,mkdir,open,readFile,realpath,rename,rm,writeFile} from 'node:fs/promises';
 import {dirname,join,resolve,delimiter,isAbsolute} from 'node:path';
@@ -24,6 +29,9 @@ const failureMessages={
  UNEXPECTED:'업데이트 처리 중 예상하지 못한 오류가 발생했습니다. 실패 단계와 실행 결과를 기록했습니다.'
 };
 const failureStages=new Set(['preparing','source','dependencies','build','check','authorize','busy','shutdown','apply','restart','unknown']);
+/**
+ * 내부 예외에서 알려진 실패 범주만 추립니다. UI에 원본 stderr·개인 경로·자격정보를 노출하지 않습니다.
+ */
 export function classifyUpdateFailure(error={},stage='unknown'){
  const text=[error.code,error.message,error.stderr].map(value=>String(value||'').slice(0,8192)).join('\n');
  const code=/ENOSPC|no space left/i.test(text)?'DISK_FULL':/EACCES|EPERM|permission denied/i.test(text)?'PERMISSION':
@@ -34,6 +42,9 @@ export function classifyUpdateFailure(error={},stage='unknown'){
  error.killed?'TIMEOUT':'UNEXPECTED';
  return publicUpdateDiagnostic({code,stage,exitCode:Number.isInteger(error.code)?error.code:undefined,signal:error.signal});
 }
+/**
+ * 화면과 제보에 허용한 필드·값만 내보내는 경계입니다. 임의 객체 전체를 반환하지 않습니다.
+ */
 export function publicUpdateDiagnostic(value){
  if(!value||!Object.hasOwn(failureMessages,value.code))return undefined;
  return {code:value.code,stage:failureStages.has(value.stage)?value.stage:'unknown',message:failureMessages[value.code],
@@ -57,6 +68,9 @@ export async function writeUpdateJSON(file,value){
   try{await rename(temporary,file);}catch(e){await rm(temporary,{force:true});throw e;}
 }
 export function supportedUpdateNode(version){const [major,minor,patch]=String(version).split('.').map(Number);return Number.isInteger(major)&&Number.isInteger(minor)&&Number.isInteger(patch)&&(major>24||major===24&&minor>=13);}
+/**
+ * 그룹이 멈췄다는 표시만으로 충분하지 않습니다. 진행 중·미확인 시도와 제어 의도도 검사합니다.
+ */
 export function safeToUpdate(snapshot){return Boolean(snapshot&&['ready','stopped','resume_required'].includes(snapshot.service?.status)&&Array.isArray(snapshot.groups)&&snapshot.groups.every(g=>['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent)&&Array.isArray(snapshot.attempts)&&!snapshot.attempts.some(a=>activeAttempts.has(a.status)));}
 export function assertUpdateSafe(snapshot){if(!safeToUpdate(snapshot))throw error('UPDATE_BUSY','모든 그룹을 중지하거나 일시정지하고 진행 중·미확인 발송과 중지 확인을 먼저 해결하세요.');}
 export function publicUpdateStatus(value={}){
@@ -89,6 +103,10 @@ export async function inspectUpdateInstallation({directory,applicationRoot=resol
   try{await executeFile(git,['--version'],{timeout:5000,maxBuffer:4096,windowsHide:true});}catch{throw error('UPDATE_GIT_REQUIRED','Git을 실행하지 못했습니다. Git 설치를 확인한 뒤 관리 프로그램을 다시 여세요.');}
   return{app,node:await realpath(node),npmCli,git};
 }
+/**
+ * 공식 소스를 준비하고 사전 빌드 결과를 검사하는 실행 계획입니다.
+ * 사용자 기기에서 UI를 새로 컴파일하는 방식 대신 배포에 포함된 빌드 결과를 사용합니다.
+ */
 export function updateBuildPlan({checkout,workDirectory,node,npmCli,git}){
   return[{id:'source',command:git,args:['-c','credential.helper=','-c',`core.hooksPath=${join(workDirectory,'no-hooks')}`,'clone','--depth','1','--branch','main','--single-branch','--','https://github.com/JangKroed/dico-chat-while.git',checkout],cwd:workDirectory},
     {id:'dependencies',command:node,args:[npmCli,'--prefix','central/ui','ci'],cwd:checkout},
@@ -115,6 +133,10 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
 
   const reportStateFile=join(updates,'report-state.json');
   let reporting=null,reportedJob=null,lastSupport=null,nextMonitorAt=0;
+  /**
+   * 실패 작업 ID별 제보를 생성합니다. 동시 요청은 같은 Promise를 공유합니다.
+   * report-state.json은 재시작하거나 outbox가 정리되어도 동일 작업의 중복 제보를 막는 기록입니다.
+   */
   async function reportFailure({automatic=false}={}){
     if(reporting)return reporting;
     reporting=(async()=>{
@@ -133,6 +155,9 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     })();
     try{return await reporting;}finally{reporting=null;}
   }
+  /**
+   * UI를 열지 않아도 실패를 감시합니다. 제보 시도 간격을 제한하고 기존 자동 전송 동의를 따릅니다.
+   */
   async function monitor(){
     if(Date.now()<nextMonitorAt)return;
     try{
@@ -166,6 +191,10 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     return {...publicUpdateStatus(value),...(support?{support}:{})};
   };
   async function release(jobToken){const owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(owner?.jobToken===jobToken)await rm(lock,{recursive:true,force:true});}
+  /**
+   * 현재 상태와 설치 경로를 검사한 뒤 작업 ID·잠금·전용 작업 폴더를 준비합니다.
+   * 초기 도구 누락도 실패 상태로 기록하여 자동 진단과 제보 대상이 되게 합니다.
+   */
   async function start(){
     assertUpdateSafe(manager.snapshot());
     if(activeJob&&!applying){const latest=await readJSON(statusFile).catch(()=>undefined),owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(['completed','failed'].includes(latest?.phase)&&!owner)activeJob=undefined;}
@@ -229,6 +258,10 @@ export async function withUpdateManagerLock(directory,action){
   catch{lock.close();throw error('UPDATE_RUNTIME_ACTIVE',messages.runtime_active);}
   try{return await action();}finally{try{lock.exec('ROLLBACK');}finally{lock.close();}}
 }
+/**
+ * 준비된 앱 트리를 적용하고 부분 실패 시 이전 트리로 복구합니다.
+ * 사용자 데이터 폴더를 새 앱 파일로 덮어쓰는 작업이 아닙니다.
+ */
 export async function swapUpdateDirectories({app,prepared,backup,move=rename}){
   await mkdir(backup,{recursive:true,mode:0o700});const moved=[],installed=[];
   try{
@@ -271,6 +304,11 @@ async function restartApplication(job){
   }
   throw Object.assign(Error('Updated runtime did not become ready'),{rollbackSafe:!alive(child.pid)});
 }
+/**
+ * 준비 → 빌드 검사 → 종료 승인 → 기존 프로세스 종료 확인 → 교체 → 재시작 순서입니다.
+ * 자동 재시도는 소스/의존성 준비의 네트워크 오류만 최대 2회 허용합니다.
+ * 앱 교체나 결과 불명 상태를 무조건 반복하면 실행 중 파일과 데이터가 충돌할 수 있습니다.
+ */
 export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,waitStopped=waitForStopped,restart=restartApplication,wait=sleep}={}){
   const job=await validateJob(resolve(jobPath)),updates=join(job.directory,'updates'),lock=join(updates,'active'),statusFile=join(updates,'status.json');
   const owner=await readJSON(join(lock,'owner.json'));if(!tokenEqual(owner?.jobToken,job.jobToken))throw Error('Update lock changed');

@@ -1,3 +1,8 @@
+/**
+ * 중앙 관리 전용 확장의 service worker 진입점입니다. 루트 background.js의 단독 확장과 구분합니다.
+ * Native transport, 명령 실행기, 계정/채널 관찰, 하트비트, 관리 탭과 업데이트를 조립합니다.
+ * 주기 관찰은 상태 확인용이며, 관찰 자체가 메시지를 전송하도록 설계하지 않습니다.
+ */
 import {createDeliveryTracer} from './delivery-trace.js';
 import {currentRegistration} from './registration-state.js';
 import {managedPageDelay} from './managed-delay.js';
@@ -36,6 +41,10 @@ async function activeSourceTab(windowId){
 async function activeChannelContext(windowId){return channelTabContext(await activeSourceTab(windowId));}
 void configurePanelAction().catch(()=>{});
 chrome.runtime.onInstalled?.addListener(()=>void configurePanelAction().catch(()=>{}));
+/**
+ * 실행기가 쉬고 있고 중앙이 갱신을 허용할 때 기존 탭의 content script를 확인합니다.
+ * 발송 도중 코드가 교체되어 관찰 근거가 사라지는 일을 피하기 위한 조건입니다.
+ */
 async function refreshManagedContent(){
   if(!executor.isIdle)return;
   let status;try{status=await transport.request({type:'EXTENSION_STATUS'});}catch{return;}

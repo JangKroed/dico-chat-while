@@ -1,3 +1,7 @@
+/**
+ * 기존 단독 확장의 채널별 상태 관리입니다. 중앙 관리 스케줄러는 central/core/index.js입니다.
+ * 단독 모드의 예약·초안 준비·결과 처리와 저장소 I/O를 조합하며 두 경로의 간격 규칙을 혼동하지 마세요.
+ */
 import { receiptMeasurement, cooldownMeasurement } from './timing-calibration.js';
 import { normalizeCoordination } from './coordination.js';
 export const initialState = () => ({
@@ -55,6 +59,10 @@ export function validateSettings(settings) {
 
 // All mutations are serialized by the service worker. Persist an intent BEFORE
 // touching Discord; a lost response then requires manual reconciliation.
+/**
+ * 브라우저 API를 직접 고정하지 않고 io로 주입합니다.
+ * 발송 의도를 저장한 뒤 Discord 작업을 요청하여 응답 유실 때 이전 시도를 추적할 수 있게 합니다.
+ */
 export function createController(io) {
   const read = async () => {
     const state={...initialState(),...await io.load()};

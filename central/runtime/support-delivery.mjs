@@ -1,3 +1,8 @@
+/**
+ * 오류 제보의 저장·전송·접수 상태를 관리합니다.
+ * queue는 로컬 전송함에 넣는 작업이며, sent는 수신 측 접수 응답을 확인한 상태입니다.
+ * 자동 제보 허용과 본문/이름 포함 동의는 별도로 적용하며 업데이트 진단은 본문/이름을 제외합니다.
+ */
 import {randomBytes,randomUUID,createHash,timingSafeEqual} from 'node:crypto';
 import {mkdirSync,readFileSync,writeFileSync,renameSync,chmodSync,unlinkSync,openSync,fsyncSync,closeSync} from 'node:fs';
 import {resolve,join} from 'node:path';
@@ -126,6 +131,10 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   if(!provided||!timingSafeEqual(hash(provided),hash(credentials.receiverToken)))throw fail('보고서 수신 연결 키가 필요합니다.',401,'SUPPORT_RECEIVER_UNAUTHORIZED');
   return true;
  }
+ /**
+  * 제보 생성 요청을 직렬화하고 동의·중복 사건을 검사한 뒤 보고서와 전송함을 저장합니다.
+  * 자동 전송이 꺼진 경우 자동 요청은 건너뜁니다. 저장 완료를 메일 접수 완료로 표시하지 않습니다.
+  */
  function queue(options={}){
   const job=queueTail.then(async()=>{
    if(closed)throw fail('자동 제보 처리가 종료되었습니다.',409);
@@ -146,6 +155,9 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   });
   queueTail=job.catch(()=>{});return job;
  }
+ /**
+  * 한 보고서를 전송하고 접수 응답을 검사합니다. 시간 초과나 실패는 전송함 상태에 남깁니다.
+  */
  async function transmit(item){
   item.status='sending';item.attempts++;save();
   controller=new AbortController();const timeout=setTimeout(()=>controller?.abort(),timeoutMs);timeout.unref?.();
@@ -168,6 +180,9 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
    item.nextAttemptAt=now()+Math.min(3600000,retryBaseMs*2**Math.min(10,item.attempts-1));
   }finally{clearTimeout(timeout);controller=null;save();}
  }
+ /**
+  * 전송 가능한 대기 항목을 처리합니다. 이미 flush가 진행 중이면 같은 작업을 공유합니다.
+  */
  function flush({force=false}={}){
   if(flushing)return flushing;
   flushing=(async()=>{
@@ -185,6 +200,9 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
    return status();
   })().finally(()=>{flushing=null;});return flushing;
  }
+ /**
+  * 직접 수신 서버로 동작할 때의 입구입니다. 인증·보고서 검증 후 중복 reportId를 구분하여 접수합니다.
+  */
  async function receive(input,authorization){
   authorizeReceiver(authorization);
   const inspected=inspectSupportReport(input),report=inspected.report;
@@ -198,6 +216,9 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
   if(!safeId(receiptId)||!state.inbox.some(item=>item.receiptId===receiptId))throw fail('접수된 보고서를 찾을 수 없습니다.',404,'SUPPORT_RECEIPT_NOT_FOUND');
   return inspectSupportReport(readJSON(inPath(receiptId),null));
  }
+ /**
+  * 보관 기간이 지난 전송 완료 보고서와 수신 자료를 정리합니다. 대기/실패 보고서를 완료 자료처럼 삭제하지 않습니다.
+  */
  function prune(){
   const cutoff=now()-state.settings.retentionDays*DAY;
   const removeOut=state.outbox.filter(item=>item.status==='sent'&&item.sentAt<cutoff),removeIn=state.inbox.filter(item=>item.receivedAt<cutoff);

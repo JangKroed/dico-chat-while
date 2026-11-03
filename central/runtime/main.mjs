@@ -1,3 +1,8 @@
+/**
+ * 중앙 관리 Node.js 프로세스의 시작점입니다.
+ * 시작 순서: 전용 데이터 폴더/프로세스 잠금 → 코어와 서비스 생성 → HTTP 연결 → 주기 처리.
+ * 종료 시 연결과 저장소를 정리하며, 업데이트 종료와 사용자 종료 의도를 구분합니다.
+ */
 import http from 'node:http';
 import {randomBytes} from 'node:crypto';
 import {mkdir,open,readFile,rename,unlink,chmod} from 'node:fs/promises';
@@ -7,12 +12,20 @@ import {spawn} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {dataDirectory,readDescriptor} from '../host/paths.mjs';
 
+/**
+ * 임시 파일에 쓰고 디스크 동기화 후 이름을 바꿉니다.
+ * 쓰기 도중 종료되어 최종 JSON 파일이 일부만 남는 가능성을 줄입니다.
+ */
 export async function atomicJSON(path,value) {
   const handle=await open(path+'.tmp','w',0o600);
   try{await handle.writeFile(JSON.stringify(value));await handle.sync();}finally{await handle.close();}
   await rename(path+'.tmp',path);
 }
 async function readJSON(path) {try{return JSON.parse(await readFile(path,'utf8'));}catch(e){if(e.code==='ENOENT')return undefined;throw e;}}
+/**
+ * SQLite의 OS 잠금으로 관리 프로그램의 중복 실행을 막습니다.
+ * 프로세스가 종료되면 잠금도 해제되므로 오래된 PID 파일 삭제 경쟁에 의존하지 않습니다.
+ */
 export async function acquireLock(dir) {
   // An OS-backed SQLite exclusive lock dies with its process. Never race a
   // stale PID file deletion against another process acquiring the same file.
@@ -21,6 +34,11 @@ export async function acquireLock(dir) {
   catch{lock.close();throw Error('이미 관리 프로그램이 실행 중이거나 저장소 잠금을 사용할 수 없습니다.');}
   return async()=>{try{lock.exec('ROLLBACK');}finally{lock.close();}};
 }
+/**
+ * 각 서비스를 조립하고 런타임 핸들을 반환합니다.
+ * 교체 가능한 모듈은 잠금을 얻은 뒤 로드하여 업데이트와 시작이 동시에 파일을 읽지 않게 합니다.
+ * 제보 기능의 초기화 실패가 본래 발송 관리 서비스까지 중단시키지 않도록 별도로 처리합니다.
+ */
 export async function startCentralRuntime({directory=dataDirectory(),port,uiDirectory=resolve(dirname(fileURLToPath(import.meta.url)),'../ui/dist')}={}) {
   await mkdir(directory,{recursive:true,mode:0o700});if(process.platform!=='win32')await chmod(directory,0o700);const unlock=await acquireLock(directory);
   let manager,server,app,timer,unsubscribe,updates,lanAccess,supportDelivery,closing=false;

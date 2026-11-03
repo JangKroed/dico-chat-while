@@ -604,3 +604,60 @@ test('an exact submitted-and-cleared receipt retains failure indicator as diagno
  await r.client.handleCommand(cmd('COMMIT_PERMIT'));
  assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').deliveryEvidence.failedSeen,true);
 });
+
+test('중단은 발송 응답 대기열을 기다리지 않고 해당 탭에 취소 신호를 전달한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ let release,started;const ready=new Promise(resolve=>started=resolve);
+ const original=r.chrome.tabs.sendMessage;
+ r.chrome.tabs.sendMessage=async(id,m)=>{r.messages.push(m);if(m.type==='DICO_DELIVER'){started();return new Promise(resolve=>release=resolve);}if(m.type==='DICO_CANCEL_DELIVERY'){release({status:'uncertain',code:'EXECUTION_STOPPED',deliveryEvidence:{enterAttempted:true}});return{cancelRequested:true};}return original(id,m);};
+ const sending=r.client.handleCommand(cmd('COMMIT_PERMIT'));await ready;
+ const stopping=r.client.handleCommand({id:'stop-pending',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{action:'stop',groupId:'group',runId:'run',attemptId:'attempt'}});
+ await new Promise(resolve=>setImmediate(resolve));
+ const signalled=r.messages.some(m=>m.type==='DICO_CANCEL_DELIVERY'&&m.delivery.id==='attempt');
+ if(!signalled)release({status:'uncertain'});
+ await Promise.all([sending,stopping]);assert.equal(signalled,true);
+ assert.ok(r.reports.some(m=>m.commandId==='stop-pending'&&m.status==='applied'));
+});
+test('오래된 세션의 중단 명령은 현재 실행의 입력 게이트를 닫지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ await r.client.handleCommand({...cmd('CONTROL','stale-stop'),sessionId:'old'});
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.phase,'confirmed');
+});
+
+test('이미 적용된 이전 실행의 중단 재전달은 새 실행을 막지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const stop={id:'old-control',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{action:'stop',groupId:'group',runId:'run',attemptId:'attempt'}};
+ await r.client.handleCommand(stop);
+ const next={...payload,attemptId:'next',runId:'next-run'};
+ await r.client.handleCommand({...cmd('PREPARE','next-prepare'),payload:next});await r.client.handleCommand(stop);
+ await r.client.handleCommand({...cmd('COMMIT_PERMIT','next-commit'),payload:{...next,permitId:'next-permit'}});
+ assert.equal(r.state.attempts.next.phase,'confirmed');
+});
+
+test('자동 복구는 정확한 완료 영수증을 다시 읽고 Enter 없이 결과를 복구한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0}:{status:'uncertain'};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'unknown');
+ const calls=[];r.chrome.tabs.sendMessage=async(id,m)=>{calls.push(m.type);return m.type==='DICO_DELIVERY_RECEIPT'?clearedComposerReceipt():{status:'uncertain'};};
+ await r.client.handleCommand(cmd('RECONCILE'));
+ assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(calls.includes('DICO_DELIVER'),false);
+});
+
+test('복구 영수증 조회 중 세션이 바뀌면 과거 성공을 현재 결과로 저장하지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0}:{status:'uncertain'};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ r.chrome.tabs.sendMessage=async(id,m)=>{if(m.type==='DICO_DELIVERY_RECEIPT'){await r.client.setSession({instanceId:'instance',sessionId:'new-session'});return clearedComposerReceipt();}return{status:'uncertain'};};
+ await r.client.handleCommand(cmd('RECONCILE'));
+ assert.notEqual(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.reports.some(m=>m.type==='DELIVERY_RESULT'&&m.outcome==='confirmed'),false);
+});
+
+test('로컬 완료 저장 후 보고가 유실돼도 현재 복구 명령 ID로 성공을 다시 보고한다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ const original=r.transport.request;r.transport.request=async m=>{if(m.type==='DELIVERY_RESULT')throw Error('report lost');return original(m);};
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0}:clearedComposerReceipt();
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));assert.equal(r.state.attempts.attempt.phase,'confirmed');
+ r.transport.request=original;await r.client.handleCommand(cmd('RECONCILE','recovery-now'));
+ assert.ok(r.reports.some(m=>m.type==='DELIVERY_RESULT'&&m.outcome==='confirmed'&&m.recoveryCommandId==='recovery-now'));
+});
