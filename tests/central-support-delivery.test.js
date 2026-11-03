@@ -165,3 +165,18 @@ test('lowering privacy aborts an in-flight HTTP request and retries only the red
  let deadline;try{await Promise.race([sending,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('privacy revocation did not abort the active request')),300);})]);}finally{clearTimeout(deadline);}
  assert.equal(delivery.status().counts.failed,1);await delivery.flush({force:true});assert.equal(delivery.status().counts.sent,1);assert.equal(payloads.length,2);assert.doesNotMatch(JSON.stringify(payloads[1]),/PRIVATE BODY|PRIVATE NAME|NEVER-/);assert.equal(payloads[1].privacy.includeBodies,false);
 });
+
+test('automatic update reports preserve diagnostic codes, omit message content and deduplicate jobs',async t=>{
+ const {delivery,dir}=fixture(t);
+ const options={automatic:true,incidentId:'update:'+('a'.repeat(32)),updateDiagnostic:{code:'PROCESS_BLOCKED',stage:'dependencies',signal:'SIGKILL',exitCode:1,retryCount:2}};
+ assert.equal(await delivery.queue(options),null);
+ delivery.configure({enabled:true,autoSend:true,includeBodies:true,includeNames:true});
+ const item=await delivery.queue(options),again=await delivery.queue(options);
+ assert.equal(item.id,again.id);assert.equal(delivery.status().outbox.length,1);
+ const report=JSON.parse(readFileSync(join(dir,'outbox',item.id+'.json'),'utf8'));
+ assert.equal(report.runtime.updateDiagnostic.code,'PROCESS_BLOCKED');
+ assert.equal(report.runtime.updateDiagnostic.signal,'SIGKILL');
+ assert.equal(report.runtime.updateDiagnostic.retryCount,2);
+ assert.equal(JSON.stringify(report).includes('PRIVATE BODY'),false);
+ assert.equal(JSON.stringify(report).includes('PRIVATE NAME'),false);
+});

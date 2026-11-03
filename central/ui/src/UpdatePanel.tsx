@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, getUpdateStatus, requestErrorMessage, startUpdate, type Snapshot, type UpdateStatus } from './api'
+import { ApiError, getUpdateStatus, reportUpdateFailure, requestErrorMessage, startUpdate, type Snapshot, type UpdateStatus } from './api'
 import { browserOnline } from './onboarding'
 import { extensionVersionState, updateBlockers, updateInProgress, updatePollingDecision } from './update'
 import { UPDATE_RECONNECT_KEY } from './reconnect'
@@ -7,7 +7,33 @@ import { UPDATE_RECONNECT_KEY } from './reconnect'
 const phases:Record<UpdateStatus['phase'],string>={idle:'업데이트 대기',preparing:'새 버전 준비 중',ready:'새 버전 준비 완료',applying:'업데이트 적용 · 재시작 중',completed:'업데이트 완료',failed:'업데이트 실패'}
 const timestamp=(value?:string|number)=>value===undefined?'—':new Date(value).toLocaleString('ko-KR')
 
+
+const reportLabels:Record<string,string>={
+ disabled:'오류 제보가 꺼져 있어 자동 전송하지 않았습니다. 설정의 오류 제보에서 전송을 허용할 수 있습니다.',
+ manual:'자동 전송이 꺼져 있습니다. 아래 버튼으로 수집된 진단 정보를 보낼 수 있습니다.',
+ unconfigured:'관리자 수신 연결이 없어 전송을 기다리고 있습니다.',
+ collecting:'진단 정보를 자동으로 수집하고 있습니다.',
+ queued:'진단 정보 전송 대기 중입니다. 프로그램이 자동으로 전송합니다.',
+ sending:'관리자에게 진단 정보를 보내고 있습니다.',
+ sent:'관리자 접수 완료',
+ failed:'진단 정보 전송을 완료하지 못했습니다. 전송 상태는 오류 제보 설정에 보존됩니다.',
+ unavailable:'진단 제보 기능을 시작하지 못했습니다. 실패 기록은 보존되어 있습니다.'
+}
+export function UpdateFailureDetails({result,onReport,sending=false}:{result:UpdateStatus;onReport:()=>void;sending?:boolean}){
+ return <div className="update-next-step" role="status">
+  <strong>자동 진단 결과</strong>
+  <p>{result.diagnostic?.message||'기록된 실패 단계와 설치 상태를 확인하고 있습니다.'}</p>
+  {result.diagnostic&&<small>진단 코드 {result.diagnostic.code} · 단계 {result.diagnostic.stage}</small>}
+  {Boolean(result.retryCount)&&<p>자동 재시도 {result.retryCount}회 후 결과입니다.</p>}
+  <p>{reportLabels[result.support?.status||'collecting']||reportLabels.unavailable}</p>
+  {result.support?.reportId&&<small>제보 번호 {result.support.reportId}</small>}
+  {result.support?.receiptId&&<p>접수 번호 {result.support.receiptId}</p>}
+  {result.support?.status==='manual'&&<button className="outline small" disabled={sending} onClick={onReport}>{sending?'진단 정보 보내는 중…':'진단 정보 보내기'}</button>}
+ </div>
+}
+
 export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(page:'groups'|'history'|'connections')=>void;appVersion?:string}) {
+  const [sendingReport,setSendingReport]=useState(false)
   const [result,setResult]=useState<UpdateStatus|null>(null),[error,setError]=useState(''),[checking,setChecking]=useState(true),[submitting,setSubmitting]=useState(false),[pollKey,setPollKey]=useState(0),[paused,setPaused]=useState<'connection_lost'|'busy_timeout'|null>(null)
   const alive=useRef(true),postController=useRef<AbortController|null>(null)
   const lastResult=useRef<UpdateStatus|null>(null)
@@ -37,6 +63,7 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
     setChecking(true);void poll()
     return()=>{active=false;window.clearTimeout(timer);window.clearTimeout(deadline);controller?.abort()}
   },[pollKey,submitting])
+  const sendReport=async()=>{setSendingReport(true);setError('');try{const next=await reportUpdateFailure();if(alive.current)setResult(next)}catch(e){if(alive.current)setError(requestErrorMessage(e))}finally{if(alive.current)setSendingReport(false)}}
   const blockers=updateBlockers(s),updating=updateInProgress(result?.phase)
   const start=async()=>{
     if(busy||submitting||updating||blockers.length||!result||error)return
@@ -51,12 +78,12 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
   return <section className="panel update-panel" aria-label="프로그램 업데이트">
     <div className="panel-head"><div><h2>프로그램 · 확장 업데이트</h2><p>새 버전을 준비하고 관리 프로그램을 다시 시작합니다.</p></div><button className="outline small" disabled={checking||submitting} onClick={()=>setPollKey(k=>k+1)}>{checking?'확인 중…':'상태 다시 확인'}</button></div>
     <div className="update-body">
-      <div className="update-state" role="status" aria-live="polite"><span className={`setup-status ${result?.phase==='failed'?'error':result?.phase==='completed'?'ok':'warning'}`}>{result?phases[result.phase]:'업데이트 상태 확인 중'}</span>{result?.version&&<span className="update-version">버전 정보 {result.version}</span>}{result?.message&&<p>{result.message}</p>}{updating&&<progress aria-label="업데이트 진행 중"/>}{result?.updatedAt&&<small>최근 갱신 {timestamp(result.updatedAt)}</small>}</div>
+      <div className="update-state" role="status" aria-live="polite"><span className={`setup-status ${result?.phase==='failed'?'error':result?.phase==='completed'?'ok':'warning'}`}>{result?.retrying?'자동 복구 중':result?phases[result.phase]:'업데이트 상태 확인 중'}</span>{result?.version&&<span className="update-version">버전 정보 {result.version}</span>}{result?.message&&<p>{result.message}</p>}{updating&&<progress aria-label="업데이트 진행 중"/>}{result?.updatedAt&&<small>최근 갱신 {timestamp(result.updatedAt)}</small>}</div>
       {error&&<p className="update-error" role="alert">{error}</p>}
       {paused==='connection_lost'&&<div className="editor-note">업데이트 상태를 계속 받지 못해 자동 확인을 잠시 멈췄습니다. 재시작 중에는 연결이 잠시 끊기며 현재 탭에서 자동으로 다시 연결합니다. 잠시 기다리거나 ‘상태 다시 확인’을 눌러 주세요. 현재 화면만으로 완료 여부를 판단할 수 없습니다.</div>}
       {paused==='busy_timeout'&&<div className="editor-note">준비·적용 상태가 오래 이어져 자동 확인을 잠시 멈췄습니다. 중복 실행하지 말고 잠시 뒤 ‘상태 다시 확인’으로 진행 상황을 확인하세요.</div>}
-      {result?.phase==='failed'&&<div className="update-next-step"><strong>다음 확인</strong><p>위 실패 사유와 PC의 네트워크·저장 공간을 확인하세요. 모든 발송과 중지 확인을 마친 뒤 ‘업데이트 실행’으로 다시 시도할 수 있습니다. 실패가 계속되면 설치·연결 진단도 확인하세요.</p></div>}
-      <p className="update-description">고정된 공식 저장소의 새 소스를 별도 작업 공간에서 받아 설치와 빌드를 마친 뒤 적용합니다. 관리 프로그램이 다시 시작되면 같은 주소의 현재 탭에서 연결을 복구하고, 이 화면에서 시작한 업데이트는 새 버전 화면으로 이어집니다. 새 창을 열거나 주소를 바꿀 필요가 없습니다.</p>
+      {result?.phase==='failed'&&<UpdateFailureDetails result={result} onReport={()=>void sendReport()} sending={sendingReport}/>}
+      <p className="update-description">공식 저장소에서 검증된 업데이트 파일을 받아 준비·검사를 마친 뒤 적용합니다. 일시적인 연결 오류는 자동 재시도하고, 실패 원인과 제보 상태를 이 화면에 표시합니다. 관리 프로그램이 다시 시작되면 같은 주소의 현재 탭에서 연결을 복구하고, 이 화면에서 시작한 업데이트는 새 버전 화면으로 이어집니다. 새 창을 열거나 주소를 바꿀 필요가 없습니다.</p>
       {blockers.length>0&&<div className="update-blockers"><strong>업데이트 전 남은 항목</strong><ul>{blockers.map(reason=><li key={reason}>{reason}</li>)}</ul><div className="control-row"><button className="text-action" onClick={()=>go('groups')}>그룹·중지 상태 확인 →</button>{s.attempts.some(a=>a.status==='unknown')&&<button className="text-action" onClick={()=>go('history')}>미확인 실행 기록 →</button>}</div></div>}
       <div className="update-actions"><button className="primary" disabled={busy||submitting||updating||blockers.length>0||!result||Boolean(error)} onClick={()=>void start()}>{submitting?'업데이트 요청 중…':updating?'업데이트 진행 중…':'업데이트 실행'}</button><small>설정과 실행 기록은 유지합니다. 업데이트 후 그룹을 자동으로 시작하거나 재개하지 않습니다.</small></div>
       <details className="update-migration"><summary>0.4.3 이하에서 처음 전환하는 경우</summary><p>0.4.3 이하 관리 프로그램은 주소와 연결 세션을 재시작 후 유지하는 기능이 없어, 처음 0.4.4로 옮길 때는 관리 화면을 한 번 다시 열어 인증해야 할 수 있습니다. 0.4.4부터 시작하는 이후 업데이트는 현재 주소와 탭을 유지합니다.</p><p>업데이트 버튼이 없는 0.4.0·0.4.1은 업데이트 기능이 포함된 관리 프로그램과 확장으로 최초 설치를 한 번 옮겨야 합니다. 브라우저 확장도 관리 경로에서 설치되어 있는지 확인하세요.</p></details>

@@ -135,7 +135,7 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
    const duplicate=options.incidentId&&state.outbox.find(item=>item.incidentId===options.incidentId);if(duplicate)return copy(duplicate);
    const settings={...state.settings};
    let report;pendingPolicies.add(settings);
-   try{report=await createReport({...(options.attemptId!==undefined?{attemptId:options.attemptId}:{}),from:options.from??Math.max(0,now()-3600000),to:options.to??now(),includeBodies:settings.includeBodies&&(options.automatic||options.includeBodies!==false),includeNames:settings.includeNames&&(options.automatic||options.includeNames!==false)});}finally{pendingPolicies.delete(settings);}
+   try{report=await createReport({...(options.updateDiagnostic?{updateDiagnostic:options.updateDiagnostic}:{}),...(options.attemptId!==undefined?{attemptId:options.attemptId}:{}),from:options.from??Math.max(0,now()-3600000),to:options.to??now(),includeBodies:!options.updateDiagnostic&&settings.includeBodies&&(options.automatic||options.includeBodies!==false),includeNames:!options.updateDiagnostic&&settings.includeNames&&(options.automatic||options.includeNames!==false)});}finally{pendingPolicies.delete(settings);}
    if(options.userDescription!==undefined)report.userDescription=options.userDescription;
    if(closed||!state.settings.enabled||options.automatic&&!state.settings.autoSend)return null;
    const clean=restrictPrivacy(report,{includeBodies:settings.includeBodies&&state.settings.includeBodies,includeNames:settings.includeNames&&state.settings.includeNames});

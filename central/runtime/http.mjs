@@ -171,6 +171,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
             if(!lanAccess)throw fail(404,'내부망 접속 기능이 준비되지 않았습니다.');
             return json(res,200,await(path==='/api/lan-access'?lanAccess.update(payload):lanAccess.pair()));
           }
+          if(path==='/api/updates/report'){
+            if(!updates?.reportFailure)throw fail(503,'업데이트 진단 제보 기능이 준비되지 않았습니다.');
+            await updates.reportFailure({automatic:false});return json(res,202,await updates.status());
+          }
           if(path==='/api/updates'){
             if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
             return json(res,202,await updates.start());

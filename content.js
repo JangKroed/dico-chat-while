@@ -199,8 +199,8 @@
     ownIdentityProof=identity?.verified===true&&/^\d{17,20}$/.test(identity.accountId||'')&&identity.guildId===target.guildId&&identity.channelId===target.channelId&&panel
       ?{...identity,panel,root:ownPanelRoot(panel),path:location.pathname,checkedAt:Date.now()}:null;
   }
-  function proofMatchesPanel(proof,panel){
-    if(!proof||proof.panel!==panel||proof.root!==ownPanelRoot(panel)||proof.path!==location.pathname||Date.now()-proof.checkedAt<0||Date.now()-proof.checkedAt>2000)return false;
+  function proofMatchesPanel(proof,panel,ignoreAge=false){
+    if(!proof||proof.panel!==panel||proof.root!==ownPanelRoot(panel)||proof.path!==location.pathname||Date.now()-proof.checkedAt<0||(!ignoreAge&&Date.now()-proof.checkedAt>2000))return false;
     const clean=value=>typeof value==='string'?value.replace(/[\u200b-\u200d\ufeff]/g,'').trim():'';
     const root=proof.root,username=proof.username;
     const names=[...(root.querySelectorAll?.('[class*="username"], [class*="userTag"], [class*="hovered"], [data-username], [class*="panelSubtextContainer"] *')||[])].map(node=>clean(node.getAttribute?.('data-username')||node.textContent));
@@ -501,7 +501,7 @@
     };
     const expectedDraft=Boolean(submissionTarget&&editor.isConnected&&composerMatches(editor,text));
     const submittedEditor=editor,submittedForm=editor.closest?.('form');
-    let submitted=false,composerReadable=false,editorReacquired=false,scopeChanged=false;
+    let submitted=false,composerReadable=false,editorReacquired=false,scopeChanged=false,ownSendFailed=false;
     let observer, timer, poll, resolve, latest, deadline=null, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
@@ -521,8 +521,11 @@
     const check = (freshIdentity=false) => {
       if (finished) return;
       if(submissionTarget){
-        const targetMatched=matchesTarget(submissionTarget),accountMatched=coordinatedAccountMatches(submissionTarget);
-        if(!targetMatched||!accountMatched)scopeChanged=true;
+        const targetMatched=matchesTarget(submissionTarget);
+        // Expired proof is unknown, not evidence of an account switch.
+        const panel=ownPanel(),ids=ownPanelIds(panel);
+        const accountChanged=ids.size>0?!(ids.size===1&&ids.has(submissionTarget.ownUserId)):Boolean(ownIdentityProof&&(!proofMatchesPanel(ownIdentityProof,panel,true)||ownIdentityProof.accountId!==submissionTarget.ownUserId));
+        if(!targetMatched||accountChanged)scopeChanged=true;
         const found=editors(),candidate=found.length===1?found[0]:null;
         // A Slate leaf can remount during submission while its live channel form
         // stays intact. Reacquire only that unique composer in this operation;
@@ -551,7 +554,12 @@
         // Keep failure diagnostics even when emoji/Markdown text differs.
         // Managed completion still follows the verified submitted composer.
         if (row.querySelector('[class*="isFailed"]') || row.matches('[class*="isFailed"]')) {
-          evidence.failedSeen = true;detail = 'Discord가 메시지를 전송 실패로 표시했습니다.';continue;
+          evidence.failedSeen = true;detail = 'Discord가 메시지를 전송 실패로 표시했습니다.';
+          const failedId=node.id.match(/^message-content-(\d{17,20})$/)?.[1];
+          const failedAt=failedId?Number((BigInt(failedId)>>22n)+1420070400000n):0;
+          const tracked=locallySending.has(node.id)||localNodes.has(node)||localRows.has(row)||replacementNodes.has(node);
+          if(submitted&&evidence.sendingSeen&&matchesRenderedText(text,messageText(node))&&(tracked||(author===userId&&failedAt>=startedAt&&failedAt<=Date.now()+2000)))ownSendFailed=true;
+          continue;
         }
         if (!matchesRenderedText(text, messageText(node))) {
           if(!evidence.matchingMessage)detail = '새 메시지는 있지만 문구가 일치하지 않습니다. Markdown·이모지 표시 차이를 확인하세요.';
@@ -597,9 +605,10 @@
         // The user's completion criterion is the actual submitted composer
         // becoming empty. There is no duration or posted-message requirement.
         if(valid&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor,sameComposer:true,editorReacquired,targetMatched:true,accountMatched:true}});return;}
+        if(ownSendFailed&&!empty){finish({status:'uncertain',code:'DISCORD_SEND_FAILED',deliveryEvidence:{composerRetained:composerMatches(editor,text)},error:'이번 전송에 실패 표시가 확인되어 추가 Enter를 중지하고 초안을 보존합니다.'});return;}
         // Give the page its next observation turn; do not repeatedly spend a
         // 25-second post-confirmation window on a retained exact draft.
-        if(freshIdentity&&deadline!==null&&valid&&composerMatches(editor,text)&&!sendingActive&&!evidence.ownMessageSeen)finish({status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{composerRetained:true},error:'입력창에 같은 문구가 남아 있어 실제 쿨다운 해제 후 재시도합니다.'});
+        if(freshIdentity&&deadline!==null&&valid&&composerMatches(editor,text)&&!evidence.sendingSeen&&!sendingActive&&!evidence.ownMessageSeen)finish({status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{composerRetained:true},error:'입력창에 같은 문구가 남아 있어 실제 쿨다운 해제 후 재시도합니다.'});
       }
     };
     observer = new MutationObserver(records=>{linkReplacements(records);check();});
@@ -611,7 +620,7 @@
       const retained = Boolean(liveEditor&&composerMatches(liveEditor,text)&&(!submissionTarget||evidence.sameComposer));
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
       if(submissionTarget){
-        if(managed&&retained&&composerReadable&&evidence.targetMatched&&evidence.accountMatched&&(evidence.sendingActive||evidence.ownMessageSeen)){deadline=Date.now()+25000;return;}
+        if(managed&&retained&&composerReadable&&evidence.targetMatched&&evidence.accountMatched&&(evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen)){deadline=Date.now()+25000;return;}
         const code=evidence.failedSeen?'DISCORD_SEND_FAILED':!evidence.targetMatched?'TARGET_MISMATCH':!evidence.accountMatched?'ACCOUNT_UNVERIFIED':!evidence.editorPresent?'COMPOSER_EDITOR_MISSING':!evidence.sameComposer?'COMPOSER_EDITOR_CHANGED':!composerReadable?'COMPOSER_STATE_UNREADABLE':retained?'DELIVERY_DRAFT_RETAINED':!evidence.composerEmpty?'COMPOSER_DRAFT_CHANGED':'COMPOSER_STATE_UNREADABLE';
         const errors={DISCORD_SEND_FAILED:'Discord가 전송 실패를 표시했습니다. 초안과 오류 표시를 확인하세요.',TARGET_MISMATCH:'전송 후 다른 채널로 이동했습니다. 원래 채널의 입력 상태를 확인하세요.',ACCOUNT_UNVERIFIED:'전송 후 등록 계정을 확인할 수 없습니다. 로그인 계정과 입력 상태를 확인하세요.',COMPOSER_EDITOR_MISSING:'전송 후 입력창이 보이지 않습니다. 전송용 채널을 확인하세요.',COMPOSER_EDITOR_CHANGED:'전송 후 입력창이 바뀌었습니다. 남은 초안과 입력 상태를 확인하세요.',COMPOSER_STATE_UNREADABLE:'전송 후 입력 상태를 읽을 수 없습니다. 초안을 보존합니다.',COMPOSER_DRAFT_CHANGED:'전송 후 입력 문구가 바뀌었습니다. 변경된 초안을 보존합니다.',DELIVERY_DRAFT_RETAINED:'입력창에 문구가 남아 있습니다. 진행 중인 전송 표시와 초안을 확인하세요.'};
         finish({status:'uncertain',code,deliveryEvidence:{composerRetained:retained},error:errors[code]});return;
@@ -627,7 +636,7 @@
         await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;
         if(submissionTarget)await refreshOwnIdentity(submissionTarget,true);if(finished)break;
         if(deadline!==null&&Date.now()>=deadline)expire(true);else check(true);
-        if(!finished&&submitted&&(evidence.sendingActive||evidence.ownMessageSeen)&&Date.now()-lastObservationAt>=1000&&observationPermission){
+        if(!finished&&submitted&&(evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen)&&Date.now()-lastObservationAt>=1000&&observationPermission){
           lastObservationAt=Date.now();report({...evidence,observationPending:true});
           const permission=await observationPermission();if(finished)break;
           if(permission?.allowed!==true)finish({status:'uncertain',code:permission?.code||'OBSERVATION_CANCELLED',error:'자동 관찰이 중지되어 남은 초안을 보존합니다.'});
@@ -649,8 +658,8 @@
         check();
         if(finished)return latest;
         const fields=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if(managed&&submissionTarget&&evidence.sameComposer&&evidence.targetMatched&&evidence.accountMatched&&composerReadable&&composerMatches(editor,text)&&(evidence.sendingActive||evidence.ownMessageSeen))return{status:'observation-pending'};
-        if((submissionTarget?evidence.sendingActive||evidence.ownMessageSeen:fields.some(key=>evidence[key])) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor || !composerMatches(editor,text))return{status:'uncertain',code:'RETRY_DELIVERY_AMBIGUOUS',error:'이전 Enter 이후 게시 기록 또는 입력창이 변경되어 추가 전송을 중지합니다.',deliveryEvidence:{...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(editor.isConnected&&composerMatches(editor,text))}};
+        if(managed&&submissionTarget&&evidence.sameComposer&&evidence.targetMatched&&evidence.accountMatched&&composerReadable&&composerMatches(editor,text)&&(evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen))return{status:'observation-pending'};
+        if((submissionTarget?evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen:fields.some(key=>evidence[key])) || !editor.isConnected || editors().length!==1 || editors()[0]!==editor || !composerMatches(editor,text))return{status:'uncertain',code:'RETRY_DELIVERY_AMBIGUOUS',error:'이전 Enter 이후 게시 기록 또는 입력창이 변경되어 추가 전송을 중지합니다.',deliveryEvidence:{...Object.fromEntries(fields.map(key=>[key,evidence[key]===true])),composerRetained:Boolean(editor.isConnected&&composerMatches(editor,text))}};
         return null;
       },
       rearm(){if(finished)return false;promise=new Promise(done=>{resolve=done;});armTimeout();return true;},
@@ -1021,7 +1030,7 @@
         evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;
         const flags=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
-        if(outcome.status!=='draft-retained'||evidence.maxSendRetries!==null&&retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
+        if(outcome.status!=='draft-retained'||evidence.maxSendRetries!==null&&retryCount>=evidence.maxSendRetries||outcome.deliveryEvidence?.composerRetained!==true||(target.coordinated?outcome.deliveryEvidence?.sendingSeen===true||outcome.deliveryEvidence?.sendingActive===true||outcome.deliveryEvidence?.ownMessageSeen===true:flags.some(key=>outcome.deliveryEvidence?.[key]!==false)))return finishOutcome(outcome);
         const observed=await retryObservation();if(observed)return finishOutcome(observed);
         retryCount++;
       }

@@ -64,16 +64,19 @@ test('update apply requires its job token and fresh idle state before scheduling
 
 test('update HTTP endpoints require UI session plus CSRF and private bridge plus job token',async()=>{
   const {createCentralApplication}=await import('../central/runtime/http.mjs'),{Readable}=await import('node:stream');
-  const origin='http://127.0.0.1:43127',bridgeToken='b'.repeat(64);let started=0,applied=0,phase='idle',applying=false;
-  const updates={status:async()=>({phase,message:'safe status'}),start:async()=>{started++;return{phase:'preparing',message:'safe status'};},apply:async payload=>{if(payload.jobToken!=='private-job')throw Object.assign(Error('작업 인증 필요'),{status:401});applied++;return{accepted:true};},isApplying:()=>applying};
+  const origin='http://127.0.0.1:43127',bridgeToken='b'.repeat(64);let started=0,applied=0,reported=0,phase='idle',applying=false;
+  const updates={reportFailure:async()=>{reported++;},status:async()=>({phase,message:'safe status'}),start:async()=>{started++;return{phase:'preparing',message:'safe status'};},apply:async payload=>{if(payload.jobToken!=='private-job')throw Object.assign(Error('작업 인증 필요'),{status:401});applied++;return{accepted:true};},isApplying:()=>applying};
   const app=createCentralApplication({manager:{snapshot:idle,execute:()=>({}),subscribe:()=>()=>{}},origin,bridgeToken,updates});
   const request=async(path,{method='GET',payload,headers={},cookie}={})=>{
     const req=Readable.from(payload===undefined?[]:[JSON.stringify(payload)]);Object.assign(req,{method,url:path,headers:{host:'127.0.0.1:43127',...(payload===undefined?{}:{'content-type':'application/json'}),...(cookie?{cookie}:{}),...headers}});
     return new Promise((accept,reject)=>{const result={headers:{},body:'',status:200};const res={setHeader:(k,v)=>{result.headers[k.toLowerCase()]=v;},writeHead:s=>{result.status=s;},end:value=>{result.body+=value||'';accept(result);},on(){}};Promise.resolve(app.handler(req,res)).catch(reject);});
   };
+  assert.equal((await request('/api/updates/report',{method:'POST',payload:{}})).status,401);
   assert.equal((await request('/api/updates')).status,401);
   const session=await request('/api/session',{method:'POST',payload:{token:app.issueBootstrap()},headers:{origin}}),cookie=session.headers['set-cookie'].split(';')[0],csrf=JSON.parse(session.body).csrfToken;
   assert.equal((await request('/api/updates',{cookie})).status,200);
+  assert.equal((await request('/api/updates/report',{method:'POST',cookie,payload:{},headers:{origin}})).status,403);assert.equal(reported,0);
+  assert.equal((await request('/api/updates/report',{method:'POST',cookie,payload:{},headers:{origin,'x-dico-csrf':csrf}})).status,202);assert.equal(reported,1);
   assert.equal((await request('/api/updates',{method:'POST',cookie,payload:{},headers:{origin}})).status,403);assert.equal(started,0);
   assert.equal((await request('/api/updates',{method:'POST',cookie,payload:{},headers:{origin,'x-dico-csrf':csrf}})).status,202);assert.equal(started,1);
   assert.equal((await request('/api/bridge/update/apply',{method:'POST',payload:{jobToken:'private-job'}})).status,401);
@@ -176,4 +179,49 @@ test('completed updates report installed app version even when an older worker r
   await writeFile(join(directory,'updates/status.json'),JSON.stringify({phase:'completed',version:'0.4.2'}));
   const controller=createUpdateController({directory,manager:{snapshot:()=>idle()},shutdown:async()=>{}});
   assert.equal((await controller.status()).version,'0.4.3');
+});
+
+test('update failures are classified without exposing raw error paths or credentials',async()=>{
+ const {classifyUpdateFailure}=await import('../central/runtime/updater.mjs');
+ for(const [stderr,code] of [['sh: npm: command not found','TOOL_MISSING'],['fatal: Could not resolve host: github.com','NETWORK'],['ENOSPC: no space left on device','DISK_FULL'],['Prebuilt source mismatch','BUNDLE_INVALID']]){
+  const result=classifyUpdateFailure({stderr:stderr+' /Users/private token=secret',code:127},'build');
+  assert.equal(result.code,code);assert.equal(JSON.stringify(result).includes('secret'),false);
+ }
+ assert.equal(classifyUpdateFailure({signal:'SIGKILL'},'dependencies').code,'PROCESS_BLOCKED');
+});
+test('transient source failures retry automatically before applying and retain retry count',async t=>{
+ const {runUpdateWorker}=await import('../central/runtime/updater.mjs'),f=await workerFixture(t);let failures=0,approved=0;
+ await runUpdateWorker(f.jobPath,{run:async(step,env)=>{if(step.id==='source'&&failures++<2)throw Object.assign(Error('network'),{stderr:'Could not resolve host: github.com'});await f.run(step,env);},wait:async()=>{},fetchRequest:async()=>{approved++;return{ok:true};},waitStopped:async()=>{},restart:async()=>{}});
+ const status=await f.readStatus();assert.equal(status.phase,'completed');assert.equal(status.retryCount,2);assert.equal(approved,1);
+});
+test('exhausted retries retain diagnostics and never stop the current app',async t=>{
+ const {runUpdateWorker}=await import('../central/runtime/updater.mjs'),f=await workerFixture(t);let calls=0;
+ await runUpdateWorker(f.jobPath,{run:async()=>{calls++;throw Object.assign(Error('private /user/secret'),{code:'ECONNRESET'});},wait:async()=>{},fetchRequest:async()=>{throw Error('must not approve');}});
+ const status=await f.readStatus();assert.equal(calls,3);assert.equal(status.phase,'failed');assert.equal(status.diagnostic.code,'NETWORK');assert.equal(status.retryCount,2);
+ const saved=JSON.parse(await readFile(join(f.job.workDirectory,'diagnostic.json'),'utf8'));assert.equal(saved.diagnostic.code,'NETWORK');
+ assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),'old');assert.equal(JSON.stringify(status).includes('secret'),false);
+});
+test('update failure reporting works without an open browser and contains safe diagnostics',async t=>{
+ const directory=await temp(t);await mkdir(join(directory,'updates'));const jobId='f'.repeat(32);
+ await writeFile(join(directory,'updates/status.json'),JSON.stringify({phase:'failed',message:'build_failed',jobId,diagnostic:{code:'TOOL_MISSING',stage:'build',exitCode:127,token:'secret'}}));
+ let report;
+ const controller=createUpdateController({directory,manager:{snapshot:idle},shutdown:async()=>{},onFailure:async data=>{report=data;return {status:'queued'};}});
+ await controller.monitor();assert.equal(report.jobId,jobId);assert.equal(report.automatic,true);assert.equal(report.diagnostic.code,'TOOL_MISSING');assert.equal(JSON.stringify(report).includes('secret'),false);
+ const status=await controller.status();assert.equal(status.diagnostic.code,'TOOL_MISSING');assert.equal(status.support.status,'queued');
+});
+
+test('reported update jobs remain deduplicated across restart even after the outbox is pruned',async t=>{
+ const directory=await temp(t);await mkdir(join(directory,'updates'));const jobId='a'.repeat(32);
+ await writeFile(join(directory,'updates/status.json'),JSON.stringify({phase:'failed',message:'build_failed',jobId,diagnostic:{code:'TOOL_MISSING',stage:'build'}}));
+ let calls=0;
+ const options={directory,manager:{snapshot:idle},shutdown:async()=>{},onFailure:async()=>{calls++;return {status:'sent',reportId:'12345678-1234-1234-1234-123456789012',receiptId:'receipt-1'};},supportStatus:()=>({status:'collecting'})};
+ await createUpdateController(options).monitor();
+ const restarted=createUpdateController(options);await restarted.monitor();await restarted.reportFailure({automatic:false});
+ assert.equal(calls,1);assert.equal((await restarted.status()).support.status,'sent');
+});
+test('missing initial update tools are recorded and reported without launching a worker',async t=>{
+ const directory=await temp(t);let reported=0;
+ const controller=createUpdateController({directory,manager:{snapshot:idle},shutdown:async()=>{},inspect:async()=>{throw Object.assign(Error('private path'),{code:'UPDATE_NPM_REQUIRED'});},prepare:async()=>{throw Error('must not launch');},onFailure:async({diagnostic})=>{reported++;assert.equal(diagnostic.code,'TOOL_MISSING');return {status:'queued'};}});
+ controller.setRuntimeDescriptor({url:'http://127.0.0.1:32123',pid:process.pid,bridgeToken:'b'.repeat(64)});
+ const status=await controller.start();assert.equal(status.phase,'failed');await controller.monitor();assert.equal(reported,1);
 });

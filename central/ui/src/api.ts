@@ -13,7 +13,7 @@ export type PendingTabClose = {removalId:string;instanceId:string;accountId:stri
 export type Snapshot = {pendingTabCloses?:PendingTabClose[];serverNow?:number;configurationToken?:string;schemaVersion:number;stateVersion:number;service?:Record<string,unknown>;settings?:Record<string,unknown>;messages:Message[];instances:Instance[];accounts?:Account[];targets?:Target[];channels:Channel[];groups:Group[];attempts:Attempt[];commands?:Record<string,unknown>[];incidents:Incident[];events:EventRecord[];analytics?:Record<string,unknown>}
 
 export type SetupStatus = {checkedAt:number;checks:{id:string;label:string;status:'ok'|'warning'|'error';detail:string;nextStep?:string}[];ready:boolean}
-export type UpdateStatus = {phase:'idle'|'preparing'|'ready'|'applying'|'completed'|'failed';message:string;startedAt?:Timestamp;updatedAt?:Timestamp;version?:string}
+export type UpdateStatus = {diagnostic?:{code:string;stage:string;message:string;exitCode?:number;signal?:string};retryCount?:number;retrying?:boolean;support?:{status:string;reportId?:string;receiptId?:string};phase:'idle'|'preparing'|'ready'|'applying'|'completed'|'failed';message:string;startedAt?:Timestamp;updatedAt?:Timestamp;version?:string}
 
 let csrfToken = ''
 export class ApiError extends Error {
@@ -86,6 +86,7 @@ export async function establishSession(signal?:AbortSignal):Promise<{appVersion?
 }
 export const getSetupStatus = () => request<SetupStatus>('/api/setup-status')
 export const getUpdateStatus = (signal?:AbortSignal) => request<UpdateStatus>('/api/updates',{signal})
+export const reportUpdateFailure=(signal?:AbortSignal)=>request<UpdateStatus>('/api/updates/report',{method:'POST',body:'{}',signal:signal??AbortSignal.timeout(15000)})
 export const startUpdate = (signal?:AbortSignal) => request<UpdateStatus>('/api/updates',{method:'POST',body:'{}',signal})
 export const getSnapshot = (signal?:AbortSignal) => request<Snapshot>('/api/snapshot',{signal:signal??AbortSignal.timeout(10000)})
 export const command = (action:string,payload:Record<string,unknown>) => request<unknown>('/api/command',{method:'POST',body:JSON.stringify({action,payload})})

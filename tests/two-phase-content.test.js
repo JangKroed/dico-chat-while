@@ -706,20 +706,20 @@ test('전송 중 표시는 자동 관찰하되 중지하면 재입력 없이 끝
  r.onRuntime(m=>m.type==='DICO_OBSERVE_WAIT'?{allowed:false,code:'ATTEMPT_CANCELLED',retryable:false}:undefined);
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'uncertain');assert.equal(result.code,'ATTEMPT_CANCELLED');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
 });
-test('재시도 승인 중 전송 표시가 생기면 해제까지 관찰하고 같은 초안만 재시도한다',async()=>{
+test('재시도 승인 중 전송 표시가 생기면 행 제거 후에도 중복 없이 관찰한다',async()=>{
  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;
  await r.request('DICO_PREPARE');r.tick(3000);let pendingAt;
  r.onRetry(()=>{if(pendingAt===undefined){pendingAt=r.now();r.post({sending:true});}});
- r.onTick(()=>{if(pendingAt!==undefined&&r.now()-pendingAt>=3000)r.removePosts();});
- const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');const enters=r.events.filter(e=>e.type==='keydown');assert.equal(enters.length,2);assert.ok(enters[1].at>=pendingAt+3000);
+ r.onTick(()=>{if(pendingAt!==undefined&&r.now()-pendingAt>=3000){r.removePosts();r.editor.innerText='';}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');const enters=r.events.filter(e=>e.type==='keydown');assert.equal(enters.length,1);
 });
 
-test('최종 승인 뒤 자동 관찰이 길어지면 오래된 승인으로 재전송하지 않고 다시 승인받는다',async()=>{
+test('최종 승인 뒤 본인 전송이 발견되면 추가 승인과 Enter 없이 관찰한다',async()=>{
  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;r.delivery.strictAuthorization=true;
  await r.request('DICO_PREPARE');r.tick(3000);let pendingAt,authorizations=0;
  r.onAuthorization(m=>{if(m.retryCount===1){authorizations++;if(pendingAt===undefined){pendingAt=r.now();r.post({sending:true});}}});
- r.onTick(()=>{if(pendingAt!==undefined&&r.now()-pendingAt>=3000)r.removePosts();});
- const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(authorizations,2);assert.equal(r.events.filter(e=>e.type==='keydown').length,2);
+ r.onTick(()=>{if(pendingAt!==undefined&&r.now()-pendingAt>=3000){r.removePosts();r.editor.innerText='';}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(authorizations,1);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
 });
 
 test('승인 연결이 30초 넘게 끊겨도 실제 코어의 같은 시도를 관찰 하트비트로 보존한다',async t=>{
@@ -776,4 +776,28 @@ test('빠른 채팅에서 본인 게시가 화면 밖으로 사라져도 비워�
  await r.request('DICO_PREPARE');r.tick(3000);
  r.onSubmit(()=>{for(let i=0;i<200;i++)r.post({text:'채팅 '+i,author:'999999999999999999'});r.removePosts();});
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+test('계정 증명 만료 후 갱신은 입력창 변경으로 고정되지 않는다',async()=>{
+ const r=rig({managed:true,defaultAvatar:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreEnter:true,maxSendRetries:0});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let injected=false;
+ r.onTick(()=>{if(!injected&&r.events.some(e=>e.type==='keydown')){injected=true;r.tick(2100);r.post({author:'987654321098765432',text:'foreign'});}});
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(result.deliveryEvidence.sameComposer,true);
+ assert.notEqual(result.code,'COMPOSER_EDITOR_CHANGED');
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+test('본인 전송 중 행이 제거되어도 추가 Enter 없이 완료를 관찰한다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:1});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let pendingAt;
+ r.onTick(()=>{if(!r.events.some(e=>e.type==='keydown'))return;if(pendingAt===undefined){pendingAt=r.now();r.post({sending:true});}else{r.removePosts();if(r.now()-pendingAt>=30000)r.editor.innerText='';}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+test('본인 전송 중 메시지가 실패하면 무한 관찰과 추가 Enter를 막는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreEnter:true,maxSendRetries:0});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let step=0,started;
+ r.onTick(()=>{if(!r.events.some(e=>e.type==='keydown'))return;if(step===0){step++;started=r.now();r.post({sending:true});}else if(step===1){step++;r.removePosts();r.post({failed:true});}});
+ r.onRuntime(m=>m.type==='DICO_OBSERVE_WAIT'&&r.now()-started>60000?{allowed:false,code:'TEST_STOP'}:undefined);
+ const result=await r.request('DICO_DELIVER');assert.equal(result.code,'DISCORD_SEND_FAILED');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
 });

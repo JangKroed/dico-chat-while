@@ -9,7 +9,43 @@ import {DatabaseSync} from 'node:sqlite';
 const executeFile=promisify(execFile);
 const modulePath=fileURLToPath(import.meta.url);
 const activeAttempts=new Set(['preparing','prepared','permitted','executing','unknown']);
-const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트에 필요한 빌드 도구를 준비하고 있습니다.',build:'새 관리 화면과 확장 프로그램을 빌드하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 기존 설치를 확인하고 다시 시도하거나 설치 도구를 실행하세요.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'최신 소스를 받지 못했습니다. 인터넷과 Git 설치 상태를 확인한 뒤 다시 시도하세요.',dependencies_failed:'빌드 의존성을 설치하지 못했습니다. 인터넷과 npm 설치 상태를 확인하세요.',build_failed:'새 버전 빌드에 실패했습니다. 현재 설치는 유지됩니다. 잠시 후 다시 시도하세요.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
+const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트 준비 정보를 확인하고 있습니다.',build:'검증된 화면 파일과 확장 프로그램을 준비하고 있습니다.',retrying:'일시적인 연결 오류를 감지했습니다. 프로그램이 자동으로 다시 시도하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 자동 진단 결과와 제보 상태를 확인하고 있습니다.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'업데이트 파일을 받지 못했습니다. 자동 재시도 결과와 진단 정보를 기록했습니다.',dependencies_failed:'업데이트 준비 정보를 처리하지 못했습니다. 실패 진단을 기록했습니다.',build_failed:'업데이트 파일 준비를 완료하지 못했습니다. 현재 설치를 유지하고 진단 정보를 기록했습니다.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
+
+const failureMessages={
+ NETWORK:'업데이트 서버와의 연결이 끊겼습니다.',
+ DISK_FULL:'업데이트 파일을 저장할 공간이 부족합니다. 기존 설치와 기록은 보존했습니다.',
+ PERMISSION:'운영체제가 업데이트 파일 접근을 거부했습니다. 권한 설정을 임의로 변경하지 않았습니다.',
+ TOOL_MISSING:'설치에 포함된 실행 도구를 찾지 못했습니다. 배포 파일 점검이 필요합니다.',
+ PROCESS_BLOCKED:'업데이트 준비 프로그램이 운영체제에 의해 종료됐습니다.',
+ BUNDLE_INVALID:'받은 업데이트 파일의 무결성 검사에 실패했습니다. 적용하지 않았습니다.',
+ TIMEOUT:'업데이트 준비 작업이 제한 시간 안에 끝나지 않았습니다.',
+ PROCESS_EXITED:'업데이트 작업이 예기치 않게 종료됐습니다.',
+ DETAILS_UNAVAILABLE:'이전 버전이 상세 진단을 남기지 않았습니다. 남아 있는 실패 단계와 버전 정보를 수집했습니다.',
+ UNEXPECTED:'업데이트 처리 중 예상하지 못한 오류가 발생했습니다. 실패 단계와 실행 결과를 기록했습니다.'
+};
+const failureStages=new Set(['preparing','source','dependencies','build','check','authorize','busy','shutdown','apply','restart','unknown']);
+export function classifyUpdateFailure(error={},stage='unknown'){
+ const text=[error.code,error.message,error.stderr].map(value=>String(value||'').slice(0,8192)).join('\n');
+ const code=/ENOSPC|no space left/i.test(text)?'DISK_FULL':/EACCES|EPERM|permission denied/i.test(text)?'PERMISSION':
+ /UPDATE_(?:NPM|GIT|RUNTIME)_REQUIRED|npm:.*not found|not recognized as an internal|spawn.*ENOENT/i.test(text)?'TOOL_MISSING':
+ /Prebuilt.*(?:mismatch|missing)|ENOENT.*prebuilt/i.test(text)?'BUNDLE_INVALID':
+ error.signal==='SIGKILL'?'PROCESS_BLOCKED':
+ /ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|could not resolve host|failed to connect|connection timed out|requested URL returned error: (?:429|50[234])/i.test(text)?'NETWORK':
+ error.killed?'TIMEOUT':'UNEXPECTED';
+ return publicUpdateDiagnostic({code,stage,exitCode:Number.isInteger(error.code)?error.code:undefined,signal:error.signal});
+}
+export function publicUpdateDiagnostic(value){
+ if(!value||!Object.hasOwn(failureMessages,value.code))return undefined;
+ return {code:value.code,stage:failureStages.has(value.stage)?value.stage:'unknown',message:failureMessages[value.code],
+ ...(Number.isInteger(value.exitCode)&&value.exitCode>=0&&value.exitCode<=255?{exitCode:value.exitCode}:{}),
+ ...(['SIGKILL','SIGTERM','SIGABRT','SIGSEGV'].includes(value.signal)?{signal:value.signal}:{})};
+}
+function publicSupport(value){
+ if(!value||!['disabled','manual','unconfigured','collecting','queued','sending','sent','failed','unavailable'].includes(value.status))return undefined;
+ return {status:value.status,...(typeof value.reportId==='string'&&/^[a-f0-9-]{36}$/.test(value.reportId)?{reportId:value.reportId}:{}),
+ ...(typeof value.receiptId==='string'&&/^[a-zA-Z0-9_-]{1,100}$/.test(value.receiptId)?{receiptId:value.receiptId}:{})};
+}
+
 const error=(code,message,status=409)=>Object.assign(Error(message),{code,status});
 const tokenEqual=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const alive=pid=>{if(!Number.isSafeInteger(pid)||pid<1)return false;try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
@@ -25,7 +61,7 @@ export function safeToUpdate(snapshot){return Boolean(snapshot&&['ready','stoppe
 export function assertUpdateSafe(snapshot){if(!safeToUpdate(snapshot))throw error('UPDATE_BUSY','모든 그룹을 중지하거나 일시정지하고 진행 중·미확인 발송과 중지 확인을 먼저 해결하세요.');}
 export function publicUpdateStatus(value={}){
   const phase=['idle','preparing','ready','applying','completed','failed'].includes(value.phase)?value.phase:'idle';
-  return{phase,message:messages[value.message]||messages[phase],...(Number.isSafeInteger(value.startedAt)?{startedAt:value.startedAt}:{}),...(Number.isSafeInteger(value.updatedAt)?{updatedAt:value.updatedAt}:{}),...(typeof value.version==='string'&&/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]{1,40})?$/.test(value.version)?{version:value.version}:{})};
+  return{phase,...(publicUpdateDiagnostic(value.diagnostic)?{diagnostic:publicUpdateDiagnostic(value.diagnostic)}:{}),retryCount:Number.isInteger(value.retryCount)?Math.min(2,Math.max(0,value.retryCount)):0,retrying:value.retrying===true,message:messages[value.message]||messages[phase],...(Number.isSafeInteger(value.startedAt)?{startedAt:value.startedAt}:{}),...(Number.isSafeInteger(value.updatedAt)?{updatedAt:value.updatedAt}:{}),...(typeof value.version==='string'&&/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]{1,40})?$/.test(value.version)?{version:value.version}:{})};
 }
 async function findFile(candidates){for(const file of candidates)if(file&&isAbsolute(file))try{const actual=await realpath(file);if((await lstat(actual)).isFile())return actual;}catch{}return undefined;}
 async function discoverNpm(node,app,env){
@@ -73,14 +109,44 @@ async function workerLaunch(job){
   const child=spawn(privateNode,[worker,'--job',join(job.workDirectory,'job.json')],{cwd:job.workDirectory,detached:true,stdio:'ignore',windowsHide:true});
   await new Promise((accept,reject)=>{child.once('spawn',accept);child.once('error',reject);});child.unref();return{pid:child.pid};
 }
-export function createUpdateController({directory,manager,shutdown,inspect=inspectUpdateInstallation,prepare=workerLaunch}={}){
+export function createUpdateController({directory,manager,shutdown,inspect=inspectUpdateInstallation,prepare=workerLaunch,onFailure,supportStatus}={}){
   directory=resolve(directory);const updates=join(directory,'updates'),lock=join(updates,'active'),statusFile=join(updates,'status.json');
   let descriptor,activeJob,applying=false,launchPromise=Promise.resolve();
+
+  const reportStateFile=join(updates,'report-state.json');
+  let reporting=null,reportedJob=null,lastSupport=null,nextMonitorAt=0;
+  async function reportFailure({automatic=false}={}){
+    if(reporting)return reporting;
+    reporting=(async()=>{
+      const value=await readJSON(statusFile);
+      if(value?.phase!=='failed'||!/^[a-f0-9]{32}$/.test(value.jobId||''))throw error('UPDATE_NO_FAILURE','제보할 업데이트 실패 기록이 없습니다.');
+      const saved=await readJSON(reportStateFile).catch(()=>undefined);
+      if(saved?.jobId===value.jobId&&publicSupport(saved.support)){
+        reportedJob=value.jobId;lastSupport=publicSupport(saved.support);
+        return lastSupport;
+      }
+      if(!onFailure){lastSupport={status:'unavailable'};return lastSupport;}
+      const diagnostic=publicUpdateDiagnostic(value.diagnostic)||publicUpdateDiagnostic({code:'DETAILS_UNAVAILABLE',stage:String(value.message||'').replace(/_failed$/,'')});
+      const result=await onFailure({jobId:value.jobId,diagnostic,retryCount:value.retryCount||0,automatic});
+      if(result){reportedJob=value.jobId;lastSupport=publicSupport(result);await writeUpdateJSON(reportStateFile,{jobId:value.jobId,support:lastSupport});}
+      return result;
+    })();
+    try{return await reporting;}finally{reporting=null;}
+  }
+  async function monitor(){
+    if(Date.now()<nextMonitorAt)return;
+    try{
+      await status();
+      const value=await readJSON(statusFile);
+      if(value?.phase==='failed'&&value.jobId!==reportedJob){nextMonitorAt=Date.now()+30000;await reportFailure({automatic:true});}
+    }catch{lastSupport={status:'failed'};}
+  }
+
   const status=async()=>{
     let value=await readJSON(statusFile).catch(()=>({phase:'failed'}));
     const owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);
     if(['preparing','ready','applying'].includes(value?.phase)&&Number.isSafeInteger(owner?.workerPid)&&!alive(owner.workerPid)){
-      value={...value,phase:'failed',message:'failed',updatedAt:Date.now()};await writeUpdateJSON(statusFile,value);
+      value={...value,phase:'failed',message:'failed',diagnostic:{code:'PROCESS_EXITED',stage:'preparing'},updatedAt:Date.now()};await writeUpdateJSON(statusFile,value);
       await release(owner.jobToken);if(activeJob?.jobToken===owner.jobToken)activeJob=undefined;
     }
     // Earlier workers reported extension versions for manager-only updates.
@@ -88,7 +154,16 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
       const installed=await readJSON(join(directory,'app/central/package.json')).catch(()=>undefined);
       if(installed?.version)value={...value,version:installed.version};
     }
-    return publicUpdateStatus(value);
+    let support=publicSupport(supportStatus?.(value?.jobId)||(reportedJob===value?.jobId?lastSupport:null));
+    const saved=await readJSON(reportStateFile).catch(()=>undefined);
+    if(saved?.jobId&&saved.jobId===value?.jobId&&publicSupport(saved.support)){
+      if(support?.status==='sent'){
+        if(JSON.stringify(saved.support)!==JSON.stringify(support))await writeUpdateJSON(reportStateFile,{jobId:value.jobId,support}).catch(()=>{});
+      }else if(saved.support.status==='sent')support=publicSupport(saved.support);
+      else if(!support)support=publicSupport(saved.support);
+      else if(['collecting','manual'].includes(support.status))support={status:'unavailable'};
+    }
+    return {...publicUpdateStatus(value),...(support?{support}:{})};
   };
   async function release(jobToken){const owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(owner?.jobToken===jobToken)await rm(lock,{recursive:true,force:true});}
   async function start(){
@@ -96,7 +171,6 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     if(activeJob&&!applying){const latest=await readJSON(statusFile).catch(()=>undefined),owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(['completed','failed'].includes(latest?.phase)&&!owner)activeJob=undefined;}
     if(applying||activeJob)throw error('UPDATE_IN_PROGRESS','이미 업데이트를 준비하고 있습니다. 진행 상태를 확인하세요.');
     if(!descriptor)throw error('UPDATE_UNAVAILABLE','관리 프로그램의 연결 정보를 확인하지 못했습니다. 다시 실행하세요.',503);
-    const installation=await inspect({directory});
     await mkdir(updates,{recursive:true,mode:0o700});
     if((await lstat(updates)).isSymbolicLink())throw error('UPDATE_MANUAL_REQUIRED','업데이트 작업 폴더가 다른 위치로 연결되어 있습니다. 설치 도구로 복구하세요.');
     await mkdir(join(updates,'jobs'),{recursive:true,mode:0o700});
@@ -111,15 +185,24 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     try{
       await writeUpdateJSON(join(lock,'owner.json'),{jobToken,controllerPid:process.pid});
       await mkdir(workDirectory,{recursive:true,mode:0o700});
+      let installation;
+      try{installation=await inspect({directory});}
+      catch(failure){
+        if(!['UPDATE_GIT_REQUIRED','UPDATE_NPM_REQUIRED','UPDATE_RUNTIME_REQUIRED'].includes(failure.code))throw failure;
+        const diagnostic=classifyUpdateFailure(failure,'preparing');
+        await writeUpdateJSON(join(workDirectory,'diagnostic.json'),{diagnostic,at:Date.now()});
+        await writeUpdateJSON(statusFile,{phase:'failed',message:'failed',diagnostic,jobId,startedAt,updatedAt:Date.now()});
+        await release(jobToken);return status();
+      }
       const job={...installation,directory,workDirectory,jobId,jobToken,startedAt,descriptor};activeJob=job;
       await writeUpdateJSON(statusFile,{phase:'preparing',message:'preparing',startedAt,updatedAt:startedAt,jobId});
       launchPromise=(async()=>{
         try{
           const child=await prepare(job),owner=await readJSON(join(lock,'owner.json'));
           if(tokenEqual(owner?.jobToken,jobToken)&&!owner.workerPid)await writeUpdateJSON(join(lock,'owner.json'),{jobToken,controllerPid:process.pid,workerPid:child.pid});
-        }catch{
+        }catch(failure){
           const latest=await readJSON(statusFile).catch(()=>undefined);
-          if(latest?.jobId!==jobId||!['completed','failed'].includes(latest.phase))await writeUpdateJSON(statusFile,{phase:'failed',message:'failed',startedAt,updatedAt:Date.now(),jobId});
+          if(latest?.jobId!==jobId||!['completed','failed'].includes(latest.phase))await writeUpdateJSON(statusFile,{phase:'failed',message:'failed',diagnostic:classifyUpdateFailure(failure,'preparing'),startedAt,updatedAt:Date.now(),jobId});
           await release(jobToken);if(activeJob?.jobToken===jobToken)activeJob=undefined;
         }
       })().catch(()=>{});
@@ -138,7 +221,7 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     setTimeout(()=>void shutdown().catch(async()=>{await writeUpdateJSON(statusFile,{phase:'failed',message:'shutdown_failed',startedAt:activeJob.startedAt,updatedAt:Date.now()}).catch(()=>{});}),50);
     return{accepted:true};
   }
-  return{status,start,apply,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
+  return{status,start,apply,monitor,reportFailure,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
 }
 export async function withUpdateManagerLock(directory,action){
   const lock=new DatabaseSync(join(directory,'manager-lock.sqlite'));
@@ -188,18 +271,31 @@ async function restartApplication(job){
   }
   throw Object.assign(Error('Updated runtime did not become ready'),{rollbackSafe:!alive(child.pid)});
 }
-export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,waitStopped=waitForStopped,restart=restartApplication}={}){
+export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,waitStopped=waitForStopped,restart=restartApplication,wait=sleep}={}){
   const job=await validateJob(resolve(jobPath)),updates=join(job.directory,'updates'),lock=join(updates,'active'),statusFile=join(updates,'status.json');
   const owner=await readJSON(join(lock,'owner.json'));if(!tokenEqual(owner?.jobToken,job.jobToken))throw Error('Update lock changed');
   await mkdir(join(job.workDirectory,'running'),{mode:0o700});
   await writeUpdateJSON(join(lock,'owner.json'),{jobToken:job.jobToken,controllerPid:job.descriptor.pid,workerPid:process.pid});
-  let stage='source',shutdownApproved=false,version,previousVersion;
-  const report=(phase,message)=>writeUpdateJSON(statusFile,{phase,message,startedAt:job.startedAt,updatedAt:Date.now(),jobId:job.jobId,...(version?{version}:{})});
+  let stage='source',shutdownApproved=false,version,previousVersion,diagnostic,retryCount=0,retrying=false;
+  const report=(phase,message)=>writeUpdateJSON(statusFile,{phase,message,retryCount,retrying,...(diagnostic?{diagnostic}:{}),startedAt:job.startedAt,updatedAt:Date.now(),jobId:job.jobId,...(version?{version}:{})});
   try{
     const checkout=join(job.workDirectory,'checkout'),prepared=join(job.workDirectory,'prepared'),backup=join(job.workDirectory,'previous'),env=updateEnvironment(job.workerNode,job.workDirectory);
     for(const name of ['no-hooks'])await mkdir(join(job.workDirectory,name),{recursive:true,mode:0o700});
     for(const name of ['empty-config','empty-global-config'])await writeFile(join(job.workDirectory,name),'',{mode:0o600});
-    for(const step of updateBuildPlan({...job,node:job.workerNode,checkout})) {stage=step.id;await report('preparing',stage);await run(step,env);}
+    for(const step of updateBuildPlan({...job,node:job.workerNode,checkout})) {
+      stage=step.id;
+      for(;;){
+        await report('preparing',stage);
+        try{await run(step,env);diagnostic=undefined;break;}
+        catch(failure){
+          diagnostic=classifyUpdateFailure(failure,stage);
+          if(diagnostic.code!=='NETWORK'||!['source','dependencies'].includes(stage)||retryCount>=2)throw failure;
+          retryCount++;retrying=true;await report('preparing','retrying');
+          await wait(retryCount===1?2000:5000);retrying=false;
+          if(stage==='source')await rm(checkout,{recursive:true,force:true});
+        }
+      }
+    }
     const current=await readJSON(join(job.app,'extension/manifest.json')),next=await readJSON(join(checkout,'central/extension/manifest.json'));
     if(!current?.key||next?.key!==current.key)throw Error('Extension identity changed');
     const pkg=await readJSON(join(checkout,'central/package.json'));version=pkg?.version||next.version;previousVersion=(await readJSON(join(job.app,'central/package.json')))?.version||current.version;
@@ -216,6 +312,8 @@ export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,wa
     await withUpdateManagerLock(job.directory,()=>swapUpdateDirectories({app:job.app,prepared,backup}));stage='restart';await restart(job);await report('completed','completed');
     await rm(checkout,{recursive:true,force:true});await rm(backup,{recursive:true,force:true});await rm(join(job.workDirectory,'npm-cache'),{recursive:true,force:true});
   }catch(e){
+    retrying=false;diagnostic=classifyUpdateFailure(e,stage);
+    await writeUpdateJSON(join(job.workDirectory,'diagnostic.json'),{diagnostic,retryCount,at:Date.now()}).catch(()=>{});
     let message=e.code==='UPDATE_RUNTIME_ACTIVE'?'runtime_active':e.code==='UPDATE_ROLLBACK_FAILED'?'rollback_failed':stage==='busy'?'busy':messages[`${stage}_failed`]?`${stage}_failed`:'failed';
     // Roll back a failed launch only after proving the new process exited; never swap a possibly live runtime.
     if(shutdownApproved&&stage==='restart'&&e.rollbackSafe===true){

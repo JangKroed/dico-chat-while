@@ -50,7 +50,19 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
       }
       if(shutdownError)throw shutdownError;
     };
-    updates=createUpdateController({directory,manager,shutdown:()=>closeRuntime({forUpdate:true})});
+    updates=createUpdateController({
+      directory,manager,shutdown:()=>closeRuntime({forUpdate:true}),
+      onFailure:({jobId,diagnostic,retryCount,automatic})=>supportDelivery?.queue({automatic,incidentId:'update:'+jobId,updateDiagnostic:{...diagnostic,retryCount}}),
+      supportStatus:jobId=>{
+        if(!supportDelivery)return {status:'unavailable'};
+        const state=supportDelivery.status(),item=state.outbox.find(item=>item.incidentId==='update:'+jobId);
+        if(item?.status==='sent')return item;
+        if(!state.settings.enabled)return {status:'disabled'};
+        if(!state.configured)return {status:'unconfigured'};
+        if(item)return item;
+        return {status:state.settings.autoSend?'collecting':'manual'};
+      }
+    });
     const bridgeToken=randomBytes(32).toString('hex');
     server=http.createServer((req,res)=>{if(app)return void app.handler(req,res);res.writeHead(503,{'Cache-Control':'no-store'});res.end('관리 프로그램을 시작하고 있습니다.');});server.requestTimeout=15000;server.headersTimeout=10000;
     await new Promise((accept,reject)=>{server.once('error',error=>reject(error.code==='EADDRINUSE'?Object.assign(Error(`중앙 관리 주소의 ${selectedPort} 포트를 다른 프로그램이 사용하고 있습니다. 해당 프로그램을 종료한 뒤 다시 실행하세요. 주소를 임의로 변경하지 않았습니다.`),{code:'PORT_IN_USE'}):error));server.listen(selectedPort,'127.0.0.1',accept);});
@@ -62,7 +74,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     await unlink(resolve(directory,'shutdown.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
     const report=()=>void dispatcher.process(manager.snapshot()).catch(()=>{});
     unsubscribe=manager.subscribe(event=>{report();if(event.type==='incident.opened'&&supportDelivery)void supportDelivery.queue({automatic:true,incidentId:event.incidentId,attemptId:event.attemptId}).catch(()=>{});if(event.type==='settings.reset')void lanAccess.reset().catch(()=>{});});
-    timer=setInterval(()=>{try{manager.tick();report();}catch{report();}},1000);timer.unref();
+    timer=setInterval(()=>{void updates.monitor();try{manager.tick();report();}catch{report();}},1000);timer.unref();
     return {url,manager,app,updates,lanAccess,supportDelivery,close:closeRuntime};
   } catch(error) {clearInterval(timer);unsubscribe?.();await supportDelivery?.close().catch(()=>{});await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
 }
