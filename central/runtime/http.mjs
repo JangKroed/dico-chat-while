@@ -177,6 +177,12 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
             if(!updates?.reportFailure)throw fail(503,'업데이트 진단 제보 기능이 준비되지 않았습니다.');
             await updates.reportFailure({automatic:false});return json(res,202,await updates.status());
           }
+          // 대상 경로를 클라이언트에서 받지 않는다. 검증된 로컬 복원본만
+          // 기존 UI 인증·CSRF·적용 중 차단을 통과한 요청으로 되돌릴 수 있다.
+          if(path==='/api/updates/rollback'){
+            if(!updates?.rollback)throw fail(503,'이전 버전 복원 기능이 준비되지 않았습니다.');
+            return json(res,202,await updates.rollback());
+          }
           if(path==='/api/updates'){
             if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
             return json(res,202,await updates.start());

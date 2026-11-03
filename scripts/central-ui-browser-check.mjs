@@ -171,6 +171,11 @@ try {
     const original=window.fetch.bind(window);
     window.fetch=async(url,...args)=>{
       const path=new URL(String(url),location.href).pathname;
+      if(sessionStorage.getItem('dico-rollback-smoke')&&path==='/api/updates/rollback'){
+        window.__rollbackPosts=(window.__rollbackPosts||0)+1;window.__rollbackRequested=true;
+        return new Response(JSON.stringify({phase:'preparing',mode:'rollback',message:'이전 버전 복원을 준비합니다.',rollback:{available:true,version:'0.4.34'}}),{status:200,headers:{'content-type':'application/json'}});
+      }
+      if(sessionStorage.getItem('dico-rollback-smoke')&&path==='/api/updates')return new Response(JSON.stringify({phase:window.__rollbackRequested?'preparing':'idle',mode:window.__rollbackRequested?'rollback':'update',message:'검사용 업데이트 상태',rollback:{available:true,version:'0.4.34'}}),{status:200,headers:{'content-type':'application/json'}});
       if(path!=='/api/snapshot')return original(url,...args);
       const now=Date.now(),channels=[],accounts=[],instances=[],groups=[],attempts=[],messages=[];
       for(let n=0;n<3;n++){
@@ -184,7 +189,7 @@ try {
           messages.push({id:messageId,name:['이번 주 프로젝트 안내','백엔드 개발자 모집','정기 모임 안내'][n],body:'브라우저 배치 검사용. 실제 발송하지 않습니다.',version:1,revisionId:'revision-'+messageId,revisions:[{id:'revision-'+messageId}],tags:[]});members.push(id);
           attempts.push({id:'fixture-result-'+n+a,groupId,instanceId,accountId,bindingId:id,status:'confirmed',confirmationBasis:a?'composer_cleared':'message_observed',messageName:messages.at(-1).name,finalizedAt:now-(n*2+a+1)*60000});
         }
-        groups.push({id:groupId,name:['프로젝트 공지 순환','채용 정보 순환','커뮤니티 소식 순환'][n],guildId:'200000000000'+n,channelId:'300000000000'+n,members,cursor:n%2,status:'running',version:1,intervalMs:60000,nextEligibleAt:now+(n+1)*45000,nextPreparationAt:now+(n+1)*45000-5000,waitReason:'group_interval'});
+        groups.push({id:groupId,name:['프로젝트 공지 순환','채용 정보 순환','커뮤니티 소식 순환'][n],guildId:'200000000000'+n,channelId:'300000000000'+n,members,cursor:n%2,status:sessionStorage.getItem('dico-rollback-smoke')?'stopped':'running',version:1,intervalMs:60000,nextEligibleAt:now+(n+1)*45000,nextPreparationAt:now+(n+1)*45000-5000,waitReason:'group_interval'});
       }
       return new Response(JSON.stringify({schemaVersion:1,stateVersion:999,serverNow:now,service:{status:'ready'},settings:{retentionDays:90,notificationsEnabled:false,hideNotificationNames:false,maxSendRetries:3},messages,channels,accounts,instances,groups,attempts,incidents:[],events:[],commands:[]}),{status:200,headers:{'content-type':'application/json'}});
     };
@@ -209,6 +214,19 @@ try {
     await screenshot(`populated-settings-browsers-${width}.png`);
     console.log('PASS populated dashboard/settings '+width+'px '+JSON.stringify({dashboardLayout,settingsLayout}));
   }
+  // 롤백 버튼의 HTTP 선택과 중복 방지만 검사하며 설치 파일을 복원하지 않습니다.
+  await evalJS("sessionStorage.setItem('dico-rollback-smoke','1')");
+  await cmd('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
+  await cmd('Page.navigate',{url:runtime.url+'/settings'});
+  await visible('보관된 이전 버전');
+  await until(async()=>await evalJS("!document.querySelector('[aria-label=\"이전 버전 복원\"] button')?.disabled"));
+  await evalJS("(() => {const button=document.querySelector('[aria-label=\"이전 버전 복원\"] button');button.click();button.click()})()");
+  await visible('이전 버전 복원 준비 중');
+  assert.equal(await evalJS('window.__rollbackPosts'),1,'Rollback duplicate clicks must share one request');
+  assert.equal(await evalJS("Boolean(sessionStorage.getItem('dico.updateReconnect'))"),true,'Rollback keeps same-tab reconnect intent');
+  await screenshot('rollback-request-fixture.png');
+  await evalJS("sessionStorage.removeItem('dico-rollback-smoke')");
+  console.log('PASS rollback request stays in current tab and rejects duplicate click without touching installation');
   await cmd('Page.removeScriptToEvaluateOnNewDocument',{identifier:fixtureScript.identifier});
   assert.deepEqual(errors,[],'Browser console/runtime errors');
   console.log(`PASS no console errors; screenshots in ${screenshots}`);

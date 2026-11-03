@@ -64,8 +64,8 @@ test('update apply requires its job token and fresh idle state before scheduling
 
 test('update HTTP endpoints require UI session plus CSRF and private bridge plus job token',async()=>{
   const {createCentralApplication}=await import('../central/runtime/http.mjs'),{Readable}=await import('node:stream');
-  const origin='http://127.0.0.1:43127',bridgeToken='b'.repeat(64);let started=0,applied=0,reported=0,phase='idle',applying=false;
-  const updates={reportFailure:async()=>{reported++;},status:async()=>({phase,message:'safe status'}),start:async()=>{started++;return{phase:'preparing',message:'safe status'};},apply:async payload=>{if(payload.jobToken!=='private-job')throw Object.assign(Error('작업 인증 필요'),{status:401});applied++;return{accepted:true};},isApplying:()=>applying};
+  const origin='http://127.0.0.1:43127',bridgeToken='b'.repeat(64);let started=0,applied=0,reported=0,rolledBack=0,phase='idle',applying=false;
+  const updates={rollback:async()=>{rolledBack++;return{phase:'preparing',mode:'rollback',message:'safe rollback'};},reportFailure:async()=>{reported++;},status:async()=>({phase,message:'safe status'}),start:async()=>{started++;return{phase:'preparing',message:'safe status'};},apply:async payload=>{if(payload.jobToken!=='private-job')throw Object.assign(Error('작업 인증 필요'),{status:401});applied++;return{accepted:true};},isApplying:()=>applying};
   const app=createCentralApplication({manager:{snapshot:idle,execute:()=>({}),subscribe:()=>()=>{}},origin,bridgeToken,updates});
   const request=async(path,{method='GET',payload,headers={},cookie}={})=>{
     const req=Readable.from(payload===undefined?[]:[JSON.stringify(payload)]);Object.assign(req,{method,url:path,headers:{host:'127.0.0.1:43127',...(payload===undefined?{}:{'content-type':'application/json'}),...(cookie?{cookie}:{}),...headers}});
@@ -73,8 +73,13 @@ test('update HTTP endpoints require UI session plus CSRF and private bridge plus
   };
   assert.equal((await request('/api/updates/report',{method:'POST',payload:{}})).status,401);
   assert.equal((await request('/api/updates')).status,401);
+  assert.equal((await request('/api/updates/rollback',{method:'POST',payload:{}})).status,401);
   const session=await request('/api/session',{method:'POST',payload:{token:app.issueBootstrap()},headers:{origin}}),cookie=session.headers['set-cookie'].split(';')[0],csrf=JSON.parse(session.body).csrfToken;
   assert.equal((await request('/api/updates',{cookie})).status,200);
+  // 롤백도 UI 로그인과 CSRF 검증을 모두 통과해야 실제 작업을 시작한다.
+  assert.equal((await request('/api/updates/rollback',{method:'POST',cookie,payload:{},headers:{origin}})).status,403);assert.equal(rolledBack,0);
+  const rollback=await request('/api/updates/rollback',{method:'POST',cookie,payload:{},headers:{origin,'x-dico-csrf':csrf}});
+  assert.equal(rollback.status,202);assert.equal(rolledBack,1);assert.equal(JSON.parse(rollback.body).mode,'rollback');
   assert.equal((await request('/api/updates/report',{method:'POST',cookie,payload:{},headers:{origin}})).status,403);assert.equal(reported,0);
   assert.equal((await request('/api/updates/report',{method:'POST',cookie,payload:{},headers:{origin,'x-dico-csrf':csrf}})).status,202);assert.equal(reported,1);
   assert.equal((await request('/api/updates',{method:'POST',cookie,payload:{},headers:{origin}})).status,403);assert.equal(started,0);
@@ -84,7 +89,7 @@ test('update HTTP endpoints require UI session plus CSRF and private bridge plus
   assert.equal((await request('/api/bridge/update/apply',{method:'POST',headers:auth,payload:{jobToken:'private-job'}})).status,202);assert.equal(applied,1);
   assert.equal(JSON.parse((await request('/api/bridge/status',{headers:auth})).body).reloadSafe,true);
   phase='preparing';assert.equal(JSON.parse((await request('/api/bridge/status',{headers:auth})).body).reloadSafe,false);
-  applying=true;assert.equal((await request('/api/command',{method:'POST',cookie,payload:{action:'group.start'},headers:{origin,'x-dico-csrf':csrf}})).status,503);
+  applying=true;assert.equal((await request('/api/updates/rollback',{method:'POST',cookie,payload:{},headers:{origin,'x-dico-csrf':csrf}})).status,503);assert.equal(rolledBack,1);assert.equal((await request('/api/command',{method:'POST',cookie,payload:{action:'group.start'},headers:{origin,'x-dico-csrf':csrf}})).status,503);
 });
 
 async function workerFixture(t){

@@ -45,9 +45,11 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
   try {
     // The updater holds this same OS lock while replacing application trees.
     // Load replaceable modules only after startup owns the lock.
-    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController},{selectRuntimePort,createSessionStore},{createLanAccess},{createSupportDelivery},{createSupportReport}]=await Promise.all([
+    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController,captureLegacyRollback},{selectRuntimePort,createSessionStore},{createLanAccess},{createSupportDelivery},{createSupportReport}]=await Promise.all([
       import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs'),import('./lan-access.mjs'),import('./support-delivery.mjs'),import('./support-report.mjs')
     ]);
+    // 구버전 worker가 health 응답 이후 previous를 지우기 전에 검증된 코드만 보관한다.
+    await captureLegacyRollback({directory});
     const selectedPort=await selectRuntimePort({directory,port});
     const packageInfo=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')),appVersion=packageInfo.version;
     manager=createCentralManager({databasePath:resolve(directory,'central.sqlite')});

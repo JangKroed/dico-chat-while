@@ -3,13 +3,13 @@
  * 컨트롤러는 요청·상태·종료 승인을 관리하고, 독립 worker가 준비·검사·교체·재시작을 수행합니다.
  * worker는 자신과 Node를 별도 작업 폴더로 복사하여 실행하므로 교체할 앱 파일에 실행 중 의존하지 않습니다.
  */
-import {randomBytes,timingSafeEqual} from 'node:crypto';
-import {access,chmod,copyFile,cp,lstat,mkdir,open,readFile,realpath,rename,rm,writeFile} from 'node:fs/promises';
+import {randomBytes,timingSafeEqual,createHash} from 'node:crypto';
+import {access,chmod,copyFile,cp,lstat,mkdir,open,readFile,readdir,realpath,rename,rm,writeFile} from 'node:fs/promises';
 import {dirname,join,resolve,delimiter,isAbsolute} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
-import {DatabaseSync} from 'node:sqlite';
+import {DatabaseSync,backup as backupSQLite} from 'node:sqlite';
 
 const executeFile=promisify(execFile);
 const modulePath=fileURLToPath(import.meta.url);
@@ -26,6 +26,7 @@ const failureMessages={
  TIMEOUT:'업데이트 준비 작업이 제한 시간 안에 끝나지 않았습니다.',
  PROCESS_EXITED:'업데이트 작업이 예기치 않게 종료됐습니다.',
  DETAILS_UNAVAILABLE:'이전 버전이 상세 진단을 남기지 않았습니다. 남아 있는 실패 단계와 버전 정보를 수집했습니다.',
+ ROLLBACK_INCOMPATIBLE:'보관된 버전이 현재 설정과 기록을 보존하지 못하여 되돌리기를 중단했습니다.',
  UNEXPECTED:'업데이트 처리 중 예상하지 못한 오류가 발생했습니다. 실패 단계와 실행 결과를 기록했습니다.'
 };
 const failureStages=new Set(['preparing','source','dependencies','build','check','authorize','busy','shutdown','apply','restart','unknown']);
@@ -34,7 +35,7 @@ const failureStages=new Set(['preparing','source','dependencies','build','check'
  */
 export function classifyUpdateFailure(error={},stage='unknown'){
  const text=[error.code,error.message,error.stderr].map(value=>String(value||'').slice(0,8192)).join('\n');
- const code=/ENOSPC|no space left/i.test(text)?'DISK_FULL':/EACCES|EPERM|permission denied/i.test(text)?'PERMISSION':
+ const code=error.code==='ROLLBACK_INCOMPATIBLE'?'ROLLBACK_INCOMPATIBLE':/ENOSPC|no space left/i.test(text)?'DISK_FULL':/EACCES|EPERM|permission denied/i.test(text)?'PERMISSION':
  /UPDATE_(?:NPM|GIT|RUNTIME)_REQUIRED|npm:.*not found|not recognized as an internal|spawn.*ENOENT/i.test(text)?'TOOL_MISSING':
  /Prebuilt.*(?:mismatch|missing)|ENOENT.*prebuilt/i.test(text)?'BUNDLE_INVALID':
  error.signal==='SIGKILL'?'PROCESS_BLOCKED':
@@ -67,6 +68,150 @@ export async function writeUpdateJSON(file,value){
   try{await handle.writeFile(JSON.stringify(value));await handle.sync();}finally{await handle.close();}
   try{await rename(temporary,file);}catch(e){await rm(temporary,{force:true});throw e;}
 }
+// 롤백 슬롯은 사용자가 전달한 경로를 받지 않는다. 설치별 고정 경로의 검증된
+// central/extension 코드만 대상으로 하며 데이터베이스·설정·로그는 포함하지 않는다.
+const rollbackPath=directory=>join(resolve(directory),'updates','rollback');
+async function codeIdentity(root,{deadline=Infinity,maxBytes=256*1024*1024}={}){
+  const digest=createHash('sha256');let bytes=0,files=0;
+  async function visit(path,relative){
+    if(Date.now()>deadline)throw Error('Rollback capture deadline exceeded');
+    const info=await lstat(path);if(info.isSymbolicLink())throw Error('Linked rollback tree');
+    if(info.isDirectory()){
+      for(const entry of (await readdir(path)).sort())await visit(join(path,entry),relative+'/'+entry);
+    }else if(info.isFile()){
+      if(++files>20000||(bytes+=info.size)>maxBytes)throw Error('Oversized rollback tree');
+      const body=await readFile(path);digest.update(relative);digest.update('\0');digest.update(String(body.length));digest.update('\0');digest.update(body);
+    }else throw Error('Invalid rollback tree');
+  }
+  if((await lstat(root)).isSymbolicLink())throw Error('Linked rollback root');
+  for(const part of ['central','extension'])await visit(join(root,part),part);
+  const pkg=await readJSON(join(root,'central/package.json')),manifest=await readJSON(join(root,'extension/manifest.json'));
+  if(pkg?.name!=='dico-manager'||!/^\d+\.\d+\.\d+$/.test(pkg.version||'')||typeof manifest?.key!=='string'||!manifest.key)throw Error('Invalid rollback identity');
+  await access(join(root,'central/runtime/main.mjs'));await access(join(root,'central/core/index.js'));await access(join(root,'central/ui/dist/index.html'));
+  return {version:pkg.version,key:manifest.key,hash:digest.digest('hex')};
+}
+async function verifiedRollback(directory){
+  const updates=join(resolve(directory),'updates'),slot=rollbackPath(directory);
+  if((await lstat(updates)).isSymbolicLink()||(await lstat(slot)).isSymbolicLink()||(await lstat(join(slot,'rollback.json'))).isSymbolicLink())throw Error('Linked rollback slot');
+  const saved=await readJSON(join(slot,'rollback.json')),actual=await codeIdentity(slot);
+  if(saved?.format!==1||saved.version!==actual.version||saved.key!==actual.key||saved.hash!==actual.hash)throw Error('Rollback integrity mismatch');
+  const current=await readJSON(join(directory,'app/extension/manifest.json'));
+  if(current&&current.key!==actual.key)throw Error('Rollback extension identity changed');
+  return actual;
+}
+export async function rollbackAvailability({directory}={}){
+  try{const value=await verifiedRollback(directory),current=await readJSON(join(directory,'app/central/package.json'));if(current?.version===value.version)return{available:false,version:value.version,reason:'SAME_VERSION'};return{available:true,version:value.version};}
+  catch(e){return{available:false,reason:e.code==='ENOENT'?'NO_BACKUP':'BACKUP_INVALID'};}
+}
+/** 정상 시작을 확인한 업데이트의 직전 다른 버전 한 개만 원자적으로 보관한다. */
+export async function retainRollbackVersion({directory,source,currentVersion,deadline=Infinity,maxBytes}={}){
+  const identity=await codeIdentity(source,{deadline,maxBytes});if(identity.version===currentVersion)return;
+  const updates=join(resolve(directory),'updates');await mkdir(updates,{recursive:true,mode:0o700});
+  if((await lstat(updates)).isSymbolicLink())throw Error('Linked rollback parent');
+  const slot=rollbackPath(directory),stage=join(updates,'rollback-next-'+randomBytes(8).toString('hex')),retired=join(updates,'rollback-retired-'+randomBytes(8).toString('hex'));
+  await mkdir(stage,{mode:0o700});let moved=false;
+  try{
+    for(const part of ['central','extension'])await cp(join(source,part),join(stage,part),{recursive:true,filter:()=>{if(Date.now()>deadline)throw Error('Rollback capture deadline exceeded');return true;}});
+    const copied=await codeIdentity(stage,{deadline,maxBytes});if(copied.hash!==identity.hash)throw Error('Rollback copy changed');
+    await writeUpdateJSON(join(stage,'rollback.json'),{format:1,...copied,createdAt:Date.now()});
+    try{await lstat(slot);if((await lstat(slot)).isSymbolicLink())throw Error('Linked rollback slot');await rename(slot,retired);moved=true;}catch(e){if(e.code!=='ENOENT')throw e;}
+    try{await rename(stage,slot);}catch(e){if(moved)await rename(retired,slot);throw e;}
+    if(moved)await rm(retired,{recursive:true,force:true});
+  }finally{await rm(stage,{recursive:true,force:true}).catch(()=>{});}
+}
+/**
+ * 구 worker는 새 앱의 health 응답을 받은 다음 previous를 삭제한다. 설치된 새 앱은
+ * HTTP를 열기 전에 활성 작업의 private 토큰/경로/프로세스를 확인하고 이전본을 보관한다.
+ * 실패해도 앱 시작을 막지 않으며 임의 작업 폴더를 탐색하거나 과거 파일을 추측하지 않는다.
+ */
+export async function captureLegacyRollback({directory,applicationRoot=resolve(dirname(modulePath),'../..')}={}){
+  try{
+    const app=join(resolve(directory),'app'),updates=join(resolve(directory),'updates');
+    if(resolve(applicationRoot)!==app)return;
+    for(const path of [updates,join(updates,'active')])if((await lstat(path)).isSymbolicLink())return;
+    const status=await readJSON(join(updates,'status.json')),owner=await readJSON(join(updates,'active/owner.json'));
+    if(status?.phase!=='applying'||!/^[a-f0-9]{32}$/.test(status.jobId||'')||!alive(owner?.workerPid))return;
+    const job=await validateJob(join(updates,'jobs',status.jobId,'job.json'));
+    if(!tokenEqual(job.jobToken,owner.jobToken)||job.app!==app||job.directory!==resolve(directory))return;
+    if(await realpath(job.workDirectory)!==join(await realpath(directory),'updates','jobs',job.jobId))return;
+    const deadline=Date.now()+8000,source=join(job.workDirectory,'previous'),identity=await codeIdentity(source,{deadline,maxBytes:32*1024*1024});
+    const current=await readJSON(join(app,'extension/manifest.json')),pkg=await readJSON(join(app,'central/package.json'));
+    if(identity.key!==current?.key)return;
+    await retainRollbackVersion({directory,source,currentVersion:pkg?.version,deadline,maxBytes:32*1024*1024});
+  }catch{/* 캡처 불가 상태는 rollbackAvailability에서 NO_BACKUP/BACKUP_INVALID로 공개한다. */}
+}
+/**
+ * 현재 SQLite를 backup API로 일관되게 복제한 뒤 구버전 core로 실제 읽기 검사를 한다.
+ * 검사는 별도 프로세스·임시 DB에서만 실행하므로 실제 데이터의 마이그레이션/복원은 없다.
+ * 실제 앱을 중지한 뒤에도 다시 검사하여 준비 이후의 저장 형식 변경을 놓치지 않는다.
+ */
+export async function verifyRollbackCompatibility({directory,target,node=process.execPath,workDirectory}={}){
+  const database=join(directory,'central.sqlite');let info;
+  try{info=await lstat(database);}catch(e){if(e.code==='ENOENT')return;throw e;}
+  if(info.isSymbolicLink()||!info.isFile())throw error('ROLLBACK_INCOMPATIBLE','현재 데이터 형식을 안전하게 검사하지 못했습니다.');
+  const temporary=join(workDirectory,'rollback-compat-'+randomBytes(8).toString('hex')+'.sqlite');
+  // 호환성은 단순히 파일을 열 수 있다는 뜻이 아닙니다. 같은 schemaVersion의
+  // 과거 시작 코드도 사용자 설정·문구·확정 이력 등을 조용히 바꿀 수 있으므로
+  // 복제본 실행 전후를 비교합니다. 원본 DB에는 읽기 전용 연결만 사용합니다.
+  const inspect=(path,eventBoundary)=>{
+    const db=new DatabaseSync(path,{readOnly:true});
+    try{
+      const row=db.prepare('SELECT data FROM central_state WHERE singleton=1').get();
+      const state=row?JSON.parse(row.data):null;
+      const boundary=eventBoundary??db.prepare('SELECT COALESCE(MAX(event_id),0) AS id FROM events').get().id;
+      const digest=createHash('sha256');
+      for(const event of db.prepare('SELECT event_id,at,type,data FROM events WHERE event_id<=? ORDER BY event_id').iterate(boundary))digest.update(JSON.stringify(event)).update('\0');
+      return{state,boundary,eventHash:digest.digest('hex')};
+    }finally{db.close();}
+  };
+  // 시작 시 새 세션을 만들거나 연결 검증을 해제하고 deadline을 재계산하는
+  // 런타임 필드만 제외합니다. 사용자 필드의 삭제/값 변경, 배열 순서 변경은
+  // 거절하고, 구버전이 기존 데이터를 보존하며 기본 필드를 추가하는 것은 허용합니다.
+  const preserve=(before,after)=>{
+    if(before===null||typeof before!=='object')return Object.is(before,after);
+    if(!after||typeof after!=='object'||Array.isArray(before)!==Array.isArray(after))return false;
+    if(Array.isArray(before))return before.length===after.length&&before.every((value,index)=>preserve(value,after[index]));
+    return Object.keys(before).every(key=>Object.hasOwn(after,key)&&preserve(before[key],after[key]));
+  };
+  const omit=(value,fields)=>Object.fromEntries(Object.entries(value).filter(([key])=>!fields.includes(key)));
+  const stable=state=>{
+    const value=structuredClone(state);
+    for(const key of ['service','stateVersion','lastEventId','retryPolicyVersion','intervals'])delete value[key];
+    for(const [list,fields] of [
+      ['instances',['sessionId','connected','lastSeenMono']],
+      ['accounts',['verified']],
+      ['channels',['verified','appliedVersion','tabId','sessionId','nextMono','lastConfirmedMono']],
+      ['groups',['nextMono']],
+    ])if(Array.isArray(value[list]))value[list]=value[list].map(item=>omit(item,fields));
+    return value;
+  };
+  try{
+    const source=new DatabaseSync(database,{readOnly:true});
+    try{await backupSQLite(source,temporary);}finally{source.close();}
+    const before=inspect(temporary);
+    const module=pathToFileURL(join(target,'central/core/index.js')).href;
+    const script=`const {createCentralManager}=await import(${JSON.stringify(module)}); const manager=createCentralManager({databasePath:${JSON.stringify(temporary)}}); try {const snapshot=manager.snapshot(); if(snapshot.schemaVersion!==1||snapshot.service?.status==='storage_failure')throw Error('incompatible');}finally{manager.close();}`;
+    await executeFile(node,['--input-type=module','-e',script],{timeout:15000,maxBuffer:65536,windowsHide:true});
+    const after=inspect(temporary,before.boundary);
+    if(!before.state||!after.state||before.eventHash!==after.eventHash)throw Error('History changed');
+    const oldStable=stable(before.state),newStable=stable(after.state);
+    // 대기 명령을 재시작 시 폐기하는 것은 안전한 세션 차단입니다. 그 외 명령
+    // 필드와 이미 완료된 명령 상태는 그대로 남아 있어야 합니다.
+    for(let index=0;index<(oldStable.commands||[]).length;index++){
+      const previous=oldStable.commands[index],next=newStable.commands?.[index];
+      if(['queued','received'].includes(previous.status)&&next?.status==='superseded')previous.status='superseded';
+    }
+    if(!preserve(oldStable,newStable)||!safeToUpdate(after.state))throw Error('User data or stopped state changed');
+    for(const interval of before.state.intervals||[]){
+      const next=after.state.intervals?.find(item=>item.id===interval.id);
+      if(!next)throw Error('Interval removed');
+      if(interval.to===null){
+        if(!preserve(omit(interval,['to']),omit(next,['to']))||!(next.to===null||Number.isFinite(next.to)&&next.to>=interval.from))throw Error('Open interval changed');
+      }else if(!preserve(interval,next))throw Error('Closed interval changed');
+    }
+  }catch{throw error('ROLLBACK_INCOMPATIBLE','보관된 버전이 현재 설정과 기록을 보존하지 못하여 되돌리기를 중단했습니다.');}
+  finally{for(const suffix of ['','-wal','-shm'])await rm(temporary+suffix,{force:true}).catch(()=>{});}
+}
 export function supportedUpdateNode(version){const [major,minor,patch]=String(version).split('.').map(Number);return Number.isInteger(major)&&Number.isInteger(minor)&&Number.isInteger(patch)&&(major>24||major===24&&minor>=13);}
 /**
  * 그룹이 멈췄다는 표시만으로 충분하지 않습니다. 진행 중·미확인 시도와 제어 의도도 검사합니다.
@@ -91,7 +236,7 @@ export function safeToReloadExtension(snapshot){
 export function assertUpdateSafe(snapshot){if(!safeToUpdate(snapshot))throw error('UPDATE_BUSY','모든 그룹을 중지하거나 일시정지하고 진행 중·미확인 발송과 중지 확인을 먼저 해결하세요.');}
 export function publicUpdateStatus(value={}){
   const phase=['idle','preparing','ready','applying','completed','failed'].includes(value.phase)?value.phase:'idle';
-  return{phase,...(publicUpdateDiagnostic(value.diagnostic)?{diagnostic:publicUpdateDiagnostic(value.diagnostic)}:{}),retryCount:Number.isInteger(value.retryCount)?Math.min(2,Math.max(0,value.retryCount)):0,retrying:value.retrying===true,message:messages[value.message]||messages[phase],...(Number.isSafeInteger(value.startedAt)?{startedAt:value.startedAt}:{}),...(Number.isSafeInteger(value.updatedAt)?{updatedAt:value.updatedAt}:{}),...(typeof value.version==='string'&&/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]{1,40})?$/.test(value.version)?{version:value.version}:{})};
+  return{phase,mode:value.mode==='rollback'?'rollback':'update',...(publicUpdateDiagnostic(value.diagnostic)?{diagnostic:publicUpdateDiagnostic(value.diagnostic)}:{}),retryCount:Number.isInteger(value.retryCount)?Math.min(2,Math.max(0,value.retryCount)):0,retrying:value.retrying===true,message:messages[value.message]||messages[phase],...(Number.isSafeInteger(value.startedAt)?{startedAt:value.startedAt}:{}),...(Number.isSafeInteger(value.updatedAt)?{updatedAt:value.updatedAt}:{}),...(typeof value.version==='string'&&/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]{1,40})?$/.test(value.version)?{version:value.version}:{})};
 }
 async function findFile(candidates){for(const file of candidates)if(file&&isAbsolute(file))try{const actual=await realpath(file);if((await lstat(actual)).isFile())return actual;}catch{}return undefined;}
 async function discoverNpm(node,app,env){
@@ -103,7 +248,7 @@ async function discoverNpm(node,app,env){
   }
   return findFile(candidates.filter(file=>typeof file==='string'&&file.endsWith('npm-cli.js')));
 }
-export async function inspectUpdateInstallation({directory,applicationRoot=resolve(dirname(modulePath),'../..'),node=process.execPath,nodeVersion=process.versions.node,env=process.env}={}){
+export async function inspectUpdateInstallation({directory,applicationRoot=resolve(dirname(modulePath),'../..'),node=process.execPath,nodeVersion=process.versions.node,env=process.env,toolsRequired=true}={}){
   const app=join(resolve(directory),'app');
   try{
     if(resolve(applicationRoot)!==app||await realpath(app)!==app||await realpath(node)!==await realpath(join(app,'runtime',process.platform==='win32'?'node.exe':'node')))throw Error('Not installed');
@@ -111,6 +256,7 @@ export async function inspectUpdateInstallation({directory,applicationRoot=resol
     await access(join(app,'central/runtime/main.mjs'));await access(join(app,'extension/manifest.json'));
   }catch{throw error('UPDATE_MANUAL_REQUIRED','설치된 관리 프로그램에서만 자동 업데이트할 수 있습니다. 최신 설치 도구로 설치한 관리 화면을 열어 주세요.');}
   if(!supportedUpdateNode(nodeVersion))throw error('UPDATE_RUNTIME_REQUIRED','Node 24.13 이상이 필요합니다. 런타임 변경은 setup.command 또는 setup.ps1로 설치하세요.');
+  if(!toolsRequired)return{app,node:await realpath(node)};
   const npmCli=await discoverNpm(node,app,env);
   if(!npmCli)throw error('UPDATE_NPM_REQUIRED','npm을 찾지 못했습니다. npm이 포함된 Node 24.13 이상을 설치하거나 최신 설치 도구를 실행하세요.');
   const candidates=(env.PATH||'').split(delimiter).filter(Boolean).flatMap(folder=>[join(folder,process.platform==='win32'?'git.exe':'git')]);
@@ -204,14 +350,16 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
       else if(!support)support=publicSupport(saved.support);
       else if(['collecting','manual'].includes(support.status))support={status:'unavailable'};
     }
-    return {...publicUpdateStatus(value),...(support?{support}:{})};
+    const rollback=await rollbackAvailability({directory});
+    if(['ROLLBACK_INCOMPATIBLE','BACKUP_INVALID'].includes(value?.rollbackReason)&&rollback.available){rollback.available=false;rollback.reason=value.rollbackReason;}
+    return {...publicUpdateStatus(value),rollback,...(support?{support}:{})};
   };
   async function release(jobToken){const owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(owner?.jobToken===jobToken)await rm(lock,{recursive:true,force:true});}
   /**
    * 현재 상태와 설치 경로를 검사한 뒤 작업 ID·잠금·전용 작업 폴더를 준비합니다.
    * 초기 도구 누락도 실패 상태로 기록하여 자동 진단과 제보 대상이 되게 합니다.
    */
-  async function start(){
+  async function launch(mode='update'){
     assertUpdateSafe(manager.snapshot());
     if(activeJob&&!applying){const latest=await readJSON(statusFile).catch(()=>undefined),owner=await readJSON(join(lock,'owner.json')).catch(()=>undefined);if(['completed','failed'].includes(latest?.phase)&&!owner)activeJob=undefined;}
     if(applying||activeJob)throw error('UPDATE_IN_PROGRESS','이미 업데이트를 준비하고 있습니다. 진행 상태를 확인하세요.');
@@ -231,23 +379,25 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
       await writeUpdateJSON(join(lock,'owner.json'),{jobToken,controllerPid:process.pid});
       await mkdir(workDirectory,{recursive:true,mode:0o700});
       let installation;
-      try{installation=await inspect({directory});}
+      try{installation=await inspect({directory,...(mode==='rollback'?{toolsRequired:false}:{})});
+        if(mode==='rollback'){const available=await rollbackAvailability({directory});if(!available.available)throw error('ROLLBACK_UNAVAILABLE','검증된 이전 버전이 없어 되돌릴 수 없습니다.');}
+      }
       catch(failure){
         if(!['UPDATE_GIT_REQUIRED','UPDATE_NPM_REQUIRED','UPDATE_RUNTIME_REQUIRED'].includes(failure.code))throw failure;
         const diagnostic=classifyUpdateFailure(failure,'preparing');
         await writeUpdateJSON(join(workDirectory,'diagnostic.json'),{diagnostic,at:Date.now()});
-        await writeUpdateJSON(statusFile,{phase:'failed',message:'failed',diagnostic,jobId,startedAt,updatedAt:Date.now()});
+        await writeUpdateJSON(statusFile,{phase:'failed',mode,message:'failed',diagnostic,jobId,startedAt,updatedAt:Date.now()});
         await release(jobToken);return status();
       }
-      const job={...installation,directory,workDirectory,jobId,jobToken,startedAt,descriptor};activeJob=job;
-      await writeUpdateJSON(statusFile,{phase:'preparing',message:'preparing',startedAt,updatedAt:startedAt,jobId});
+      const job={...installation,mode,directory,workDirectory,jobId,jobToken,startedAt,descriptor};activeJob=job;
+      await writeUpdateJSON(statusFile,{phase:'preparing',mode,message:'preparing',startedAt,updatedAt:startedAt,jobId});
       launchPromise=(async()=>{
         try{
           const child=await prepare(job),owner=await readJSON(join(lock,'owner.json'));
           if(tokenEqual(owner?.jobToken,jobToken)&&!owner.workerPid)await writeUpdateJSON(join(lock,'owner.json'),{jobToken,controllerPid:process.pid,workerPid:child.pid});
         }catch(failure){
           const latest=await readJSON(statusFile).catch(()=>undefined);
-          if(latest?.jobId!==jobId||!['completed','failed'].includes(latest.phase))await writeUpdateJSON(statusFile,{phase:'failed',message:'failed',diagnostic:classifyUpdateFailure(failure,'preparing'),startedAt,updatedAt:Date.now(),jobId});
+          if(latest?.jobId!==jobId||!['completed','failed'].includes(latest.phase))await writeUpdateJSON(statusFile,{phase:'failed',mode,message:'failed',diagnostic:classifyUpdateFailure(failure,'preparing'),startedAt,updatedAt:Date.now(),jobId});
           await release(jobToken);if(activeJob?.jobToken===jobToken)activeJob=undefined;
         }
       })().catch(()=>{});
@@ -261,12 +411,12 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     if(prepared?.phase!=='ready'||prepared.jobId!==activeJob.jobId)throw error('UPDATE_NOT_READY','업데이트 준비와 검사가 아직 끝나지 않았습니다.');
     assertUpdateSafe(manager.snapshot());
     applying=true;
-    try{await writeUpdateJSON(join(directory,'shutdown.json'),{intent:'update',at:Date.now()});await writeUpdateJSON(statusFile,{phase:'applying',message:'applying',jobId:activeJob.jobId,startedAt:activeJob.startedAt,updatedAt:Date.now()});}
+    try{await writeUpdateJSON(join(directory,'shutdown.json'),{intent:'update',at:Date.now()});await writeUpdateJSON(statusFile,{phase:'applying',mode:activeJob.mode,message:'applying',jobId:activeJob.jobId,startedAt:activeJob.startedAt,updatedAt:Date.now()});}
     catch(e){applying=false;throw e;}
     setTimeout(()=>void shutdown().catch(async()=>{await writeUpdateJSON(statusFile,{phase:'failed',message:'shutdown_failed',startedAt:activeJob.startedAt,updatedAt:Date.now()}).catch(()=>{});}),50);
     return{accepted:true};
   }
-  return{status,start,apply,monitor,reportFailure,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
+  return{status,start:()=>launch('update'),rollback:()=>launch('rollback'),apply,monitor,reportFailure,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
 }
 export async function withUpdateManagerLock(directory,action){
   const lock=new DatabaseSync(join(directory,'manager-lock.sqlite'));
@@ -296,7 +446,7 @@ export async function swapUpdateDirectories({app,prepared,backup,move=rename}){
 async function validateJob(jobPath){
   const info=await lstat(jobPath);if(!info.isFile()||process.platform!=='win32'&&(info.mode&0o077)||typeof process.getuid==='function'&&info.uid!==process.getuid())throw Error('Private update job required');
   const job=await readJSON(jobPath);
-  if(!job||!isAbsolute(job.directory)||!/^[a-f0-9]{32}$/.test(job.jobId)||!/^[a-f0-9]{64}$/.test(job.jobToken)||resolve(job.workDirectory)!==join(resolve(job.directory),'updates','jobs',job.jobId)||resolve(jobPath)!==join(job.workDirectory,'job.json')||job.app!==join(resolve(job.directory),'app'))throw Error('Invalid update job');
+  if(!job||job.mode!==undefined&&!['update','rollback'].includes(job.mode)||!isAbsolute(job.directory)||!/^[a-f0-9]{32}$/.test(job.jobId)||!/^[a-f0-9]{64}$/.test(job.jobToken)||resolve(job.workDirectory)!==join(resolve(job.directory),'updates','jobs',job.jobId)||resolve(jobPath)!==join(job.workDirectory,'job.json')||job.app!==join(resolve(job.directory),'app'))throw Error('Invalid update job');
   const url=new URL(job.descriptor.url);if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||!url.port||url.username||url.password||url.pathname!=='/'||url.search||url.hash||!/^[a-f0-9]{64}$/.test(job.descriptor.bridgeToken)||!Number.isSafeInteger(job.descriptor.pid))throw Error('Invalid update endpoint');
   return job;
 }
@@ -330,10 +480,19 @@ export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,wa
   const owner=await readJSON(join(lock,'owner.json'));if(!tokenEqual(owner?.jobToken,job.jobToken))throw Error('Update lock changed');
   await mkdir(join(job.workDirectory,'running'),{mode:0o700});
   await writeUpdateJSON(join(lock,'owner.json'),{jobToken:job.jobToken,controllerPid:job.descriptor.pid,workerPid:process.pid});
-  let stage='source',shutdownApproved=false,version,previousVersion,diagnostic,retryCount=0,retrying=false;
-  const report=(phase,message)=>writeUpdateJSON(statusFile,{phase,message,retryCount,retrying,...(diagnostic?{diagnostic}:{}),startedAt:job.startedAt,updatedAt:Date.now(),jobId:job.jobId,...(version?{version}:{})});
+  let stage='source',shutdownApproved=false,version,previousVersion,diagnostic,rollbackReason,rollbackHash,retryCount=0,retrying=false;
+  const report=(phase,message)=>writeUpdateJSON(statusFile,{phase,message,mode:job.mode==='rollback'?'rollback':'update',...(rollbackReason?{rollbackReason}:{}),retryCount,retrying,...(diagnostic?{diagnostic}:{}),startedAt:job.startedAt,updatedAt:Date.now(),jobId:job.jobId,...(version?{version}:{})});
   try{
     const checkout=join(job.workDirectory,'checkout'),prepared=join(job.workDirectory,'prepared'),backup=join(job.workDirectory,'previous'),env=updateEnvironment(job.workerNode,job.workDirectory);
+    if(job.mode==='rollback'){
+      stage='check';await report('preparing','check');
+      const identity=await verifiedRollback(job.directory),current=await readJSON(join(job.app,'central/package.json'));
+      version=identity.version;previousVersion=current?.version;rollbackHash=identity.hash;
+      await mkdir(prepared,{mode:0o700});
+      for(const part of ['central','extension'])await cp(join(rollbackPath(job.directory),part),join(prepared,part),{recursive:true});
+      if((await codeIdentity(prepared)).hash!==identity.hash)throw error('ROLLBACK_INVALID','되돌릴 파일의 검증에 실패했습니다.');
+      await verifyRollbackCompatibility({directory:job.directory,target:prepared,node:job.workerNode||job.node,workDirectory:job.workDirectory});
+    }else{
     for(const name of ['no-hooks'])await mkdir(join(job.workDirectory,name),{recursive:true,mode:0o700});
     for(const name of ['empty-config','empty-global-config'])await writeFile(join(job.workDirectory,name),'',{mode:0o600});
     for(const step of updateBuildPlan({...job,node:job.workerNode,checkout})) {
@@ -359,14 +518,26 @@ export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,wa
     await mkdir(prepared,{mode:0o700});
     await cp(join(checkout,'central'),join(prepared,'central'),{recursive:true,filter:file=>!file.split(/[\\/]/).some(part=>['node_modules','.git'].includes(part))});
     await cp(join(checkout,'central/extension'),join(prepared,'extension'),{recursive:true});
+    }
     await report('ready','ready');stage='authorize';
     const reply=await fetchRequest(job.descriptor.url+'/api/bridge/update/apply',{method:'POST',headers:{Authorization:`Bearer ${job.descriptor.bridgeToken}`,'Content-Type':'application/json'},body:JSON.stringify({jobToken:job.jobToken}),signal:AbortSignal.timeout(10000)});
     if(!reply.ok){stage=reply.status===409?'busy':'authorize';throw Error('Update apply denied');}
     shutdownApproved=true;stage='shutdown';await waitStopped(job);stage='apply';await report('applying','applying');
-    await withUpdateManagerLock(job.directory,()=>swapUpdateDirectories({app:job.app,prepared,backup}));stage='restart';await restart(job);await report('completed','completed');
-    await rm(checkout,{recursive:true,force:true});await rm(backup,{recursive:true,force:true});await rm(join(job.workDirectory,'npm-cache'),{recursive:true,force:true});
+    await withUpdateManagerLock(job.directory,async()=>{
+      if(job.mode==='rollback'){
+        if((await codeIdentity(prepared)).hash!==rollbackHash)throw error('ROLLBACK_INVALID','되돌릴 파일이 준비 이후 변경되었습니다.');
+        await verifyRollbackCompatibility({directory:job.directory,target:prepared,node:job.workerNode||job.node,workDirectory:job.workDirectory});
+      }
+      await swapUpdateDirectories({app:job.app,prepared,backup});
+    });stage='restart';await restart(job);
+    // 정상 시작 확인 이후에만 직전 코드를 보존한다. 보관 실패로 정상 시작한 앱을
+    // 되돌리지는 않으며 슬롯 검증 결과가 unavailable로 정확하게 표시된다.
+    let retained=false;
+    try{await retainRollbackVersion({directory:job.directory,source:backup,currentVersion:version});retained=true;}catch{rollbackReason='BACKUP_INVALID';}
+    await report('completed','completed');
+    await rm(checkout,{recursive:true,force:true});if(retained)await rm(backup,{recursive:true,force:true});await rm(join(job.workDirectory,'npm-cache'),{recursive:true,force:true});
   }catch(e){
-    retrying=false;diagnostic=classifyUpdateFailure(e,stage);
+    retrying=false;rollbackReason=e.code==='ROLLBACK_INCOMPATIBLE'?e.code:undefined;diagnostic=classifyUpdateFailure(e,stage);
     await writeUpdateJSON(join(job.workDirectory,'diagnostic.json'),{diagnostic,retryCount,at:Date.now()}).catch(()=>{});
     let message=e.code==='UPDATE_RUNTIME_ACTIVE'?'runtime_active':e.code==='UPDATE_ROLLBACK_FAILED'?'rollback_failed':stage==='busy'?'busy':messages[`${stage}_failed`]?`${stage}_failed`:'failed';
     // Roll back a failed launch only after proving the new process exited; never swap a possibly live runtime.
