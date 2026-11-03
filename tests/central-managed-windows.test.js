@@ -146,3 +146,14 @@ test('consolidation refuses a recorded tab navigated to another Discord channel 
  await assert.rejects(r.manage({...target,action:'consolidate'}),{code:'TARGET_MISMATCH'});assert.deepEqual(r.calls,[]);
  await assert.rejects(ensureConsolidatedManagedWindow(r.chrome,{...target,tabId:10,channelId:'444'}),{code:'TARGET_MISMATCH'});assert.deepEqual(r.calls,[]);
 });
+
+test('adopted user tabs stay in place during recovery and are never automatically hidden or closed',async()=>{
+ const r=fixture({record:{...target,windowId:8,ownership:'adopted'}});
+ assert.equal(await ensureConsolidatedManagedWindow(r.chrome,target),8);
+ await assert.rejects(r.manage({...target,action:'hide'}),{code:'WINDOW_NOT_DEDICATED'});
+ const result=await r.manage({...target,action:'close'});assert.equal(result.closed,false);assert.equal(result.detached,true);assert.deepEqual(r.calls,[]);
+});
+test('new managed channels never use adopted user windows as owned containers',async()=>{
+ const r=fixture({record:{...target,windowId:8,ownership:'adopted'}});
+ await createManagedWindow(r.chrome,{...target,channelId:'333'});assert.equal(r.calls[0][0],'create');
+});

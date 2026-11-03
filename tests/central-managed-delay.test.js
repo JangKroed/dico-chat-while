@@ -10,7 +10,7 @@ test('managed page delay responds only after the background timer completes',asy
 });
 test('delay rejects unknown tabs, other extensions, other sites and unbounded waits without timers',async()=>{
  for(const [message,source] of [[{durationMs:1001},sender],[{durationMs:-1},sender],[{durationMs:NaN},sender],[{durationMs:1.2},sender],[{durationMs:100},{...sender,id:'other'}],[{durationMs:100},{...sender,tab:{id:99}}],[{durationMs:100},{...sender,url:'https://example.com'}],[{durationMs:100},{...sender,frameId:1}]]){
-  assert.deepEqual(await managedPageDelay(message,source,state,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}}),{ok:false});
+  assert.equal((await managedPageDelay(message,source,state,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}})).ok,false);
  }
 });
 
@@ -31,16 +31,16 @@ test('an old session, mismatched configuration, foreign route or drained attempt
  const reopened={...sender,tab:{...sender.tab,id:8}};
  for(const override of [{sessionId:'old'},{configVersion:1},{accountId:'other'},{channelId:'other'},{guildId:'other'},{phase:'unknown'},{phase:'not_sent'},{phase:'cancelled'}]){
   const current={sessionId:'session',bindings:{binding},attempts:{attempt:{...attempt,...override}}};
-  assert.deepEqual(await managedPageDelay({durationMs:100},reopened,current,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}}),{ok:false});
+  assert.equal((await managedPageDelay({durationMs:100},reopened,current,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}})).ok,false);
  }
  const current={sessionId:'session',bindings:{binding},attempts:{attempt}};
- assert.deepEqual(await managedPageDelay({durationMs:100},{...reopened,url:'https://discord.com/channels/g/other'},current,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}}),{ok:false});
+ assert.equal((await managedPageDelay({durationMs:100},{...reopened,url:'https://discord.com/channels/g/other'},current,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}})).ok,false);
 });
 
 test('worker delay rechecks current session after waking without granting input permission',async()=>{
  const binding={bindingId:'binding',tabId:7,accountId:'account',guildId:'g',channelId:'c',configVersion:2};
  const current={sessionId:'session',bindings:{binding},attempts:{attempt:{attemptId:'attempt',bindingId:'binding',tabId:8,accountId:'account',guildId:'g',channelId:'c',configVersion:2,sessionId:'session',phase:'preparing'}}};
- assert.deepEqual(await managedPageDelay({durationMs:100},{...sender,tab:{...sender.tab,id:8}},current,{extensionId:'extension',wait:async()=>{current.sessionId='new-session';}}),{ok:false});
+ assert.equal((await managedPageDelay({durationMs:100},{...sender,tab:{...sender.tab,id:8}},current,{extensionId:'extension',wait:async()=>{current.sessionId='new-session';}})).ok,false);
 });
 
 test('a real executor accepts a reopened PREPARE while its message configuration still references the closed tab',async()=>{
@@ -65,4 +65,19 @@ test('a real executor accepts a reopened PREPARE while its message configuration
  await executor.handleCommand({id:'prepare',type:'PREPARE',instanceId:'instance',sessionId:'session',payload});
  assert.deepEqual(delayResult,{ok:true});assert.equal(stored.bindings.binding.tabId,7);assert.equal(stored.attempts.attempt.tabId,8);assert.equal(stored.attempts.attempt.phase,'prepared');
  assert.equal(requests.filter(message=>message.type==='PREPARED').length,1);assert.equal(events.includes('DICO_DELIVER'),false);
+});
+
+test('대기 거절은 본문이나 식별자 없이 고정 진단 코드로 구분한다',async()=>{
+ const cases=[
+  [{durationMs:1500},sender,state,'DELAY_INVALID_DURATION'],
+  [{durationMs:100},{...sender,id:'foreign'},state,'DELAY_INVALID_SENDER'],
+  [{durationMs:100},{...sender,tab:{id:99}},state,'DELAY_UNREGISTERED_TAB'],
+  [{durationMs:100},{...sender,url:'https://discord.com/channels/g/other'},state,'DELAY_ROUTE_MISMATCH'],
+  [{durationMs:100},{...sender,tab:{id:8}},{sessionId:'new',bindings:state.bindings,attempts:{a:{bindingId:'binding',tabId:8,guildId:'g',channelId:'c',sessionId:'old',phase:'preparing'}}},'DELAY_SESSION_MISMATCH'],
+ ];
+ for(const [message,source,current,reasonCode] of cases)assert.deepEqual(await managedPageDelay(message,source,current,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}}),{ok:false,reasonCode});
+});
+
+test('같은 Discord 채널의 마지막 슬래시는 관리 대기를 거절하지 않는다',async()=>{
+ assert.deepEqual(await managedPageDelay({durationMs:100},{...sender,url:sender.url+'/'},state,{extensionId:'extension',wait:async()=>{}}),{ok:true});
 });

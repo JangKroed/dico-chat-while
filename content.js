@@ -35,9 +35,18 @@
     // Hidden Chromium tabs can throttle chained page timers to once a minute.
     // The extension worker supplies bounded wakeups; every resumed operation
     // still checks the editor, clock, target and current send authorization.
-    const response=await chrome.runtime.sendMessage({type:'DICO_DELAY',durationMs});
-    assertOperationActive();
-    if(response?.ok!==true)throw Object.assign(Error('전송 창의 대기 연결이 끊겼습니다.'),{code:'MANAGED_DELAY_UNAVAILABLE'});
+    // 재승인 응답은 최대 5초 대기를 요청하지만 worker는 한 요청을 1초로 제한합니다.
+    // 전체 대기 시간을 유지하면서 나누어 요청하고, 매 응답 뒤 중단 신호를 확인합니다.
+    // 대기가 끝나도 Enter 권한은 생기지 않으며 호출부가 다시 승인을 확인합니다.
+    for(let remaining=durationMs;;){
+      const chunk=Math.min(1000,remaining);
+      let response;
+      try{response=await chrome.runtime.sendMessage({type:'DICO_DELAY',durationMs:chunk});}
+      catch{response={ok:false,reasonCode:'DELAY_TRANSPORT_FAILED'};}
+      assertOperationActive();
+      if(response?.ok!==true)throw Object.assign(Error('전송 창의 대기 연결이 끊겼습니다.'),{code:'MANAGED_DELAY_UNAVAILABLE',reasonCode:response?.reasonCode||'DELAY_RESPONSE_UNAVAILABLE'});
+      remaining-=chunk;if(remaining<=0)break;
+    }
   }
 
   const normalize = text => text.replace(/\r\n/g, '\n').replace(/\u200b/g, '').replace(/(\p{Emoji})\uFE0F/gu, '$1').trim();
@@ -1137,7 +1146,7 @@
         retryCount++;
       }
     } catch(error) {
-      trace('exception',{exception:{name:error?.name,message:error?.message,stack:error?.stack}});
+      trace('exception',{code:error?.code,reasonCode:error?.reasonCode,exception:{name:error?.name,message:error?.message,stack:error?.stack}});
       watcher?.cancel();
       return { status: evidence.enterAttempted || (entered&&error?.code!=='EXECUTION_STOPPED') ? 'uncertain' : 'blocked',code:error?.code==='EXECUTION_STOPPED'?'EXECUTION_STOPPED':error?.code==='MANAGED_DELAY_UNAVAILABLE'?'MANAGED_DELAY_UNAVAILABLE':evidence.enterAttempted?'CONTENT_EXCEPTION_AFTER_ENTER':'CONTENT_EXCEPTION_BEFORE_ENTER', error: 'Discord 입력창에 연결하지 못했습니다. 채널과 남은 초안을 확인해 주세요.' };
     } finally { watcher?.stop();if(activeOperation===operation)activeOperation=null;busy = false; }

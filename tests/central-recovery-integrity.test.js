@@ -40,7 +40,7 @@ function backgroundFunction(name,next,deps){
 test('real background opener cleans up creation completed after emergency stop without persisting tabs',async()=>{
  const state={sessionId:'s',resetEpoch:0,legacyDeclaration:'fresh',attempts:{}};let writes=0;const removed=[];
  const p={accountId:'12345678901234567',guildId:'2',channelId:'3'};
- const chrome={storage:{local:{get:async()=>({dicoCentralAccount:{accountId:p.accountId},dicoCentralTabs:[]}),set:async()=>writes++}},tabs:{remove:async id=>removed.push(id)}};
+ const chrome={storage:{local:{get:async()=>({dicoCentralAccount:{accountId:p.accountId},dicoCentralTabs:[]}),set:async()=>writes++}},tabs:{query:async()=>[],remove:async id=>removed.push(id)}};
  const open=backgroundFunction('openManagedChannelNow','bindActive',{executor:{state},transport:{connected:true},chrome,currentRegistration:s=>s,currentAccount:async()=>true,createManagedWindow:async()=>{state.emergencyStopped=true;return{id:8,tabs:[{id:9}]};}});
  await assert.rejects(open(p),{code:'STALE_SESSION'});assert.equal(writes,0);assert.deepEqual(removed,[9]);
 });

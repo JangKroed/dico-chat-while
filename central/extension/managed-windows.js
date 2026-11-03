@@ -2,7 +2,7 @@ function fail(code,message){throw Object.assign(Error(message),{code});}
 function discordTab(tab){try{return new URL(tab?.url).origin==='https://discord.com';}catch{return false;}}
 function channelTab(tab,record){try{const url=new URL(tab?.url);return url.origin==='https://discord.com'&&[ `/channels/${record.guildId}/${record.channelId}`,`/channels/${record.guildId}/${record.channelId}/`].includes(url.pathname);}catch{return false;}}
 function ownsWindow(win,records){
-  return win?.type==='normal'&&win.tabs?.length>0&&win.tabs.every(tab=>records.some(record=>record.tabId===tab.id&&record.windowId===win.id&&channelTab(tab,record)));
+  return win?.type==='normal'&&win.tabs?.length>0&&win.tabs.every(tab=>records.some(record=>record.ownership!=='adopted'&&record.tabId===tab.id&&record.windowId===win.id&&channelTab(tab,record)));
 }
 // A stored window ID is provenance, not sufficient ownership: users can move
 // ordinary tabs into a managed window. Never minimize or reuse such a window.
@@ -34,7 +34,12 @@ export async function ensureConsolidatedManagedWindow(chrome,target,assertCurren
   const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralWindowId']),records=saved.dicoCentralTabs||[];
   const record=records.find(item=>item.tabId===target.tabId&&item.accountId===target.accountId&&item.guildId===target.guildId&&item.channelId===target.channelId);
   if(!record)fail('MANAGED_TAB_MISSING','연결된 전송용 탭을 찾을 수 없습니다.');
-  const tab=await managedTab(chrome,record);let windowId=await ownedWindowId(chrome,saved);
+  const tab=await managedTab(chrome,record);
+  assertCurrent();
+  // 사용자가 이미 열어 둔 탭은 연결만 빌려 씁니다. 복구 과정에서 일반 창을
+  // 전송 전용 창으로 바꾸거나 사용자 탭을 이동하면 안 됩니다.
+  if(record.ownership==='adopted')return tab.windowId;
+  let windowId=await ownedWindowId(chrome,saved);
   assertCurrent();
   if(!Number.isInteger(windowId)){
     const win=await chrome.windows.create({tabId:tab.id,type:'normal',state:'minimized',focused:false});
@@ -53,6 +58,7 @@ async function managedTab(chrome,record){
 }
 async function separateRecord(chrome,records,record){
   const tab=await managedTab(chrome,record);
+  if(record.ownership==='adopted')return tab.windowId;
   const win=await chrome.windows.get(tab.windowId,{populate:true});
   let windowId=tab.windowId;
   if(win.type!=='normal'||win.tabs?.length!==1||win.tabs[0].id!==tab.id){
@@ -118,6 +124,8 @@ async function closeManagedChannel(chrome,records,record,target){
   let tab;try{tab=await chrome.tabs.get(target.tabId);}catch{}
   const unregister=async()=>{if(record)await chrome.storage.local.set({dicoCentralTabs:records.filter(item=>item!==record)});};
   if(!tab){await unregister();return{action:'close',tabId:target.tabId,closed:false,alreadyClosed:true};}
+  // 중앙의 채널 삭제는 연결 해제까지만 수행하고 사용자가 열었던 탭은 남깁니다.
+  if(record?.ownership==='adopted'){await unregister();return{action:'close',tabId:target.tabId,closed:false,detached:true};}
   if(!channelTab(tab,target)){
     // A deleted destination must not be recovered, but a user-navigated page is
     // no longer ours to close. Keep the command rejected until manually resolved.
@@ -135,7 +143,10 @@ export function createManagedWindowController({chrome}){
     if(target.action==='close')return closeManagedChannel(chrome,records,record,{...target,tabId:record?.tabId??target.tabId});
     if(!record)fail('MANAGED_TAB_MISSING','연결된 전송용 탭을 찾을 수 없습니다. 채널 연결 상태를 확인해 주세요.');
     if(target.action==='separate')return separateManagedWindows(chrome,records,target);
-    if(target.action==='consolidate')return consolidateManagedWindows(chrome,records,target);
+    if(target.action==='consolidate'){
+      if(records.some(item=>item.ownership==='adopted'))fail('WINDOW_NOT_DEDICATED','직접 열어 연결한 탭은 자동으로 이동하지 않습니다. 전송 전용 탭의 창만 정리할 수 있습니다.');
+      return consolidateManagedWindows(chrome,records,target);
+    }
     let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{fail('MANAGED_TAB_MISSING','전송용 탭이 닫혔습니다. 채널을 다시 연결해 주세요.');}
     if(!Number.isInteger(tab?.windowId)||!discordTab(tab))fail('TARGET_MISMATCH','연결된 탭이 Discord 화면이 아닙니다. 탭 상태를 확인해 주세요.');
     let win;try{win=await chrome.windows.get(tab.windowId,{populate:true});}catch{fail('MANAGED_TAB_MISSING','전송용 창을 찾을 수 없습니다.');}

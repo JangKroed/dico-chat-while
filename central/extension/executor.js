@@ -59,7 +59,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   // 일반 연결 복구 idle은 엄격하게 유지하며, 활성 호출/초안 준비/발송 중에는 허용하지 않습니다.
   const isMaintenanceIdle=()=>Boolean(state)&&!state.resetPending&&inFlight===0&&Object.values(state.attempts).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase)||['unknown','needs_review'].includes(a.phase)&&a.result?.executionBlocked===true);
   const matches=(a,p)=>['bindingId','accountId','guildId','channelId','tabId','configVersion','body'].every(k=>a[k]===p[k])&&normalizeSendRetries(a.maxSendRetries)===normalizeSendRetries(p.maxSendRetries);
-  const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
+  const tabMatches=async a=>{try{const tab=await chrome.tabs.get(a.tabId);return new URL(tab.url).pathname.replace(/\/$/,'')===`/channels/${a.guildId}/${a.channelId}` && new URL(tab.url).origin==='https://discord.com';}catch{return false;}};
   function inputAllowed(message,tabId){
     const a=state?.attempts?.[message?.id];
     if(!state||state.resetPending||maintenance||!transport.connected||state.emergencyStopped||!a||a.tabId!==tabId||a.sessionId!==state.sessionId||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))return false;
@@ -237,6 +237,11 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(typeof openChannel!=='function')throw Object.assign(Error('채널 연결 기능을 지원하는 확장으로 업데이트하세요.'),{code:'OPEN_CHANNEL_UNSUPPORTED'});
       await openChannel({...p,commandId:c.id});await ack(c,'applied');
     } else if(c.type==='CONFIG_SYNC') {
+      // PREPARE 거절 ACK가 중앙에 도착해도 로컬 기록은 preparing에 남을 수 있습니다.
+      // 재연결의 설정 동기화도 중앙 종료 기록을 먼저 대조해야 이 잔여 기록에 막히지 않습니다.
+      // 중앙에서 종료를 확인한 시도만 정리하며, 미확인 결과나 응답 유실은 계속 차단합니다.
+      await synchronizePreviousAttempts({bindingId:p.bindingId});
+      if(c.sessionId!==state.sessionId||c.instanceId!==state.instanceId)return;
       if(Object.values(state.attempts).some(a=>a.bindingId===p.bindingId && ['preparing','prepared','executing','unknown'].includes(a.phase)))throw Error('진행 중 발송 결과를 먼저 확인하세요.');
       state.bindings[p.bindingId]=structuredClone(p);await save();await ack(c,'applied');
     } else if(c.type==='PREPARE') {

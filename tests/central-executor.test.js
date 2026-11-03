@@ -699,3 +699,35 @@ test('업데이트 maintenance도 활성 전송과 실행 차단 증거 없는 �
   assert.equal(r.client.isMaintenanceIdle,false);assert.equal(r.client.beginMaintenance({allowBlocked:true}),false);
  }
 });
+
+test('재연결 설정 동기화는 중앙에서 종료된 준비 실패 기록을 대조해 해제한다',async()=>{
+ const r=rig();await configured(r);
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():{status:'blocked',code:'MANAGED_DELAY_UNAVAILABLE'};
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.attempts.attempt.phase,'preparing');
+ await r.client.setSession({instanceId:'instance',sessionId:'reconnected'});
+ const request=r.transport.request;r.transport.request=async m=>{await request(m);return m.type==='HEARTBEAT'?{ok:true,terminalAttempts:[{attemptId:'attempt',status:'not_sent'}]}:{ok:true};};
+ await r.client.handleCommand({...cmd('CONFIG_SYNC','reconnect-sync'),sessionId:'reconnected',payload:{...payload,attemptId:undefined,configVersion:2}});
+ assert.equal(r.state.attempts.attempt.phase,'not_sent');
+ assert.equal(r.state.bindings.binding.configVersion,2);
+ assert.ok(r.reports.some(m=>m.type==='ACK'&&m.commandId==='reconnect-sync'&&m.status==='applied'));
+ assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
+});
+
+test('설정 동기화 대조에서 미확인 결과 또는 바뀐 세션은 설정 적용을 막는다',async()=>{
+ for(const mode of ['unknown','lost','session']){
+  const r=rig();await configured(r);
+  r.client.state.attempts.previous={...payload,attemptId:'previous',sessionId:'session',phase:'unknown',enterRequested:true};await r.client.save();
+  r.transport.request=async m=>{if(m.type==='HEARTBEAT'){if(mode==='lost')throw Error('lost');if(mode==='session')await r.client.setSession({instanceId:'instance',sessionId:'new'});return{ok:true,terminalAttempts:mode==='unknown'?[]:[{attemptId:'previous',status:'not_sent'}]};}return{ok:true};};
+  await r.client.handleCommand({...cmd('CONFIG_SYNC','reconnect-sync'),payload:{...payload,attemptId:undefined,configVersion:2}});
+  assert.equal(r.state.bindings.binding.configVersion,1,mode);assert.equal(r.state.attempts.previous.phase,'unknown',mode);
+  assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
+ }
+});
+
+test('재사용 채널 URL의 마지막 슬래시는 입력 준비 대상을 바꾸지 않는다',async()=>{
+ const r=rig();await configured(r);r.chrome.tabs.get=async()=>({id:7,url:`https://discord.com/channels/${payload.guildId}/${payload.channelId}/`});
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.attempts.attempt?.phase,'prepared');
+ assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
+});

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {managedPageDelay} from '../central/extension/managed-delay.js';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
@@ -54,7 +55,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const DateMock=class extends Date {static now(){return clock}};
  const pageLocation={origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:pageLocation,Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false};if(m.type==='DICO_DELAY')return new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve({ok:true});}));if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook){const handled=await runtimeHook(m);if(handled!==undefined)return handled;}if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false,reasonCode:'DELAY_UNREGISTERED_TAB'};if(m.type==='DICO_DELAY')return managedPageDelay(m,{id:'ext',url:'https://discord.com/channels/g/c',tab:{id:7}},{bindings:{binding:{tabId:7,guildId:'g',channelId:'c'}}},{extensionId:'ext',wait:()=>new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve();}))});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook){const handled=await runtimeHook(m);if(handled!==undefined)return handled;}if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
@@ -504,6 +505,7 @@ test('managed delay rejection preserves the draft and never presses Enter',async
  const r=rig({managed:true,loggedUser:'123456789012345678',workerDelayFails:true});r.target.coordinated=true;r.editor.innerText='A';
  const result=await r.request('DICO_PREPARE');assert.equal(result.status,'blocked');assert.equal(result.code,'MANAGED_DELAY_UNAVAILABLE');
  assert.equal(r.editor.innerText,'A');assert.equal(r.events.filter(e=>e.type==='keydown').length,0);
+ assert.equal(r.traces.find(t=>t.stage==='exception').data.reasonCode,'DELAY_UNREGISTERED_TAB');
 });
 
 test('disposing managed content stops calibration worker wakeups after the pending response drains',async()=>{

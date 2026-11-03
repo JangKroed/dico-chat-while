@@ -118,3 +118,18 @@ test('compaction prioritizes old unresolved and active group attempts and preser
  const r=await createSupportReport({manager:{supportData:()=>input},to:at});assert.ok(r.attempts.some(a=>a.id==='critical-old'));assert.ok(r.checks.some(c=>c.code==='DELIVERY_UNKNOWN'&&c.attemptId==='critical-old'));
  assert.ok(r.selection.omittedCounts.timeline>0);assert.equal(inspectSupportReport(r).report.selection.omittedCounts.timeline,r.selection.omittedCounts.timeline);
 });
+
+test('관리 대기 거절 사유는 확장 trace와 제보 내보내기 필터를 지나도 유지된다',async()=>{
+ const {managedPageDelay}=await import('../central/extension/managed-delay.js');
+ const {createDeliveryTracer,traceData}=await import('../central/extension/delivery-trace.js');
+ const delay=await managedPageDelay({durationMs:100},{id:'ext',url:'https://discord.com/channels/111/222',tab:{id:8}},{bindings:{}},{extensionId:'ext'});
+ const source=data();source.events=[];
+ const executor={load:async()=>{},state:{sessionId:'s',attempts:{a:{attemptId:'a',tabId:8,sessionId:'s'}}},request:async message=>{
+  source.events.push({type:'delivery.trace',eventId:1,at,attemptId:'a',stage:message.stage,data:traceData(message.data)});return{recorded:true};
+ }};
+ await createDeliveryTracer({executor,now:()=>at})({id:'a',stage:'exception',data:{code:'MANAGED_DELAY_UNAVAILABLE',reasonCode:delay.reasonCode,exception:{message:'NEVER-EXPORT-EXCEPTION'}}},8);
+ const exported=await createSupportReport({manager:{supportData:()=>source},appVersion:'0.4.37',now:()=>at,to:at});
+ assert.equal(exported.events[0].data.code,'MANAGED_DELAY_UNAVAILABLE');
+ assert.equal(exported.events[0].data.reasonCode,'DELAY_UNREGISTERED_TAB');
+ assert.doesNotMatch(JSON.stringify(exported),/NEVER-EXPORT-EXCEPTION/);
+});
