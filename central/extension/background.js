@@ -1,3 +1,4 @@
+import {createRecoveryScheduler} from './recovery-scheduler.js';
 /**
  * 중앙 관리 전용 확장의 service worker 진입점입니다. 루트 background.js의 단독 확장과 구분합니다.
  * Native transport, 명령 실행기, 계정/채널 관찰, 하트비트, 관리 탭과 업데이트를 조립합니다.
@@ -25,6 +26,7 @@ const transport=createNativeTransport(chrome),executor=createCentralExecutor({ch
 const traceDelivery=createDeliveryTracer({executor});
 const observation=createObservationQueue(collectObservation,publishObservation);
 const heartbeat=createSingleFlight(runHeartbeat);
+const automaticRecovery=createRecoveryScheduler();
 let channelOpening=Promise.resolve();
 let connecting=null,heartbeatTimer=null,lastError=null,updateIssue=null,recoveryPending=false;
 const updater=createExtensionUpdater({chrome,executor,transport,loadedBuildId:BUILD_ID,onIssue:message=>{updateIssue=message;}});
@@ -52,7 +54,7 @@ async function refreshManagedContent(){
   try{
     const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;
     const statuses=await ensureManagedContent(chrome,records,BUILD_ID);
-    const failed=statuses.filter(s=>!s.ready);
+    const failed=statuses.filter(s=>!s.ready&&s.reason!=='TAB_MISSING'&&s.reason!=='CONTENT_BUSY');
     if(failed.length)updateIssue='기존 Discord 탭 '+failed.length+'개는 최초 한 번 새로고침이 필요합니다. 작성 중인 초안을 보관한 뒤 해당 탭을 새로고침하세요.';
     else if(updateIssue?.startsWith('기존 Discord 탭 '))updateIssue=null;
   }finally{executor.endMaintenance();}
@@ -98,13 +100,14 @@ async function collectObservation() {
 }
 async function publishObservation(snapshot){
   if(!transport.connected||executor.state.emergencyStopped||snapshot.sessionId!==executor.state.sessionId)return{ignored:true};
+  automaticRecovery.observe(snapshot);
   if(snapshot.account){lastAccountObservation=snapshot.account;await executor.request({type:'ACCOUNT_OBSERVATION',...snapshot.account});}
   if(!transport.connected||executor.state.emergencyStopped||snapshot.sessionId!==executor.state.sessionId)return{ignored:true};
   return executor.request({type:'OBSERVATION',channels:snapshot.channels,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
 }
-async function restoreSavedConnections(){
+async function restoreSavedConnections({onlyMissing=false}={}){
   const sessionId=executor.state.sessionId;
-  await recoverConnections({chrome,state:executor.state,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
+  await recoverConnections({chrome,onlyMissing,state:executor.state,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
     canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
@@ -120,7 +123,7 @@ async function runHeartbeat() {
     }
     await executor.save();
     for(const command of result.commands || [])void executor.handleCommand(command);
-    await refreshManagedContent();if(recoveryPending&&executor.isIdle)await restoreSavedConnections();await observation();await updater.check();lastError=null;
+    await refreshManagedContent();await observation();await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});await updater.check();lastError=null;
   }catch{lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect({explicit=false}={}) {

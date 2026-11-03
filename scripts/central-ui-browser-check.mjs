@@ -59,8 +59,12 @@ async function checkLongAttemptModal() {
   assert.ok(dimensions.height<=dimensions.viewport-15,`Dialog exceeds viewport: ${JSON.stringify(dimensions)}`);
   assert.ok(dimensions.top>=0,`Dialog top clipped: ${JSON.stringify(dimensions)}`);
   assert.ok(dimensions.scrollHeight>dimensions.clientHeight,`Long diagnostics should scroll: ${JSON.stringify(dimensions)}`);
-  await cmd('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End'});
-  await until(async()=>await evalJS('document.querySelector("[data-layout-check] .modal")?.scrollTop>0'));
+  await until(async()=>await evalJS(`document.activeElement?.closest("[data-layout-check]")!==null`));
+  await evalJS(`document.querySelector("[data-layout-check] .modal").focus()`);
+  await cmd('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End',windowsVirtualKeyCode:35});
+  await cmd('Input.dispatchKeyEvent',{type:'keyUp',key:'End',code:'End',windowsVirtualKeyCode:35});
+  // End 키의 스크롤 애니메이션이 끝나 닫기 버튼이 실제로 보일 때까지 기다립니다.
+  await until(async()=>await evalJS('document.querySelector("[data-layout-check] .modal button")?.getBoundingClientRect().bottom<=innerHeight'));
   assert.ok(await evalJS('document.querySelector("[data-layout-check] .modal button")?.getBoundingClientRect().bottom<=innerHeight'), 'Close button must be reachable after keyboard scrolling');
   await evalJS('document.querySelector("[data-layout-check]")?.remove()');
 }
@@ -80,7 +84,7 @@ try {
     const packet=JSON.parse(message.data);
     if(packet.id){const waiting=pending.get(packet.id);pending.delete(packet.id);if(packet.error)waiting?.reject(Error(packet.error.message));else waiting?.resolve(packet.result)}
     if(packet.method==='Runtime.exceptionThrown')errors.push(packet.params.exceptionDetails.text);
-    if(packet.method==='Log.entryAdded' && packet.params.entry.level==='error')errors.push(packet.params.entry.text);
+    if(packet.method==='Log.entryAdded' && packet.params.entry.level==='error')errors.push(packet.params.entry.text+' '+(packet.params.entry.url||''));
   });
   await cmd('Page.enable');await cmd('Runtime.enable');await cmd('Log.enable');
   const url=`${runtime.url}/#bootstrap=${runtime.app.issueBootstrap()}`;
@@ -94,8 +98,18 @@ try {
   await clickText('button','새 메시지');
   await fill('input[placeholder="예: 주말 모집 공지"]','UI 검사 메시지');
   await fill('textarea[placeholder="Discord에 보낼 내용을 입력하세요"]','실제 전송하지 않는 검사 문구');
+  // 저장 응답을 지연시켜도 사용자가 전체 중지를 즉시 요청할 수 있어야 합니다.
+  // 실제 Discord 연결 없이 이 런타임의 저장/중단 HTTP 흐름만 검증합니다.
+  await evalJS(`(() => {const original=window.fetch.bind(window);window.__originalFetch=original;window.fetch=async(...args)=>{const response=await original(...args);let body;try{body=JSON.parse(args[1]?.body||'{}')}catch{}if(body?.action==='message.create')await new Promise(resolve=>window.__releaseSave=resolve);return response;};window.__originalConfirm=window.confirm;window.confirm=()=>{throw Error('중단 확인창이 열리면 안 됩니다.')}})()`);
   await clickText('button','보관함에 저장');
   await until(()=>runtime.manager.snapshot().messages.length===1);
+  assert.equal(await evalJS(`document.querySelector('[aria-label="전체 중지"]').disabled`),false);
+  await clickText('[aria-label="전체 중지"]','전체 중지');
+  await until(()=>runtime.manager.snapshot().events.some(event=>event.type==='service.stopped'));
+  await until(async()=>await evalJS('Boolean(window.__releaseSave)'));
+  await evalJS('window.__releaseSave();window.fetch=window.__originalFetch;window.confirm=window.__originalConfirm');
+  await visible('전체 중지를 요청했습니다.');
+  console.log('PASS stop remains available during pending save without confirmation dialog');
   assert.equal(runtime.manager.snapshot().messages[0].body,'실제 전송하지 않는 검사 문구');
   console.log('PASS message create through browser UI');
   await clickText('.message-item','UI 검사 메시지');
@@ -127,7 +141,7 @@ try {
   console.log(`PASS no console errors; screenshots in ${screenshots}`);
 } finally {
   try {if(socket){await cmd('Page.close');socket.close()}}catch{}
-  child?.kill('SIGTERM');
+  if(child&&child.exitCode===null){await new Promise(resolve=>{const timer=setTimeout(resolve,3000);child.once('exit',()=>{clearTimeout(timer);resolve()});child.kill('SIGTERM');});}
   await runtime?.close();
-  await rm(base,{recursive:true,force:true});
+  await rm(base,{recursive:true,force:true,maxRetries:5,retryDelay:100});
 }

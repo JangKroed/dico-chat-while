@@ -22,8 +22,9 @@ export function groupControls(s:Snapshot,g:Group,{busy=false,stale=false,now=s.s
   const action=g.status==='stopped'?'group.start':'group.resume'
   return {
     start:{action,label:running?'실행 중':action==='group.start'?'시작':'재개',disabled:busy||running||reasons.length>0,reasons:[...new Set(reasons)],confirmation:`‘${g.name}’ 그룹을 ${action==='group.start'?'시작':'재개'}할까요? 조건이 충족되면 실제 Discord 메시지가 발송됩니다.`},
-    // Stale display data must not remove the user's ability to request a stop.
-    stop:{action:'group.stop',label:!stale&&g.status==='stop_pending'?'중지 확인 중':'중지',disabled:busy||!stale&&(g.status==='stop_pending'||g.status==='stopped'&&(!g.activeAttemptId||attempt?.executionBlocked===true))},
+    // 중단은 저장·조회 진행과 독립적으로 허용합니다. 같은 요청의 중복은 App의 요청 키로 차단합니다.
+    // 최신 상태 수신 지연도 중단 요청 자체를 막는 근거가 아닙니다.
+    stop:{action:'group.stop',label:!stale&&g.status==='stop_pending'?'중지 확인 중':'중지',disabled:!stale&&(g.status==='stop_pending'||g.status==='stopped'&&(!g.activeAttemptId||attempt?.executionBlocked===true))},
     needsReview
   }
 }

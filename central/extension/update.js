@@ -9,8 +9,11 @@ export async function ensureManagedContent(chrome,records,buildId) {
   const results=[];
   for(const record of records) {
     const tabId=record.tabId;
+    // 없어진 탭은 새로고침할 대상이 없습니다. 관찰 기반 자동 복원에 맡기고
+    // 살아 있는 탭의 콘텐츠 교체 실패와 구분하여 사용자에게 잘못 안내하지 않습니다.
+    let tab;try{tab=await chrome.tabs.get(tabId);}catch{results.push({tabId,ready:false,reason:'TAB_MISSING'});continue;}
     try {
-      const tab=await chrome.tabs.get(tabId),url=new URL(tab.url);
+      const url=new URL(tab.url);
       if(url.origin!=='https://discord.com'||url.pathname!==`/channels/${record.guildId}/${record.channelId}`)continue;
       let current;try{current=await chrome.tabs.sendMessage(tabId,{type:'DICO_CONTENT_STATUS'});}catch{}
       if(current?.buildId===buildId){results.push({tabId,ready:true});continue;}

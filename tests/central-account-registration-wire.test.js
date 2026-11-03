@@ -6,13 +6,13 @@ import {accountIdentityMetadata,identityFailureMessage} from '../central/extensi
 import {currentRegistration} from '../central/extension/registration-state.js';
 import {observeRegisteredAccount,observeManagedChannel} from '../central/extension/observation-queue.js';
 const source=readFileSync(new URL('../central/extension/background.js',import.meta.url),'utf8');
-const accountFunctions=source.slice(source.indexOf('async function observe(tabId)'),source.indexOf('async function restoreSavedConnections()'));
+const accountFunctions=source.slice(source.indexOf('async function observe(tabId)'),source.indexOf('async function restoreSavedConnections('));
 function rig(){
  let seen={verified:true,accountId:'123456789012345678',accountName:'호야',username:'hoya',name:'채널 이름'};
  const saved={},requests=[];
  const chrome={storage:{local:{get:async()=>saved,set:async values=>Object.assign(saved,values)}},tabs:{get:async()=>({status:'complete'}),query:async()=>[{id:7}]}};
  const executor={state:{sessionId:'session',legacyDeclaration:true},load:async()=>{},request:async message=>{requests.push(message);return{account:{id:message.accountId}};}};
- const scope={chrome,executor,currentRegistration,transport:{connected:true},readAccountIdentity:async()=>seen,accountIdentityMetadata,identityFailureMessage,observeRegisteredAccount,observeManagedChannel,observeChannelLimit:async()=>({}),activeSourceTab:async()=>({id:7}),observation:async()=>{}};
+ const scope={automaticRecovery:{observe:()=>{}},chrome,executor,currentRegistration,transport:{connected:true},readAccountIdentity:async()=>seen,accountIdentityMetadata,identityFailureMessage,observeRegisteredAccount,observeManagedChannel,observeChannelLimit:async()=>({}),activeSourceTab:async()=>({id:7}),observation:async()=>{}};
  runInNewContext(accountFunctions+'\nglobalThis.actions={registerActiveAccount,collectObservation,publishObservation};',scope);
  return{...scope.actions,saved,requests,chrome,executor,scope,setSeen:value=>{seen=value;}};
 }

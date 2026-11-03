@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
-  "sourceHash": "326c2a8f5401f50a17731463e5fd89c9e7cf85cd7ca58f691a7d08e7aa7c0a19",
+  "sourceHash": "1025043c3fdaf6850f783b0603cb9ea1b42cf2ca42e8080c426a0302ac40c1e1",
   "assets": {
     "assets/index-BtkXTr2b.css": "8bff9c82ce71168fa9da450f8823465bd700bbdfd77aa512027e58318e8f7ef3",
-    "assets/index-YipXSCf1.js": "0a5b21b6ef2ae41725cd83a83f9a25776763a6cfa8e1ef90c23d6c29c7ab2f83",
-    "index.html": "6660b8a6d6ae848b4305d5edef00a01ae2b8b9fc9fdae8afa807adf7c3274634"
+    "assets/index-CAa9r5hK.js": "e2ae696587b7d42f85bc4ca516350cccefe3729a965384b9eeb212bb7a2b6194",
+    "favicon.svg": "5c0e8e8764a6114114636b55517e0b7b991eca4eebf31a882fce8bd79bdcb0cc",
+    "index.html": "7599b5246f484c5e8c5f89710ad4966e05f7ee24ecbefc52b8eeaf85c53702f8"
   }
 }

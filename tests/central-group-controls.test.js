@@ -23,7 +23,7 @@ test('unknown delivery stays blocked after stop completion while history remains
 test('running group can stop despite stale state and cannot start a duplicate run',()=>{
   const {s,group}=fixture();group.status='running';group.activeAttemptId='active';s.attempts=[{id:'active',status:'permitted'}];
   const controls=groupControls(s,group,{stale:true});assert.equal(controls.start.disabled,true);assert.equal(controls.stop.action,'group.stop');assert.equal(controls.stop.disabled,false);assert.equal(controls.needsReview,false);
-  assert.equal(groupControls(s,group,{busy:true}).stop.disabled,true);
+  assert.equal(groupControls(s,group,{busy:true}).stop.disabled,false,'다른 작업 진행 중에도 중지할 수 있어야 합니다.');
 });
 
 test('pause and pending controls map to correct commands and never offer immediate restart',()=>{
@@ -50,5 +50,5 @@ test('pending window moves prevent starting their browser group without blocking
 
 test('stale stopped or pending snapshots still allow an explicit stop against current service state',()=>{
   const {s,group}=fixture();
-  for(const status of ['stopped','stop_pending']){group.status=status;assert.equal(groupControls(s,group,{stale:true}).stop.disabled,false);assert.equal(groupControls(s,group,{stale:true,busy:true}).stop.disabled,true);}
+  for(const status of ['stopped','stop_pending']){group.status=status;assert.equal(groupControls(s,group,{stale:true}).stop.disabled,false);assert.equal(groupControls(s,group,{stale:true,busy:true}).stop.disabled,false);}
 });

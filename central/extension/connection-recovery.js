@@ -1,6 +1,6 @@
 import {currentRegistration} from './registration-state.js';
 // Restore only previously saved destinations, never infer new channel URLs.
-export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureManagedWindow=async()=>{},canRecover=async()=>true}){
+export async function recoverConnections({chrome,state,findAccount,openChannel,report,ensureManagedWindow=async()=>{},canRecover=async()=>true,onlyMissing=false}){
  const saved=currentRegistration(await chrome.storage.local.get(['dicoCentralAccount','dicoCentralTabs']),state.resetEpoch??0);
  const records=saved.dicoCentralTabs||[];
  // An empty registration is intentional after reset; open Discord tabs are
@@ -23,6 +23,9 @@ export async function recoverConnections({chrome,state,findAccount,openChannel,r
   await progress('channels',completed);
   if(record.accountId!==seen.accountId){await progress('blocked',completed,'ACCOUNT_UNVERIFIED');return;}
   let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{}
+  // 주기 관찰에서 요청한 복구는 누락 탭만 대상으로 합니다.
+  // 다른 페이지로 이동한 기존 탭은 그대로 두며 뒤의 누락 탭 복구를 막지 않습니다.
+  if(tab&&onlyMissing){completed++;continue;}
   if(tab){
    let matching=false;try{const url=new URL(tab.url);matching=url.origin==='https://discord.com'&&url.pathname===`/channels/${record.guildId}/${record.channelId}`;}catch{}
    if(!matching){await progress('blocked',completed,'TARGET_MISMATCH');return;}
