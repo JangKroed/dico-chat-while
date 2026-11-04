@@ -13,6 +13,7 @@ export function groupControls(s:Snapshot,g:Group,{busy=false,stale=false,now=s.s
   const needsReview=g.status==='needs_review'||Boolean(g.activeAttemptId&&(!attempt||attempt.status==='unknown'))
   const reasons=running?['이미 실행 중입니다.']:groupBlockers(s,g,now)
   if(!running){
+    if(g.enabled===false)reasons.push('비활성 그룹입니다. 먼저 활성화하세요.')
     if(stale)reasons.unshift('최신 상태 수신 후 시작할 수 있습니다.')
     if(s.service?.status&&!['ready','resume_required','stopped'].includes(String(s.service.status)))reasons.push(s.service.status==='storage_failure'?'저장 오류를 먼저 해결하세요. 설정의 설치 진단을 확인하세요.':'서비스 상태를 확인하세요. 문제 목록에서 원인을 확인할 수 있습니다.')
     const owners=new Set(g.members.map(id=>s.channels.find(c=>c.id===id)?.instanceId))

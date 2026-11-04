@@ -230,3 +230,8 @@ test('missing initial update tools are recorded and reported without launching a
  controller.setRuntimeDescriptor({url:'http://127.0.0.1:32123',pid:process.pid,bridgeToken:'b'.repeat(64)});
  const status=await controller.start();assert.equal(status.phase,'failed');await controller.monitor();assert.equal(reported,1);
 });
+
+test('입력 차단 후 연결에서 분리한 미확인 이력은 보존하면서 업데이트를 허용한다',()=>{
+ const s=idle();s.attempts=[{id:'archived',status:'unknown',detached:true,executionBlocked:true}];
+ assert.equal(safeToUpdate(s),true);s.attempts[0].executionBlocked=false;assert.equal(safeToUpdate(s),false);
+});

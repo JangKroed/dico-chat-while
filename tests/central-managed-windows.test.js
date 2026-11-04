@@ -157,3 +157,23 @@ test('new managed channels never use adopted user windows as owned containers',a
  const r=fixture({record:{...target,windowId:8,ownership:'adopted'}});
  await createManagedWindow(r.chrome,{...target,channelId:'333'});assert.equal(r.calls[0][0],'create');
 });
+
+test('로그인 확인 창에 비활성 탭을 만들고 서버별 그룹을 재사용하며 창은 이동하지 않는다',async()=>{
+ for(const reuse of [false,true]){
+  const {chrome,calls}=fixture();chrome.tabs.get=async()=>({id:70,windowId:80,url:'https://discord.com/channels/111/999'});
+  chrome.tabs.create=async info=>{calls.push(['tabCreate',info]);return{id:71,windowId:80};};
+  chrome.tabGroups={query:async query=>{calls.push(['query',query]);return reuse?[{id:9}]:[];},update:async(id,info)=>calls.push(['groupUpdate',id,info])};
+  chrome.tabs.group=async info=>{calls.push(['group',info]);return 9;};
+  const result=await createManagedWindow(chrome,{...target,sourceTabId:70});
+  assert.equal(result.id,80);assert.equal(result.ownership,'grouped');
+  assert.deepEqual(calls[0],['tabCreate',{windowId:80,active:false,url:'https://discord.com/channels/111/222'}]);
+  assert.deepEqual(calls[2],['group',{tabIds:[71],...(reuse?{groupId:9}:{createProperties:{windowId:80}})}]);
+  assert.ok(!calls.some(c=>['create','window'].includes(c[0])));
+ }
+});
+test('탭 그룹 생성 중 실패하면 새 탭만 정리하고 원래 로그인 탭은 보존한다',async()=>{
+ const {chrome,calls}=fixture();chrome.tabs.get=async()=>({id:70,windowId:80,url:'https://discord.com/channels/111/999'});
+ chrome.tabs.create=async()=>({id:71,windowId:80});chrome.tabs.remove=async id=>calls.push(['remove',id]);
+ chrome.tabGroups={query:async()=>{throw Error('denied');}};
+ await assert.rejects(createManagedWindow(chrome,{...target,sourceTabId:70}));assert.deepEqual(calls,[['remove',71]]);
+});

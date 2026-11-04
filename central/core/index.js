@@ -14,6 +14,8 @@ import { CentralError, requireValue as ensure, text, body, duration, tags, expec
 export { CentralError } from './validation.js';
 
 const ACTIVE = new Set(['preparing','permitted','unknown']);
+// 입력 차단 후 연결에서 분리한 미확인 기록은 이력으로만 남기며 재실행하지 않습니다.
+const activeAttempt=a=>ACTIVE.has(a.status)&&!(a.detached===true&&a.status==='unknown'&&a.executionBlocked===true);
 const MAX_PRE_ENTER_WAIT_MS=21_630_000;
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
@@ -144,14 +146,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const matches=c=>kind==='instance'?c.instanceId===entity.id:kind==='account'?c.instanceId===entity.instanceId&&c.accountId===entity.accountId:kind==='target'?c.guildId===entity.guildId&&c.channelId===entity.channelId:c.id===entity.id||c.bindingId===entity.id;
     const channels=state.channels.filter(matches),ids=new Set(channels.map(c=>c.id));
     const groups=state.groups.filter(g=>g.members.some(member=>ids.has(member)));
-    const blocked=groups.filter(g=>!['stopped','paused'].includes(g.status)||g.activeAttemptId||g.controlIntent);
-    const active=state.attempts.filter(a=>ACTIVE.has(a.status)&&(ids.has(a.bindingId)||matches(a)));
-    ensure(!blocked.length&&!active.length,'REMOVAL_BLOCKED',`삭제 전에 ${[...new Set([...blocked.map(g=>g.name),...active.map(a=>state.groups.find(g=>g.id===a.groupId)?.name||'미확인 발송')])].join(', ')} 그룹을 중지하고 진행 중·미확인 발송 결과를 확인하세요.`,409);
+    const detachable=a=>a?.status==='unknown'&&a.executionBlocked===true;
+    const blocked=groups.filter(g=>!['stopped','paused'].includes(g.status)||g.controlIntent||g.activeAttemptId&&!detachable(state.attempts.find(a=>a.id===g.activeAttemptId&&ids.has(a.bindingId))));
+    const active=state.attempts.filter(a=>activeAttempt(a)&&(ids.has(a.bindingId)||matches(a)));
+    ensure(!blocked.length&&!active.some(a=>!detachable(a)),'REMOVAL_BLOCKED',`삭제 전에 ${[...new Set([...blocked.map(g=>g.name),...active.map(a=>state.groups.find(g=>g.id===a.groupId)?.name||'미확인 발송')])].join(', ')} 그룹을 중지하고 진행 중·미확인 발송 결과를 확인하세요.`,409);
     for(const a of state.attempts.filter(a=>ids.has(a.bindingId)||matches(a))){
       const channel=state.channels.find(c=>c.id===a.bindingId),account=state.accounts.find(c=>c.instanceId===a.instanceId&&c.accountId===a.accountId);
       a.accountName??=account?.name||a.accountId;a.channelName??=channel?.name||state.targets.find(t=>t.guildId===a.guildId&&t.channelId===a.channelId)?.name;
       a.groupName??=state.groups.find(g=>g.id===a.groupId)?.name;a.instanceName??=state.instances.find(i=>i.id===a.instanceId)?.name;
     }
+    // 이전 게시 여부는 unknown으로 보존하되 새 발송·재조회·그룹 잠금에서 분리합니다.
+    for(const a of active){a.detached=true;a.detachedAt=now();const g=state.groups.find(g=>g.id===a.groupId);if(g?.activeAttemptId===a.id){g.activeAttemptId=null;g.waitReason=null;delete g.autoResume;}}
     const closing=[...channels];
     for(const c of state.commands.filter(c=>c.type==='OPEN_CHANNEL'&&['queued','received','applied'].includes(c.status))){const scope={...c.payload,instanceId:c.instanceId};if(matches(scope)&&!closing.some(x=>bindingKey(x)===bindingKey(scope)))closing.push(scope);}
     for(const c of closing){rememberRemoval('bindings',bindingKey(c));if(!state.removals.closeRequests.some(r=>bindingKey(r)===bindingKey(c)))state.removals.closeRequests.push({removalId:id(),instanceId:c.instanceId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,...(c.id?{bindingId:c.id}:{}),...(Number.isInteger(c.tabId)?{tabId:c.tabId}:{}),accountName:state.accounts.find(a=>accountKey(a)===accountKey(c))?.name||c.accountId,channelName:c.name||entity.name,createdAt:now()});}
@@ -185,7 +190,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(!TERMINAL.has(a.status)||a.pruned||a.finalizedAt>=cutoff)return a;
       removed++;return{id:a.id,status:a.status,instanceId:a.instanceId,createdAt:a.createdAt,finalizedAt:a.finalizedAt,manual:a.manual||false,permitIssued:!!a.permitId,...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{}),pruned:true};
     });
-    state.commands=state.commands.filter(c=>c.createdAt>=cutoff||['queued','received'].includes(c.status)||state.attempts.some(a=>ACTIVE.has(a.status)&&a.id===c.payload.attemptId));
+    state.commands=state.commands.filter(c=>c.createdAt>=cutoff||['queued','received'].includes(c.status)||state.attempts.some(a=>activeAttempt(a)&&a.id===c.payload.attemptId));
     state.incidents=state.incidents.filter(i=>i.status==='open'||(i.resolvedAt||i.lastSeenAt)>=cutoff);
     state.intervals=state.intervals.filter(span=>span.to===null||span.to>=cutoff);
     state.prunedBefore=Math.max(state.prunedBefore||0,cutoff);state.lastPrunedAt=now();event('records.pruned',{cutoff,removedAttempts:removed});return{removedAttempts:removed,cutoff};
@@ -241,7 +246,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const instance=state.instances.find(i=>i.id===problem.instanceId);
     if(!instance?.connected||now()-instance.lastSeenAt>15000||now()<instance.lastSeenAt)return false;
     const group=state.groups.find(g=>g.id===problem.groupId);
-    if(state.attempts.some(a=>ACTIVE.has(a.status)&&(a.instanceId===instance.id)&&(!group||a.groupId===group.id)))return false;
+    if(state.attempts.some(a=>activeAttempt(a)&&(a.instanceId===instance.id)&&(!group||a.groupId===group.id)))return false;
     const channels=state.channels.filter(c=>c.instanceId===instance.id&&(!problem.bindingId||c.id===problem.bindingId)&&(!group||group.members.includes(c.id)));
     const after=problem.lastSeenAt??problem.createdAt;
     return channels.length>0&&channels.every(c=>c.verified&&c.sessionId===instance.sessionId&&Number.isFinite(c.observedAt)&&c.observedAt>=after&&c.observedAt<=now()&&now()-c.observedAt<=15000);
@@ -258,7 +263,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       // 자동 검사에서 지우지 않고, 사용자의 명시적 재검사/후속 실행 근거를 기다립니다.
       if(automatic&&type==='PREPARE'&&a?.status==='not_sent'&&g?.waitReason==='preparation_failed'){
         block='PREPARATION_FAILED';message='입력 준비 실패 원인이 아직 해소되지 않았습니다.';page='channels';
-      }else if(a&&ACTIVE.has(a.status)){
+      }else if(a&&activeAttempt(a)){
         block='ATTEMPT_UNRESOLVED';message='전송 결과가 아직 확정되지 않았습니다. 기록에서 결과를 확인하세요.';page='history';
       }else if((i.code==='delivery_unknown'||i.code==='command_rejected'&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(type))&&a&&TERMINAL.has(a.status)){
         reasonCode='terminal_attempt';
@@ -302,7 +307,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         // Require a later applied request for this exact browser, action and target.
         if(routed&&Number.isFinite(rejectedAt)&&state.commands.some(next=>next.id!==c.id&&next.type==='MANAGE_WINDOW'&&next.instanceId===c.instanceId&&next.status==='applied'&&next.createdAt>=rejectedAt&&Number.isFinite(next.appliedAt)&&next.appliedAt>=next.createdAt&&next.appliedAt<=now()&&['action','bindingId','accountId','guildId','channelId'].every(key=>next.payload?.[key]===payload[key])))reasonCode='window_action_applied';
       }else if(i.code==='command_rejected'&&type==='CONTROL'){
-        const active=state.attempts.some(a=>a.groupId===groupId&&ACTIVE.has(a.status));
+        const active=state.attempts.some(a=>a.groupId===groupId&&activeAttempt(a));
         if(active||g?.activeAttemptId){block='ATTEMPT_UNRESOLVED';message='그룹의 전송 결과 확인이 아직 필요합니다.';page='history';}
         else if(g?.controlIntent||g&&['stop_pending','pause_pending'].includes(g.status)){
           block='CONTROL_PENDING';message='브라우저의 중지·일시정지 적용 확인을 기다리고 있습니다.';page='groups';
@@ -325,7 +330,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     return{resolved,remaining:selected.filter(i=>i.status==='open').length,blocked};
   }
-  function markUnknown(a,reasonCode){if(!ACTIVE.has(a.status))return;a.status='unknown';a.reasonCode=reasonCode;const g=get('groups',a.groupId);if(!g.controlIntent)g.status='needs_review';g.waitReason='delivery_unknown';incident('delivery_unknown',{attemptId:a.id,groupId:g.id,instanceId:a.instanceId});event('delivery.unknown',{attemptId:a.id,groupId:g.id,reasonCode},'error');}
+  function markUnknown(a,reasonCode){if(!activeAttempt(a))return;const repeated=a.status==='unknown'&&a.reasonCode===reasonCode;a.status='unknown';a.reasonCode=reasonCode;const g=get('groups',a.groupId);if(g.status==='running'&&!g.controlIntent)g.reconcileResumeRunId=g.runId;if(!g.controlIntent&&!['stopped','paused'].includes(g.status))g.status='needs_review';if(repeated)return;g.waitReason='delivery_unknown';incident('delivery_unknown',{attemptId:a.id,groupId:g.id,instanceId:a.instanceId});event('delivery.unknown',{attemptId:a.id,groupId:g.id,reasonCode},'error');}
   function release(g){state.locks=state.locks.filter(l=>l.groupId!==g.id);}
   function controlComplete(g){
     if(!g.controlIntent)return;
@@ -344,12 +349,23 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   /**
    * 중단/일시정지는 재적용해도 새 메시지를 보내지 않는 제어 명령입니다.
-   * 명시적으로 거절된 명령만 최대 3회 재발급하며, 수신 대기 중 명령은 중복 생성하지 않습니다.
+   * 명시적으로 거절된 중지 명령은 횟수 제한 없이 재발급하며, 수신 대기 중 명령은 중복 생성하지 않습니다.
    * 이전 거절은 superseded로 남겨 완료 판정을 막지 않게 하되 진단 이력은 유지합니다.
    * 발송 결과 unknown은 이 복구로 해결하지 않습니다. 실행 차단과 과거 발송 결과는 별개입니다.
    */
+  // 구버전의 반복 관찰이 덮어쓴 사용자 중지는 현재 실행의 실제 ACK로 복구합니다.
+  function preserveAppliedUserStops(){
+    for(const g of state.groups.filter(g=>g.status==='needs_review'&&!g.controlIntent&&!g.autoResume)){
+      const a=state.attempts.find(a=>a.id===g.activeAttemptId);
+      if(a?.status!=='unknown'||a.executionBlocked!==true)continue;
+      const controls=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.runId===g.runId&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded');
+      const owners=new Set(g.members.map(member=>state.channels.find(c=>c.id===member)?.instanceId));
+      if(!controls.length||!controls.every(c=>c.status==='applied'&&c.payload.action==='stop')||![...owners].every(owner=>controls.some(c=>c.instanceId===owner)))continue;
+      g.status='stopped';delete g.reconcileResumeRunId;event('group.stop_state_restored',{groupId:g.id});
+    }
+  }
   function recoverControl(g){
-    if(!g.controlIntent||(g.controlRecoveryCount||0)>=3||now()<(g.controlRecoveryAfter||0))return;
+    if(!g.controlIntent||now()<(g.controlRecoveryAfter||0))return;
     const failed=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status==='rejected');
     if(!failed.length)return;
     g.controlRecoveryCount=(g.controlRecoveryCount||0)+1;g.controlRecoveryAfter=now()+3000;
@@ -368,7 +384,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     // 재개 의도를 저장하고, 사용자 pause/stop은 대기 중·적용 완료 여부와 관계없이 취소합니다.
     if(systemReason){
       g.autoResume={reasonCode:systemReason,requestedAt:now(),requestedMono:monotonicNow(),retryCount:0,retryAfterMono:monotonicNow()+3000};
-    }else delete g.autoResume;
+    }else {delete g.autoResume;delete g.reconcileResumeRunId;}
     g.controlRecoveryCount=0;g.controlRecoveryAfter=0;
     g.controlIntent=intent;g.controlGeneration=(g.controlGeneration||0)+1;g.status=intent==='stop'?'stop_pending':'pause_pending';g.nextEligibleAt=null;
     for(const instanceId of new Set(g.members.map(m=>get('channels',m).instanceId)))command('CONTROL',instanceId,controlPayload(g,instanceId));
@@ -418,7 +434,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function setChannelInterval(c,value){
     if(c.intervalMs===value)return false;
     const previous=c.intervalMs;c.intervalMs=value;c.updatedAt=now();
-    if(state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){
+    if(state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a))){
       c.intervalSyncBaseMs??=previous;
       if(value===c.intervalSyncBaseMs){delete c.pendingIntervalSync;delete c.intervalSyncBaseMs;}else c.pendingIntervalSync=true;
     }else commitIntervalConfiguration(c);
@@ -434,7 +450,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(messageId&&!source.some(item=>item.messageId===messageId))continue;
       const items=latestPlaylist(source);
       if(!messageId&&items.every((item,index)=>item.revisionId===source[index].revisionId))continue;
-      if(state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){
+      if(state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a))){
         // 현재 초안/허가의 body, revision, configVersion은 불변입니다.
         // 미확인 결과에도 새 입력을 만들지 않고 정상 종료 후 최신본만 적용합니다.
         if(!c.pendingPlaylist)c.pendingPlaylistPreserveIndex=true;
@@ -456,7 +472,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
    */
   function finish(a,outcome,{messageId,manual=false,confirmationMs,confirmationBasis}={}){
     if(outcome==='confirmed')ensure(a.permitId||a.permitIssued,'PERMIT_REQUIRED','No commit permit was issued for this attempt.',409);
+    if(a.detached===true&&a.executionBlocked===true){a.status=outcome;a.finalizedAt=now();a.manual=manual;if(messageId)a.messageId=text(messageId,'messageId',200);event(`delivery.${outcome}`,{attemptId:a.id,detached:true,manual});return a;}
     if(TERMINAL.has(a.status)){ensure(a.status===outcome,'RESULT_CONFLICT','This attempt already has a different final result.',409);return a;}
+    const automaticallyReconciled=state.commands.some(cmd=>cmd.type==='RECONCILE'&&cmd.payload.attemptId===a.id&&['queued','received'].includes(cmd.status)&&cmd.sessionId===state.instances.find(i=>i.id===a.instanceId)?.sessionId);
     a.status=outcome;a.finalizedAt=now();a.manual=manual;if(messageId)a.messageId=text(messageId,'messageId',200);if(outcome==='confirmed')a.confirmationBasis=confirmationBasis||'message_observed';
     if(Number.isFinite(confirmationMs)&&confirmationMs>=0)a.confirmationMs=Math.min(confirmationMs,86_400_000);
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
@@ -468,7 +486,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)))cmd.status='completed';
     resolveIncidents(a.id);
     if(c.pendingPlaylist){applyPlaylist(c,latestPlaylist(c.pendingPlaylist),{preserveIndex:c.pendingPlaylistPreserveIndex===true});delete c.pendingPlaylist;delete c.pendingPlaylistPreserveIndex;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
-    if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){g.status='paused';release(g);}
+    if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){
+      const resume=automaticallyReconciled&&!manual&&g.enabled!==false&&g.reconcileResumeRunId===g.runId;
+      delete g.reconcileResumeRunId;g.status=resume?'running':'paused';g.waitReason=null;
+      if(resume)event('group.reconciled_resumed',{groupId:g.id});else release(g);
+    }
     else if(['stopped','paused'].includes(g.status)){g.waitReason=null;release(g);}
     event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual,...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{})});return a;
   }
@@ -505,6 +527,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
   }
   function start(g){
+    ensure(g.enabled!==false,'GROUP_DISABLED','비활성 그룹을 먼저 활성화하세요.',409);
     ensure(!g.activeAttemptId,'ATTEMPT_UNRESOLVED','Resolve the current attempt before resuming.',409);
     ensure(!g.controlIntent,'CONTROL_PENDING','Wait for actual stop/pause acknowledgments.',409);
     acquire(g);g.members.map(m=>get('channels',m)).forEach(eligibleChannel);
@@ -525,7 +548,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'message.update':{const m=get('messages',p.id);expected(m,p);if(p.name!==undefined)m.name=text(p.name,'name');if(p.tags!==undefined)m.tags=tags(p.tags);if(p.body!==undefined){const r={id:id(),version:m.revisions.length+1,body:body(p.body),at:now()};m.revisions.push(r);m.revisionId=r.id;m.body=r.body;}m.version++;m.updatedAt=now();if(p.body!==undefined||p.name!==undefined)refreshMessageAssignments(m.id);event('message.updated',{messageId:m.id});return m;}
       case 'message.duplicate':{const original=get('messages',p.id),at=now(),r={id:id(),version:1,body:original.body,at};const m={...clone(original),id:id(),name:text(p.name||`${original.name.slice(0,190)} 복사`,'name'),version:1,archived:false,revisionId:r.id,revisions:[r],createdAt:at,updatedAt:at};state.messages.push(m);event('message.created',{messageId:m.id});return m;}
       case 'message.archive':{const m=get('messages',p.id);expected(m,p);m.archived=p.archived!==false;m.version++;event('message.archived',{messageId:m.id});return m;}
-      case 'message.delete':{const m=get('messages',p.id);expected(m,p);ensure(!state.channels.some(c=>[...c.playlist,...(c.pendingPlaylist||[])].some(i=>i.messageId===m.id))&&!state.attempts.some(a=>a.messageIdRef===m.id&&ACTIVE.has(a.status)),'MESSAGE_IN_USE','This message is referenced. Archive it or remove its channel assignments.',409);state.messages=state.messages.filter(x=>x.id!==m.id);event('message.deleted',{messageId:m.id});return {id:m.id,deleted:true};}
+      case 'message.delete':{const m=get('messages',p.id);expected(m,p);ensure(!state.channels.some(c=>[...c.playlist,...(c.pendingPlaylist||[])].some(i=>i.messageId===m.id))&&!state.attempts.some(a=>a.messageIdRef===m.id&&activeAttempt(a)),'MESSAGE_IN_USE','This message is referenced. Archive it or remove its channel assignments.',409);state.messages=state.messages.filter(x=>x.id!==m.id);event('message.deleted',{messageId:m.id});return {id:m.id,deleted:true};}
       case 'instance.update':{const i=get('instances',p.id);expected(i,p);i.name=text(p.name,'name');i.nameCustomized=true;i.version++;event('instance.updated',{instanceId:i.id});return publicInstance(i);}
       case 'account.update':{const a=get('accounts',p.id);expected(a,p);a.name=text(p.name,'name');a.nameCustomized=true;a.version++;a.updatedAt=now();event('account.updated',{accountEntityId:a.id,instanceId:a.instanceId});return publicAccount(a);}
       case 'instance.delete':case 'account.delete':case 'target.delete':case 'channel.delete':{const kind=action.split('.')[0],entity=get({instance:'instances',account:'accounts',target:'targets',channel:'channels'}[kind],p.id);expected(entity,p);return removeConfiguration(kind,entity);}
@@ -548,7 +571,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const windowAction=action.slice('channel.'.length);
         if(windowAction==='separate')ensure(instance.capabilities?.includes('managed-window-separation-v1'),'EXTENSION_UPDATE_REQUIRED','채널별 창 분리를 지원하는 확장으로 업데이트하세요.',409);
         if(['consolidate','separate'].includes(windowAction)){
-          ensure(!state.attempts.some(a=>a.instanceId===instance.id&&ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','발송을 중지하고 미확인 결과를 정리한 뒤 전송 창을 정리하세요.',409);
+          ensure(!state.attempts.some(a=>a.instanceId===instance.id&&activeAttempt(a)),'ATTEMPT_UNRESOLVED','발송을 중지하고 미확인 결과를 정리한 뒤 전송 창을 정리하세요.',409);
           ensure(state.groups.filter(g=>g.members.some(member=>get('channels',member).instanceId===instance.id)).every(g=>['stopped','paused'].includes(g.status)&&!g.controlIntent),'GROUP_RUNNING','해당 브라우저의 그룹을 중지한 뒤 전송 창을 정리하세요.',409);
         }
         const pending=state.commands.find(c=>c.type==='MANAGE_WINDOW'&&c.instanceId===instance.id&&c.sessionId===instance.sessionId&&c.payload.bindingId===channel.id&&c.payload.action===windowAction&&['queued','received'].includes(c.status));
@@ -561,7 +584,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(instance.legacyFrozen===true&&instance.legacyPending===false,'LEGACY_UNRESOLVED','Legacy execution must be frozen and pending attempts resolved.',409);
         ensure(currentAccount(account),'ACCOUNT_UNVERIFIED','Verify the account in this browser again.',409);
         ensure(/^\d{1,30}$/.test(target.guildId)&&/^\d{1,30}$/.test(target.channelId),'VALIDATION','Only Discord server channels can be connected.');
-        ensure(!state.attempts.some(a=>a.instanceId===instance.id&&a.guildId===target.guildId&&a.channelId===target.channelId&&ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','Resolve the current attempt before opening this channel.',409);
+        ensure(!state.attempts.some(a=>a.instanceId===instance.id&&a.guildId===target.guildId&&a.channelId===target.channelId&&activeAttempt(a)),'ATTEMPT_UNRESOLVED','Resolve the current attempt before opening this channel.',409);
         const connectionKey=removalKey(instance.id,account.accountId,target.guildId,target.channelId);
         ensure(!state.removals.closeRequests.some(r=>bindingKey(r)===connectionKey),'CLOSE_PENDING','이전 전송 탭을 닫는 중입니다. 해당 브라우저와 확장을 연결한 뒤 닫기 완료 후 다시 연결하세요.',409);
         state.removals.bindings=state.removals.bindings.filter(key=>key!==connectionKey);
@@ -584,24 +607,31 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         }
         c.version++;event('channel.updated',{channelId:c.id});return publicChannel(c);
       }
-      case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId:m.revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&ACTIVE.has(a.status));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
+      case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId:m.revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&activeAttempt(a));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
         if(active){c.pendingPlaylist=items;delete c.pendingPlaylistPreserveIndex;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
       case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??20000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
       case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}
+      // 활성 설정은 실행 선택과 별도로 저장하며, 해제 시 기존 중지 경로를 사용합니다.
+      case 'group.setEnabled':{const g=get('groups',p.id);expected(g,p);ensure(typeof p.enabled==='boolean','VALIDATION','활성 여부가 필요합니다.');g.enabled=p.enabled;g.version++;if(!p.enabled){delete g.autoResume;if(g.status!=='stopped'||g.activeAttemptId||g.controlIntent)control(g,'stop');}event('group.enabled_changed',{groupId:g.id,enabled:g.enabled});return g;}
       case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);for(const attempt of state.attempts.filter(a=>a.groupId===g.id))attempt.groupName??=g.name;release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
       case 'group.start':case 'group.resume':return start(get('groups',p.id));
       case 'group.pause':case 'group.stop':{const g=get('groups',p.id);control(g,action.endsWith('stop')?'stop':'pause');return g;}
       case 'service.startAll':{
         ensure(state.groups.length>0,'NO_GROUPS','먼저 발송 그룹을 만들어 주세요.',409);
-        const candidates=state.groups.filter(g=>g.status!=='running');
+        // 명시 선택은 빈 목록/삭제된 ID를 거절하고 한 트랜잭션에서 전체 검증합니다.
+        if(p.groupIds!==undefined)ensure(Array.isArray(p.groupIds)&&p.groupIds.length>0&&p.groupIds.every(v=>typeof v==='string'),'VALIDATION','실행할 그룹을 선택하세요.');
+        const targets=p.groupIds===undefined?state.groups.filter(g=>g.enabled!==false):[...new Set(p.groupIds)].map(gid=>get('groups',gid));
+        ensure(targets.length>0,'NO_GROUPS','활성화된 그룹이 없습니다.',409);
+        for(const g of targets)ensure(g.enabled!==false,'GROUP_DISABLED','비활성 그룹이 선택되어 있습니다.',409);
+        const candidates=targets.filter(g=>g.status!=='running');
         for(const g of candidates)start(g);
-        event('service.started_all',{started:candidates.length,alreadyRunning:state.groups.length-candidates.length});
-        return{started:candidates.length,alreadyRunning:state.groups.length-candidates.length};
+        event('service.started_all',{started:candidates.length,alreadyRunning:targets.length-candidates.length});
+        return{started:candidates.length,alreadyRunning:targets.length-candidates.length};
       }
       case 'settings.reset':{
         ensure(p.confirmation==='RESET_ALL_SETTINGS','RESET_CONFIRMATION_REQUIRED','초기화 확인 문구가 필요합니다.');
         ensure(typeof p.expectedConfiguration==='string'&&p.expectedConfiguration===configurationToken(),'VERSION_CONFLICT','화면 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.',409);
-        ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','진행 중 또는 미확인 발송을 먼저 확인하세요.',409);
+        ensure(!state.attempts.some(a=>activeAttempt(a)),'ATTEMPT_UNRESOLVED','진행 중 또는 미확인 발송을 먼저 확인하세요.',409);
         ensure(state.groups.every(g=>g.status==='stopped'&&!g.controlIntent&&!g.activeAttemptId),'GROUP_RUNNING','모든 그룹을 중지하고 중지 적용 완료를 확인하세요.',409);
         state.resetEpoch++;state.removals={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};
         const removed={messages:state.messages.length,channels:state.channels.length,groups:state.groups.length,instances:state.instances.length,accounts:state.accounts.length,targets:state.targets.length};
@@ -655,7 +685,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
   });}
   function importLegacy(backup,sourceId){
-    ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','Resolve all attempts before importing legacy settings.',409);
+    ensure(!state.attempts.some(a=>activeAttempt(a)),'ATTEMPT_UNRESOLVED','Resolve all attempts before importing legacy settings.',409);
     ensure(state.groups.every(g=>['stopped','paused','resume_required'].includes(g.status)&&!g.controlIntent),'GROUP_RUNNING','Stop all groups before importing legacy settings.',409);
     ensure(backup?.format==='dico-settings'&&backup.version===1&&Array.isArray(backup.channels)&&backup.channels.length>0&&backup.channels.length<=100,'VALIDATION','Unsupported legacy settings file.');
     const normalized=backup.channels.map(c=>{
@@ -700,9 +730,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     accounts:state.accounts.map(a=>({id:a.id,instanceId:a.instanceId,accountId:a.accountId,name:a.name,nameCustomized:accountNameCustomized(a),...(a.observedName?{observedName:a.observedName}:{}),...(a.username?{username:a.username}:{})})),
     targets:state.targets.map(t=>({id:t.id,url:t.url,guildId:t.guildId,channelId:t.channelId,name:t.name,nameCustomized:channelNameCustomized(t),namePending:t.namePending,observedName:t.observedName})),
     channels:state.channels.map(c=>({id:c.id,instanceId:c.instanceId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,name:c.name,nameCustomized:channelNameCustomized(c),namePending:c.namePending,observedName:c.observedName,intervalMs:c.intervalMs,intervalMode:c.intervalMode,customIntervalMs:c.customIntervalMs,slowmodeMs:c.slowmodeMs,slowmodeObservedAt:c.slowmodeObservedAt,playlist:c.playlist,playlistIndex:c.playlistIndex})),
-    groups:state.groups.map(g=>({id:g.id,name:g.name,members:g.members,intervalMs:g.intervalMs,cursor:g.cursor}))});}
+    groups:state.groups.map(g=>({id:g.id,name:g.name,enabled:g.enabled!==false,members:g.members,intervalMs:g.intervalMs,cursor:g.cursor}))});}
   function restore(backup){
-    ensure(!state.attempts.some(a=>ACTIVE.has(a.status)),'ATTEMPT_UNRESOLVED','Resolve every pending attempt before restoring a backup.',409);
+    ensure(!state.attempts.some(a=>activeAttempt(a)),'ATTEMPT_UNRESOLVED','Resolve every pending attempt before restoring a backup.',409);
     ensure(state.groups.every(g=>['stopped','paused','resume_required'].includes(g.status)&&!g.controlIntent),'GROUP_RUNNING','Stop all groups and wait for acknowledgments before restoring.',409);
     ensure(backup&&backup.format==='dico-central-backup'&&backup.version===1,'VALIDATION','Unsupported backup format.');
     for(const key of ['messages','instances','channels','groups'])ensure(Array.isArray(backup[key])&&backup[key].length<=10000,'VALIDATION',`Invalid backup ${key}.`);
@@ -747,7 +777,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.messages=messages;state.instances=instances;state.channels=channels;state.groups=[];state.accounts=accounts;state.targets=targets;
     for(const [kind,keys] of [['instances',instances.map(i=>i.id)],['accounts',accounts.map(accountKey)],['targets',targets.map(targetKey)],['bindings',channels.map(bindingKey)]])state.removals[kind]=state.removals[kind].filter(key=>!keys.includes(key));
     state.removals.closeRequests=state.removals.closeRequests.filter(r=>!channels.some(c=>bindingKey(c)===bindingKey(r)));
-    for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
+    for(const item of backup.groups){const cs=validateMemberChannels(item.members);state.groups.push({id:text(item.id,'id',100),name:text(item.name,'name'),enabled:item.enabled!==false,members:[...item.members],guildId:cs[0].guildId,channelId:cs[0].channelId,intervalMs:duration(item.intervalMs),cursor:Number.isSafeInteger(item.cursor)&&item.cursor>=0&&item.cursor<cs.length?item.cursor:0,version:1,status:'stopped',activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:at});}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
     state.locks=[];state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;delete state.settings.maxSendRetries;if(backup.settings)updateSettings(backup.settings);
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
@@ -793,7 +823,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const c of state.commands.filter(c=>c.instanceId===i.id&&(!['completed','applied','rejected'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied'||c.type==='CONTROL'&&c.status==='rejected')))c.status='superseded';
         invalidateAccounts(i.id);i.sessionId=id();i.connected=true;i.stableSinceMono=monotonicNow();i.lastSeenAt=now();i.lastSeenMono=monotonicNow();i.legacyFrozen=false;i.legacyPending=true;
         for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='session_changed';c.appliedVersion=0;delete c.tabId;}
-        for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
+        for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
         for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
         queuePendingCloses(i.id);event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
       }
@@ -807,7 +837,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(a.traceWindowCount>=120&&!['finished','exception'].includes(message.stage))return{ok:true,recorded:false};a.traceWindowCount++;
         event('delivery.trace',{attemptId:a.id,groupId:a.groupId,instanceId:i.id,stage:message.stage,observedAt:message.observedAt,sequence:message.sequence,data:traceData(message.data)});return{ok:true,recorded:true};
       }
-      if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&ACTIVE.has(a.status))};
+      if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&activeAttempt(a))};
       if(message.type==='CONNECTION_PROGRESS'){
         ensure(['account','channels','configuration','blocked'].includes(message.stage)&&Number.isInteger(message.total)&&message.total>=0&&message.total<=100&&Number.isInteger(message.completed)&&message.completed>=0&&message.completed<=message.total,'VALIDATION','Invalid connection progress.');
         const allowedReasons=new Set(['LEGACY_UNRESOLVED','ACCOUNT_UNVERIFIED','ATTEMPT_UNRESOLVED','TARGET_MISMATCH','CHANNEL_NOT_READY','CONTENT_UNAVAILABLE']);
@@ -852,7 +882,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(message.type==='COOLDOWN_SAMPLE'){
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
         const c=a&&state.channels.find(c=>c.id===a.bindingId),g=a&&state.groups.find(g=>g.id===a.groupId),sample=message.sample;
-        if(!a||!c||!g||a.status!=='confirmed'||a.manual||c.lastConfirmedAttemptId!==a.id||a.sessionId!==i.sessionId||c.sessionId!==i.sessionId||!i.connected||c.verified!==true||a.runId!==message.runId||g.runId!==a.runId||a.configVersion!==message.configVersion||c.configVersion!==a.configVersion||c.tabId!==a.tabId||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||g.activeAttemptId||state.attempts.some(other=>other.id!==a.id&&other.bindingId===c.id&&ACTIVE.has(other.status))||now()-a.finalizedAt<0||now()-a.finalizedAt>17000||!Number.isFinite(c.slowmodeObservedAt)||!Number.isFinite(a.confirmationMs)||a.confirmationMs<0||a.confirmationMs>30000||!sample||typeof sample!=='object'||Array.isArray(sample)||sample.status!=='remaining'||!Number.isFinite(sample.elapsedMs)||sample.elapsedMs<0||sample.elapsedMs>15000||!Number.isFinite(sample.maxGapMs)||sample.maxGapMs<0||sample.maxGapMs>1500||!Number.isSafeInteger(sample.remainingMs)||sample.remainingMs<=0||sample.remainingMs>21600000||sample.slowmodeMs!==undefined&&sample.slowmodeMs!==c.slowmodeMs)return{ok:false};
+        if(!a||!c||!g||a.status!=='confirmed'||a.manual||c.lastConfirmedAttemptId!==a.id||a.sessionId!==i.sessionId||c.sessionId!==i.sessionId||!i.connected||c.verified!==true||a.runId!==message.runId||g.runId!==a.runId||a.configVersion!==message.configVersion||c.configVersion!==a.configVersion||c.tabId!==a.tabId||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||g.activeAttemptId||state.attempts.some(other=>other.id!==a.id&&other.bindingId===c.id&&activeAttempt(other))||now()-a.finalizedAt<0||now()-a.finalizedAt>17000||!Number.isFinite(c.slowmodeObservedAt)||!Number.isFinite(a.confirmationMs)||a.confirmationMs<0||a.confirmationMs>30000||!sample||typeof sample!=='object'||Array.isArray(sample)||sample.status!=='remaining'||!Number.isFinite(sample.elapsedMs)||sample.elapsedMs<0||sample.elapsedMs>15000||!Number.isFinite(sample.maxGapMs)||sample.maxGapMs<0||sample.maxGapMs>1500||!Number.isSafeInteger(sample.remainingMs)||sample.remainingMs<=0||sample.remainingMs>21600000||sample.slowmodeMs!==undefined&&sample.slowmodeMs!==c.slowmodeMs)return{ok:false};
         // The countdown starts at Enter. Its displayed seconds can omit a
         // fraction, so round the inferred full cycle up to the next second.
         const measuredFullCycle=Math.ceil((sample.elapsedMs+sample.remainingMs)/1000)*1000+3000;
@@ -895,7 +925,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
       if(message.type==='DISCONNECT'){
         blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
-        for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status)))markUnknown(a,'connection_lost');
+        for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a)))markUnknown(a,'connection_lost');
         for(const g of state.groups.filter(g=>g.status==='running'&&g.members.some(m=>get('channels',m).instanceId===i.id))){g.waitReason='connection_lost';incident('connection_lost',{instanceId:i.id});}
         event('instance.disconnected',{instanceId:i.id});return{ok:true};
       }
@@ -911,12 +941,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const affected=accountId=>message.verified?accountId!==message.accountId:accountId===message.accountId;
         const transientReasons=new Set(['tab_loading','tab_missing','script_unavailable','identity_unverified','content_refresh_required','awaiting_observation']);
         const confirmedMismatch=message.verified===true||!transientReasons.has(message.verificationReason);
-        const mismatched=state.accounts.some(a=>a.instanceId===i.id&&affected(a.accountId)&&a.verified)||state.channels.some(c=>c.instanceId===i.id&&affected(c.accountId)&&c.verified)||state.attempts.some(a=>a.instanceId===i.id&&affected(a.accountId)&&ACTIVE.has(a.status));
+        const mismatched=state.accounts.some(a=>a.instanceId===i.id&&affected(a.accountId)&&a.verified)||state.channels.some(c=>c.instanceId===i.id&&affected(c.accountId)&&c.verified)||state.attempts.some(a=>a.instanceId===i.id&&affected(a.accountId)&&activeAttempt(a));
         for(const a of state.accounts.filter(a=>a.instanceId===i.id&&affected(a.accountId)))a.verified=false;
         for(const c of state.channels.filter(c=>c.instanceId===i.id&&affected(c.accountId))){c.verified=false;c.verificationReason=confirmedMismatch?'account_mismatch':verificationReason(message.verificationReason);}
         if(mismatched&&confirmedMismatch){
           blockInstanceGroups(i.id,'account_mismatch');
-          for(const a of state.attempts.filter(a=>a.instanceId===i.id&&affected(a.accountId)&&ACTIVE.has(a.status)))markUnknown(a,'account_mismatch');
+          for(const a of state.attempts.filter(a=>a.instanceId===i.id&&affected(a.accountId)&&activeAttempt(a)))markUnknown(a,'account_mismatch');
           incident('account_mismatch',{instanceId:i.id});
         }
         for(const c of state.commands.filter(c=>confirmedMismatch&&c.instanceId===i.id&&c.payload.accountId&&affected(c.payload.accountId)&&(['queued','received'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')&&['OPEN_CHANNEL','PREPARE','COMMIT_PERMIT'].includes(c.type)))c.status='superseded';
@@ -932,7 +962,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           const accountId=text(observed.accountId,'accountId',100),channelId=text(observed.channelId,'channelId',100),guildId=text(observed.guildId||'@me','guildId',100);
           ensure(Number.isInteger(observed.tabId)&&observed.tabId>=0&&!seenTabs.has(observed.tabId),'VALIDATION','Each observed channel needs its own dedicated tab.');seenTabs.add(observed.tabId);
           if(removedScope({instanceId:i.id,accountId,guildId,channelId}))continue;
-          ensure(!state.attempts.some(a=>a.instanceId===i.id&&a.tabId===observed.tabId&&ACTIVE.has(a.status)&&(a.accountId!==accountId||a.channelId!==channelId||a.guildId!==guildId)),'TAB_BUSY','An unresolved attempt owns this execution tab.',409);
+          ensure(!state.attempts.some(a=>a.instanceId===i.id&&a.tabId===observed.tabId&&activeAttempt(a)&&(a.accountId!==accountId||a.channelId!==channelId||a.guildId!==guildId)),'TAB_BUSY','An unresolved attempt owns this execution tab.',409);
           let c=state.channels.find(c=>c.instanceId===i.id&&c.accountId===accountId&&c.guildId===guildId&&c.channelId===channelId);
           if(!c){const candidates=state.channels.filter(x=>x.legacyPlaceholder&&x.accountId===accountId&&x.guildId===guildId&&x.channelId===channelId);if(candidates.length===1&&i.legacyFrozen&&i.legacyPending===false){c=candidates[0];const previousInstance=c.instanceId;c.instanceId=i.id;c.legacyPlaceholder=false;c.version++;if(!state.channels.some(x=>x.instanceId===previousInstance)){
             state.instances=state.instances.filter(x=>x.id!==previousInstance);
@@ -945,7 +975,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           const createdChannel=!c;
           if(!c){c={id:id(),instanceId:i.id,accountId,guildId,channelId,name:pendingChannelName,nameCustomized:false,namePending:true,version:1,configVersion:0,appliedVersion:0,playlist:[],playlistIndex:0,intervalMode:'auto',intervalMs:3000,slowmodeMs:0,createdAt:now()};state.channels.push(c);event('channel.discovered',{channelId:c.id,instanceId:i.id});}
           const tabChanged=c.tabId!==observed.tabId||c.sessionId!==i.sessionId;
-          if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))markUnknown(a,'execution_tab_changed');continue;}
+          if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&activeAttempt(a)))markUnknown(a,'execution_tab_changed');continue;}
           c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();c.observedMono=monotonicNow();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
             applyChannelName(c,{observedName:observed.channelName??observed.name},createdChannel);
@@ -959,7 +989,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             if(setChannelInterval(c,interval))c.version++;
             if(previous!==c.slowmodeMs)event('channel.slowmode_observed',{channelId:c.id,slowmodeMs:c.slowmodeMs,effectiveIntervalMs:effectiveInterval(c)});
           }
-          if(c.verified&&c.playlist.length&&c.appliedVersion!==c.configVersion&&!state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))&&!state.commands.some(cmd=>cmd.type==='CONFIG_SYNC'&&cmd.payload.bindingId===c.id&&cmd.payload.configVersion===c.configVersion&&cmd.sessionId===i.sessionId&&['queued','received'].includes(cmd.status))){
+          if(c.verified&&c.playlist.length&&c.appliedVersion!==c.configVersion&&!state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a))&&!state.commands.some(cmd=>cmd.type==='CONFIG_SYNC'&&cmd.payload.bindingId===c.id&&cmd.payload.configVersion===c.configVersion&&cmd.sessionId===i.sessionId&&['queued','received'].includes(cmd.status))){
             command('CONFIG_SYNC',i.id,{bindingId:c.id,accountId,guildId,channelId,tabId:c.tabId,configVersion:c.configVersion,intervalMs:c.intervalMs,items:c.playlist.map(item=>{const m=get('messages',item.messageId);return{...item,name:m.name,body:m.revisions.find(r=>r.id===item.revisionId).body};})});
           }
         }
@@ -995,7 +1025,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           const attempt=c.payload.attemptId?get('attempts',c.payload.attemptId):null;
           if(!(c.type==='PREPARE'&&attempt&&failPreparation(attempt,rejectionCode||'PREPARE_REJECTED'))){
             incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
-            if(attempt&&ACTIVE.has(attempt.status))markUnknown(attempt,rejectionCode||'command_rejected');
+            if(attempt&&activeAttempt(attempt))markUnknown(attempt,rejectionCode||'command_rejected');
           }
         }
         event('command.ack',{commandId:c.id,instanceId:i.id,status:c.status,...(c.rejectionCode?{rejectionCode:c.rejectionCode}:{})});return{ok:true};
@@ -1030,6 +1060,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const a=get('attempts',message.attemptId);ensure(a.instanceId===i.id,'INSTANCE_MISMATCH','Attempt belongs to another instance.',409);
         ensure(['confirmed','not_sent','unknown'].includes(message.outcome),'VALIDATION','Invalid delivery outcome.');
         if(TERMINAL.has(a.status)){ensure(a.status===message.outcome,'RESULT_CONFLICT','Final outcome cannot be overwritten.',409);return{ok:true,attempt:publicAttempt(a)};}
+        if(a.detached===true&&a.executionBlocked===true){event('delivery.detached_report',{attemptId:a.id,outcome:message.outcome});return{ok:true,attempt:publicAttempt(a)};}
         if(message.executionBlocked===true)a.executionBlocked=true;
         if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
         if(message.outcome==='unknown'){
@@ -1069,7 +1100,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     state.service.status='ready';state.service.reasonCode='clock_or_sleep_gap';
     const affected=state.groups.filter(g=>g.status==='running'||g.activeAttemptId||g.autoResume);
     const resumable=new Set(affected.filter(g=>g.status==='running'&&!g.controlIntent).map(g=>g.id));
-    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status))){
+    for(const a of state.attempts.filter(a=>activeAttempt(a))){
       markUnknown(a,'clock_or_sleep_gap');
       // Keep the durable permit on the attempt, but stop transport retries.
       // Its outcome remains uncertain until executor reconciliation proves it.
@@ -1097,8 +1128,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const mono=monotonicNow();
     for(const g of state.groups.filter(g=>g.autoResume)){
       const intent=g.autoResume;
-      if(g.controlIntent||g.status!=='paused'||g.activeAttemptId||state.attempts.some(a=>a.groupId===g.id&&ACTIVE.has(a.status)))continue;
-      if((intent.retryCount||0)>=3||mono<intent.retryAfterMono||mono-intent.requestedMono<3000)continue;
+      if(g.controlIntent||g.status!=='paused'||g.activeAttemptId||state.attempts.some(a=>a.groupId===g.id&&activeAttempt(a)))continue;
+      if(mono<intent.retryAfterMono||mono-intent.requestedMono<3000)continue;
       const controls=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded');
       const members=g.members.map(member=>get('channels',member));
       if(!controls.length||!controls.every(c=>c.status==='applied')||!members.every(c=>{
@@ -1114,12 +1145,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         g.waitReason='resource_busy';intent.retryAfterMono=mono+3000;continue;
       }
       // 연결/설정 대기는 예산을 소모하지 않습니다. 사전 검사 이후 예상하지 못한
-      // start 오류에만 최대 3회, 증가하는 간격을 적용하여 무한 오류 반복을 막습니다.
+      // start 오류는 최대 30초 간격으로 계속 확인하여 사용자 재개 조작을 기다리지 않습니다.
       try{members.forEach(eligibleChannel);}catch{continue;}
       try{
         start(g);event('group.auto_resumed',{groupId:g.id,reasonCode:intent.reasonCode});
       }catch(error){
-        release(g);intent.retryCount=(intent.retryCount||0)+1;intent.retryAfterMono=mono+3000*2**intent.retryCount;
+        release(g);intent.retryCount=(intent.retryCount||0)+1;intent.retryAfterMono=mono+Math.min(30000,3000*2**Math.min(intent.retryCount,4));
         g.waitReason=error.code?.toLowerCase()||'resume_required';
         event('group.auto_resume_deferred',{groupId:g.id,reasonCode:error.code,retryCount:intent.retryCount},'warning');
       }
@@ -1135,10 +1166,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const wall=now(),mono=monotonicNow(),wallDelta=wall-lastWall,monoDelta=mono-lastMono;
     if(monoDelta>15000||monoDelta<0||Math.abs(wallDelta-monoDelta)>2000)suspendForClockGap();
     lastWall=wall;lastMono=mono;
+    preserveAppliedUserStops();
     for(const g of state.groups.filter(g=>g.controlIntent)){recoverControl(g);controlComplete(g);}
     for(const i of state.instances.filter(i=>i.connected&&mono-(i.lastSeenMono??mono)>15000)){
       blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
-      for(const a of state.attempts.filter(a=>a.instanceId===i.id&&ACTIVE.has(a.status)))markUnknown(a,'connection_lost');
+      for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a)))markUnknown(a,'connection_lost');
       if(state.groups.some(g=>g.status==='running'&&g.members.some(m=>get('channels',m).instanceId===i.id)))incident('connection_lost',{instanceId:i.id});
       event('instance.disconnected',{instanceId:i.id});
     }
@@ -1155,14 +1187,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
     /**
      * 실행 종료가 확인된 미확인 시도만 읽기 전용으로 자동 대조합니다.
-     * 같은 세션/탭/설정 연결이 유지된 경우에 한해 5초 간격, 최대 3회 조회합니다.
+     * 같은 세션/탭/설정 연결이 유지된 경우에 한해 5~30초 간격으로 횟수 제한 없이 조회합니다.
      * 발송 실행 중인 시도나 교체된 탭을 건드리지 않고 PREPARE/Enter도 재발급하지 않습니다.
      */
     for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true)){
       const owner=state.instances.find(i=>i.id===a.instanceId),channel=state.channels.find(c=>c.id===a.bindingId);
       if(!owner?.connected||owner.sessionId!==a.sessionId||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||channel.tabId!==a.tabId||channel.sessionId!==a.sessionId)continue;
-      if((a.recoveryCount||0)>=3||now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;
-      a.recoveryCount=(a.recoveryCount||0)+1;a.recoveryAfter=now()+5000;
+      if(now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;
+      a.recoveryCount=(a.recoveryCount||0)+1;a.recoveryAfter=now()+Math.min(30000,5000*2**Math.min(3,Math.floor(a.recoveryCount/3)));
       command('RECONCILE',a.instanceId,attemptPayload(a));
       event('delivery.recovery_requested',{attemptId:a.id,groupId:a.groupId,retryCount:a.recoveryCount});
     }
@@ -1194,7 +1226,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return{wall,mono,safe:Number.isFinite(wall)&&Number.isFinite(mono)&&elapsed>=0&&elapsed<=15000&&Math.abs((wall-lastWall)-elapsed)<=2000};
   }
   function channelNextEligibleAt(c,clock){
-    if(!clock.safe||storageFailure||state.service.status!=='ready'||state.groups.some(g=>g.controlIntent&&g.members.includes(c.id))||state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))return null;
+    if(!clock.safe||storageFailure||state.service.status!=='ready'||state.groups.some(g=>g.controlIntent&&g.members.includes(c.id))||state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a)))return null;
     try{eligibleChannel(c);}catch{return null;}
     const instance=state.instances.find(i=>i.id===c.instanceId);
     if(clock.wall<instance.lastSeenAt||c.nextMono!==undefined&&!Number.isFinite(c.nextMono))return null;
@@ -1220,7 +1252,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function analytics({from=0,to=Number.MAX_SAFE_INTEGER,groupId,instanceId,accountId,channelId}={}){
     const matches=a=>!a.pruned&&(!groupId||a.groupId===groupId)&&(!instanceId||a.instanceId===instanceId)&&(!accountId||a.accountId===accountId)&&(!channelId||a.channelId===channelId);
     const attempts=state.attempts.filter(a=>a.createdAt>=from&&a.createdAt<=to&&matches(a)),confirmed=state.attempts.filter(a=>a.status==='confirmed'&&a.finalizedAt>=from&&a.finalizedAt<=to&&matches(a));
-    const outcomes={confirmed:0,not_sent:0,cancelled:0,unknown:0,in_progress:0};for(const a of attempts)outcomes[ACTIVE.has(a.status)&&a.status!=='unknown'?'in_progress':a.status]++;
+    const outcomes={confirmed:0,not_sent:0,cancelled:0,unknown:0,in_progress:0};for(const a of attempts)outcomes[activeAttempt(a)&&a.status!=='unknown'?'in_progress':a.status]++;
     const buckets=new Map();for(const a of confirmed){const at=Math.floor(a.finalizedAt/3600000)*3600000;const b=buckets.get(at)||{at,confirmed:0,manual:0,automatic:0};b.confirmed++;b[a.manual?'manual':'automatic']++;buckets.set(at,b);}
     const timings=attempts.filter(a=>Number.isFinite(a.confirmationMs)).map(a=>a.confirmationMs).sort((a,b)=>a-b),percentile=p=>timings.length?timings[Math.max(0,Math.ceil(timings.length*p)-1)]:null;
     const waitTotals=new Map();
@@ -1245,7 +1277,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   function supportData({attemptId,from=0,to=now()}={}){
     ensure(Number.isFinite(from)&&Number.isFinite(to)&&from>=0&&to>=from,'VALIDATION','보고서 조회 기간을 확인하세요.');
-    const selected=attemptId?[get('attempts',attemptId)]:state.attempts.filter(a=>!a.pruned&&(a.createdAt>=from&&a.createdAt<=to||ACTIVE.has(a.status)));
+    const selected=attemptId?[get('attempts',attemptId)]:state.attempts.filter(a=>!a.pruned&&(a.createdAt>=from&&a.createdAt<=to||activeAttempt(a)));
     const contextFrom=attemptId&&from===0?Math.max(0,selected[0].createdAt-300000):from,contextTo=attemptId&&from===0?Math.min(to,(selected[0].finalizedAt||to)+120000):to;
     const attemptIds=new Set(selected.map(a=>a.id)),groupIds=new Set(selected.map(a=>a.groupId)),instanceIds=new Set(selected.map(a=>a.instanceId));
     const relatedCommands=state.commands.filter(c=>attemptIds.has(c.payload.attemptId)||!c.payload.attemptId&&c.createdAt>=contextFrom&&c.createdAt<=contextTo&&(!attemptId||groupIds.has(c.payload.groupId)||instanceIds.has(c.instanceId)));
@@ -1262,7 +1294,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return{omittedEvents:importantEvents.omitted+traceEvents.omitted,contextFrom,contextTo,serverNow:now(),stateVersion:state.stateVersion,retainedFrom:state.prunedBefore||null,service:clone(state.service),settings:clone(state.settings),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c)),groups:state.groups.map(g=>publicGroup(g)),attempts:selected.map(a=>({...publicAttempt(a),bodyAvailable:typeof a.body==='string'})),commands:relatedCommands.map(publicCommand),events,incidents:state.incidents.filter(i=>!attemptId||attemptIds.has(i.attemptId)||commandIds.has(i.commandId)||groupIds.has(i.groupId)||instanceIds.has(i.instanceId)).map(clone),intervals:state.intervals.filter(span=>(!attemptId||groupIds.has(span.targetId)||instanceIds.has(span.targetId))&&(span.to===null||span.to>=contextFrom)&&span.from<=contextTo).map(clone),locks:clone(state.locks)};
   }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
-  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(ACTIVE.has(a.status)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
+  function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(activeAttempt(a)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
   if(loaded)transact(()=>{
     // 과거 사용자별 횟수 제한은 폐기하되, 활성 시도의 누적 횟수·결과·
     // 잠금은 보존합니다. 바로 아래 재시작 절차에서 이전 실행을 차단하므로
@@ -1270,7 +1302,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const hadRetryPreference=Object.hasOwn(state.settings,'maxSendRetries');
     delete state.settings.maxSendRetries;
     let normalizedAttempts=0;
-    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status))){
+    for(const a of state.attempts.filter(a=>activeAttempt(a))){
       if(a.maxSendRetries!==null){a.maxSendRetries=normalizeSendRetries();normalizedAttempts++;}
     }
     if(hadRetryPreference||normalizedAttempts)event('settings.retry_policy_migrated',{reasonCode:'CONTINUOUS_SEND_SEPARATE_ERROR_RECOVERY',maxSendRetries:null,prepareRetries:DEFAULT_PREPARE_RETRIES,normalizedAttempts});
@@ -1280,9 +1312,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const i of state.instances){invalidateAccounts(i.id);i.connected=false;i.sessionId=id();delete i.lastSeenMono;}
     for(const c of state.channels){c.verified=false;c.appliedVersion=0;delete c.tabId;delete c.sessionId;delete c.nextMono;delete c.lastConfirmedMono;}
     // 프로세스 재시작은 새 실행 지시가 아니므로 저장된 보호 복구 예약도 취소합니다.
-    for(const g of state.groups){delete g.autoResume;delete g.nextMono;if(g.status==='running')g.status='resume_required';}
+    for(const g of state.groups){delete g.autoResume;delete g.reconcileResumeRunId;delete g.nextMono;if(g.status==='running')g.status='resume_required';}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
+    for(const a of state.attempts.filter(a=>activeAttempt(a)))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
   else transact(()=>{state.retryPolicyVersion=3;event('service.started');});
   return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};

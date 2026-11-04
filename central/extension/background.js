@@ -199,7 +199,8 @@ async function openManagedChannelNow(p) {
   if(!/^\d{17,20}$/.test(p.accountId||'')||!/^\d{1,30}$/.test(p.guildId||'')||!/^\d{1,30}$/.test(p.channelId||''))throw Object.assign(Error('연결할 계정·채널 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
   ensureCurrent();
   const saved=currentRegistration(await chrome.storage.local.get('dicoCentralAccount'),resetEpoch).dicoCentralAccount;
-  if(!await currentAccount(p.accountId,saved?.sourceTabId))throw Object.assign(Error('이 브라우저의 로그인 계정을 다시 등록해 주세요.'),{code:'ACCOUNT_UNVERIFIED'});
+  const login=await currentAccount(p.accountId,saved?.sourceTabId);
+  if(!login)throw Object.assign(Error('이 브라우저의 로그인 계정을 다시 등록해 주세요.'),{code:'ACCOUNT_UNVERIFIED'});
   const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;
   ensureCurrent();
   // 주소는 후보 선별에만 사용합니다. 실제 로그인 계정과 화면 채널은 페이지에서
@@ -245,12 +246,12 @@ async function openManagedChannelNow(p) {
   ensureCurrent();
   // 탭이 이미 닫혔더라도 같은 대상의 미확인 발송은 새 탭 생성으로 우회하지 않습니다.
   assertIdle(existing?.tabId);
-  const win=await createManagedWindow(chrome,p,ensureCurrent);
+  const win=await createManagedWindow(chrome,{...p,sourceTabId:login.tabId},ensureCurrent);
   // Chrome 생성 요청 자체는 취소할 수 없으므로 중지 중 완료된 새 창은 즉시 정리합니다.
   try{ensureCurrent();}catch(error){try{if(win.tabs?.[0]?.id)await chrome.tabs.remove(win.tabs[0].id);}catch{}throw error;}
   const tab=win.tabs?.[0];if(!tab)throw Error('전송용 창을 열지 못했습니다.');
   ensureCurrent();
-  records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id});await chrome.storage.local.set({dicoCentralTabs:records});
+  records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id,...(win.ownership?{ownership:win.ownership}:{})});await chrome.storage.local.set({dicoCentralTabs:records});
   for(let n=0;n<20;n++) {
     ensureCurrent();
     const ready=await observe(tab.id);

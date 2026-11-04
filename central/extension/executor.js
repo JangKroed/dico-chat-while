@@ -240,7 +240,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     } else if(c.type==='CLOSE_CHANNEL') {
       if(typeof manageChannelWindow!=='function')throw Object.assign(Error('채널 연결 해제를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
       if(p.tabId!==undefined&&!Number.isInteger(p.tabId)||!p.accountId||!p.guildId||!p.channelId)throw Object.assign(Error('닫을 전송 탭 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
-      if(Object.values(state.attempts).some(a=>(p.tabId!==undefined?a.tabId===p.tabId:['accountId','guildId','channelId'].every(key=>a[key]===p[key]))&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 연결을 해제하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+      if(Object.values(state.attempts).some(a=>(p.tabId!==undefined?a.tabId===p.tabId:['accountId','guildId','channelId'].every(key=>a[key]===p[key]))&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('진행 중인 발송 입력 차단을 기다리고 있습니다.'),{code:'ATTEMPT_UNRESOLVED'});
       maintenance=true;
       try{
         await manageChannelWindow({...p,action:'close'});
@@ -348,6 +348,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       const a=state.attempts[p.attemptId];
       // This lane has drained any in-flight send. Revocation prevents any new
       // Enter, but does not claim an earlier Enter never reached Discord.
+      if(a?.result?.outcome==='unknown'){a.result.executionBlocked=true;await save();}
       await ack(c,'applied',{executionBlocked:true,...(p.attemptId?{attemptId:p.attemptId}:{})});
       if(a && !a.enterRequested){a.phase='cancelled';await save();}
     } else if(c.type==='RECONCILE') {

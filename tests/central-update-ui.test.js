@@ -37,3 +37,11 @@ test('connected older extensions remain update-required instead of reporting com
  assert.equal(extensionVersionState(undefined,'0.4.18',true),'unknown');
  assert.equal(extensionVersionState('0.4.18',undefined,true),'unknown');
 });
+
+test('완료된 업데이트에 현재 발송의 수동 처리 안내를 남기지 않는다',async()=>{
+ const {showUpdateBlockers}=await import('../central/ui/src/update.ts');
+ assert.equal(showUpdateBlockers('completed'),false);assert.equal(showUpdateBlockers('idle'),true);
+ const s=snapshot();s.attempts=[{status:'unknown'}];s.groups=[{status:'running'}];
+ assert.ok(updateBlockers(s).length>0,'미확인 발송 보호는 유지한다');
+ for(const text of updateBlockers(s))assert.doesNotMatch(text,/하세요|처리하세요|확인하세요/);
+});

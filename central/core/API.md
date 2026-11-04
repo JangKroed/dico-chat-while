@@ -185,3 +185,7 @@ Local UI auth+CSRF protects POST `/api/support/automatic` (consent, autoSend, re
 POST `/api/support/receive` accepts a raw bounded support report using a separate per-install bearer credential and explicit receiver opt-in; it never accepts UI cookies/native bridge credentials as substitutes. It can be reached through the enabled LAN listener or an explicitly configured HTTPS proxy. It returns a report-linked receipt; lost ACK retry is idempotent by reportId.
 
 DELIVERY_WAIT `{observationPhase:true,retryCount,cooldownMs:0,elapsedMs}` refreshes a current, scoped permitted attempt without granting Enter or consuming a retry. AUTHORIZE_ENTER denials preserve `{code,retryable,retryAfterMs?}`; valid scoped requests refresh liveness even when a transient condition prevents Enter.
+
+## 선택 실행 및 활성 설정
+- `group.setEnabled {id,expectedVersion,enabled}`: 활성 여부 저장. 비활성화 시 자동 재개를 취소하고 기존 중지 절차를 요청한다. 활성화만으로 시작하지 않는다.
+- `service.startAll {groupIds?}`: 생략 시 활성 그룹만, 명시 시 지정 그룹만 원자적으로 검증하여 시작한다. 빈 선택·존재하지 않는 ID·비활성 대상은 거절한다. 기존 `enabled` 미지정 그룹은 활성으로 취급한다.

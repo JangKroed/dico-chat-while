@@ -57,3 +57,13 @@ test('another Discord channel is left open and reported instead of closing a nav
  const r=fixture();r.tabs.get(7).url='https://discord.com/channels/111/999';
  await assert.rejects(r.manage({...target,action:'close'}),{code:'TARGET_MISMATCH'});assert.deepEqual(r.removed,[]);assert.equal(r.saved.dicoCentralTabs.some(record=>record.tabId===7),false);
 });
+
+test('입력 차단을 확인한 미확인 시도만 기록을 유지하며 연결 해제할 수 있다',async()=>{
+ for(const blocked of [false,true]){
+  const r=fixture(),reports=[];const executor=createCentralExecutor({chrome:r.chrome,transport:{connected:true,request:async m=>{reports.push(m);return{ok:true};}},manageChannelWindow:r.manage});await executor.load();
+  Object.assign(executor.state,{instanceId:'instance',sessionId:'session',bindings:{binding:{...target}},attempts:{a:{...target,phase:'unknown',result:{outcome:'unknown',executionBlocked:blocked}}}});
+  await executor.handleCommand({id:'close-unknown',type:'CLOSE_CHANNEL',instanceId:'instance',sessionId:'session',payload:target});
+  assert.equal(r.removed.length,blocked?1:0);assert.equal(executor.state.attempts.a.result.outcome,'unknown');
+  assert.ok(reports.some(m=>m.type==='ACK'&&m.status===(blocked?'applied':'rejected')));
+ }
+});

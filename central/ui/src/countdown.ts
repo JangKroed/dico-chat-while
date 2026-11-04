@@ -44,3 +44,10 @@ export function accountTimingState(channel:Pick<Channel,'id'|'nextEligibleAt'>,g
   if(seconds===null)return '연결·설정 확인 필요'
   return seconds>0?`입력 준비까지 약 ${seconds}초`:'입력 준비 대기'
 }
+
+// 설정 간격과 5초 선행 입력 준비를 혼동하지 않도록 두 시각을 함께 표시합니다.
+export function groupScheduleText(group:TimingGroup,preparationSeconds:number|null,sendSeconds:number|null):string {
+  const state=groupTimingState(group,preparationSeconds)
+  if(group.status!=='running'||group.activeAttemptId||group.autoResume||sendSeconds===null||preparationSeconds===null)return state
+  return `발송 가능까지 약 ${sendSeconds}초 · ${state}`
+}

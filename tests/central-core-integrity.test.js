@@ -14,7 +14,7 @@ function fixture(t){
   return{manager,session,group,ack,advance:()=>time+=3000};
 }
 
-for(const intent of ['stop','pause'])test(`거절 복구 소진 뒤 재접속한 ${intent}는 현재 세션 적용 근거로 완료한다`,t=>{
+for(const intent of ['stop','pause'])test(`거절 복구를 계속하다 재접속한 ${intent}는 현재 세션 적용 근거로 완료한다`,t=>{
   const f=fixture(t);f.manager.execute(`group.${intent}`,{id:f.group.id});
   // 최초 요청과 자동 복구 3회를 모두 거절한 실제 프로토콜 흐름을 재현합니다.
   // 저장 상태를 조작하지 않으므로 재접속이 남긴 과거 명령의 영향을 검증합니다.
@@ -24,9 +24,10 @@ for(const intent of ['stop','pause'])test(`거절 복구 소진 뒤 재접속한
   }
   let snapshot=f.manager.snapshot();
   assert.equal(snapshot.groups[0].status,`${intent}_pending`);
-  assert.equal(snapshot.groups[0].controlRecoveryCount,3);
-  const failed=snapshot.commands.filter(c=>c.type==='CONTROL'&&c.status==='rejected');
-  assert.equal(failed.length,1);
+  assert.equal(snapshot.groups[0].controlRecoveryCount,4);
+  const failed=snapshot.commands.filter(c=>c.type==='CONTROL'&&c.status==='superseded');
+  assert.equal(failed.length,4);
+  assert.ok(snapshot.commands.some(c=>c.type==='CONTROL'&&c.status==='queued'));
   const reconnect=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId});
   const current=f.manager.commands(reconnect.instanceId).findLast(c=>c.type==='CONTROL');
   assert.equal(current.sessionId,reconnect.sessionId);

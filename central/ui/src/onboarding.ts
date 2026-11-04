@@ -29,6 +29,7 @@ export function bindingBlockers(s:Snapshot,c:Channel,now=Date.now()):string[] {
 }
 export function groupBlockers(s:Snapshot,g:Group,now=Date.now()):string[] {
   const reasons:string[]=[]
+  if(g.enabled===false)reasons.push('비활성 그룹입니다. 먼저 활성화하세요.')
   if(!g.members.length)reasons.push('참여 계정 필요')
   if(g.activeAttemptId||g.status==='needs_review')reasons.push('진행·미확인 시도 확인 필요')
   if(['stop_pending','pause_pending'].includes(g.status))reasons.push('중지·일시정지 확인 대기')
@@ -36,9 +37,9 @@ export function groupBlockers(s:Snapshot,g:Group,now=Date.now()):string[] {
   return [...new Set(reasons)]
 }
 export function allRunBlockers(s:Snapshot,now=Date.now()):string[] {
-  const reasons=s.groups.filter(g=>g.status!=='running').flatMap(g=>groupBlockers(s,g,now))
+  const reasons=s.groups.filter(g=>g.enabled!==false&&g.status!=='running').flatMap(g=>groupBlockers(s,g,now))
   const targets=new Set<string>()
-  for(const g of s.groups){
+  for(const g of s.groups.filter(g=>g.enabled!==false)){
     const key=`${g.guildId}:${g.channelId}`
     if(targets.has(key))reasons.push('같은 채널의 여러 그룹은 함께 실행할 수 없습니다. 실행할 그룹 하나를 남겨 주세요.')
     targets.add(key)
