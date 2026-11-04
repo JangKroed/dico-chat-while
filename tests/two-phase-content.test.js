@@ -27,8 +27,8 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  }};
  let panelUsername='hoya',panelDisplayName='호야';
  const nameNode={get textContent(){return panelUsername;},childElementCount:0,getAttribute:()=>null};
- const ownRoot={getAttribute:()=>null,querySelector:selector=>selector.includes('panelTitleContainer')?{get textContent(){return panelDisplayName;}}:selector.includes('panelSubtextContainer')?{querySelectorAll:()=>panelUsername?[nameNode]:[]}:null,querySelectorAll:selector=>selector==='img'?[{getAttribute:()=>'/embed/avatars/0.png'}]:selector.includes('username')&&panelUsername?[nameNode]:[]};
- const ownPanel={querySelector:()=>ownRoot};
+ let ownRoot={getAttribute:()=>null,querySelector:selector=>selector.includes('panelTitleContainer')?{get textContent(){return panelDisplayName;}}:selector.includes('panelSubtextContainer')?{querySelectorAll:()=>panelUsername?[nameNode]:[]}:null,querySelectorAll:selector=>selector==='img'?[{getAttribute:()=>'/embed/avatars/0.png'}]:selector.includes('username')&&panelUsername?[nameNode]:[]};
+ let ownPanel={querySelector:()=>ownRoot};
  const identity=()=>({verified:Boolean(loggedUser),accountId:loggedUser,guildId,channelId,username:'hoya',accountName:'호야',identitySource:'own-panel-current-user'});
  const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?(messageScanCount++,messageRowsVisited+=nodes.length,nodes):editorPresent?[replacementEditor||editor]:[],querySelector:sel=>sel.includes('panels')?defaultAvatar?ownPanel:{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(editor){this.editor=editor;},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
  const tick=ms=>{if(tickHook){let remaining=ms;while(remaining>0){const step=Math.min(500,remaining);clock+=step;remaining-=step;tickHook();}}else clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
@@ -60,7 +60,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {messageScanStats:()=>({scans:messageScanCount,rows:messageRowsVisited}),onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:({text='',sameForm=true}={})=>{if(replacementEditor)replacementEditor.isConnected=false;replacementEditor={...editor,innerText:text,isConnected:true,closest:()=>sameForm?form:{...form}};editor.isConnected=false;return replacementEditor;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{if(listener(message,{id:'ext'},resolve)===false)resolve(undefined);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},removePosts:()=>{nodes.length=0;check?.();},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false,ageMs=0}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock-ageMs)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {remountPanel:()=>{ownRoot={...ownRoot};ownPanel={querySelector:()=>ownRoot};check?.();},messageScanStats:()=>({scans:messageScanCount,rows:messageRowsVisited}),onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:({text='',sameForm=true}={})=>{if(replacementEditor)replacementEditor.isConnected=false;replacementEditor={...editor,innerText:text,isConnected:true,closest:()=>sameForm?form:{...form}};editor.isConnected=false;return replacementEditor;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{if(listener(message,{id:'ext'},resolve)===false)resolve(undefined);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},removePosts:()=>{nodes.length=0;check?.();},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false,ageMs=0}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock-ageMs)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
@@ -886,4 +886,27 @@ test('중앙 입력창 완료는 빠른 채팅 목록을 다시 순회하지 않
   if(coordinated){assert.equal(result.confirmationBasis,'composer_cleared');assert.deepEqual(after,before);}
   else{assert.equal(result.confirmationBasis,'message_observed');assert.ok(after.scans>before.scans);assert.ok(after.rows-before.rows>=201);}
  }
+});
+
+ test('재시도 중 계정 패널만 재생성돼도 동일 계정의 입력창 관찰을 영구 차단하지 않는다',async()=>{
+ const r=rig({managed:true,defaultAvatar:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:2,maxSendRetries:5});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let remounted=false;
+ r.onRetry(()=>{if(!remounted){remounted=true;r.remountPanel();}});
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(remounted,true);assert.equal(result.status,'confirmed');assert.equal(result.deliveryEvidence.sameComposer,true);assert.equal(r.events.filter(e=>e.type==='keydown').length,3);
+ });
+
+test('제출한 입력창이 비면 계정 패널 재조회가 40초 유실돼도 추가 대기 없이 완료한다',async()=>{
+ const r=rig({managed:true,defaultAvatar:true,loggedUser:'123456789012345678',noPostedMessage:true,maxSendRetries:5});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);let restoreAt=0;
+ r.onSubmit(()=>{restoreAt=r.now()+40000;r.remountPanel();});
+ r.onRuntime(m=>m.type==='DICO_ACCOUNT_IDENTITY'&&r.now()<restoreAt?{verified:false}:undefined);
+ const began=r.now(),result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.ok(r.now()-began<1000);assert.equal(result.deliveryEvidence.sameComposer,true);assert.equal(result.deliveryEvidence.accountVerifiedAtSubmission,true);
+});
+test('패널 재생성 뒤 실제 다른 계정으로 바뀌면 완료나 추가 Enter를 허용하지 않는다',async()=>{
+ const r=rig({managed:true,defaultAvatar:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:2,maxSendRetries:5});
+ r.target.coordinated=true;await r.request('DICO_PREPARE');r.tick(3000);
+ r.onRetry(()=>{r.remountPanel();r.account('999999999999999999');});
+ const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
 });
