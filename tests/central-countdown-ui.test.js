@@ -99,3 +99,20 @@ test('system-paused groups explain automatic recovery without a send countdown',
  assert.equal(groupTimingState({status:'paused'},12),'일시정지됨');
  assert.equal(groupTimingState({status:'stopped'},12),'중지됨');
 });
+
+test('20초 발송 간격과 15초 준비 대기를 구분해서 함께 표시한다',async()=>{
+ const {groupScheduleText}=await import('../central/ui/src/countdown.ts');
+ assert.equal(groupScheduleText({status:'running'},15,20),'발송 가능까지 약 20초 · 입력 준비까지 약 15초');
+ assert.equal(groupScheduleText({status:'running'},null,null),'연결·설정 확인 필요');
+ assert.equal(groupScheduleText({status:'stopped'},15,20),'중지됨');
+ assert.equal(groupScheduleText({status:'running',activeAttemptId:'a',waitReason:'send_retry'},15,20),'현재 계정 전송 재시도 중');
+});
+
+test('긴 재시도는 서버 시각에 따른 경과를 표시하며 정상 대기·중지·오래된 연결과 구분한다',async()=>{
+ const {retryDurationText}=await import('../central/ui/src/countdown.ts');
+ const g={status:'running',waitReason:'send_retry'},a={permittedAt:1000};
+ assert.match(retryDurationText(g,a,40000,1000,true),/40초 경과/);
+ assert.equal(retryDurationText({...g,waitReason:'account_interval'},a,40000,1000,true),'');
+ assert.equal(retryDurationText({...g,status:'stopped'},a,40000,1000,true),'');
+ assert.equal(retryDurationText(g,a,40000,21000,true),'');assert.equal(retryDurationText(g,a,40000,1000,false),'');
+});

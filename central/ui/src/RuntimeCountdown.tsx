@@ -1,7 +1,7 @@
 import {createContext,useContext,useEffect,useState,type ReactNode} from 'react'
 import type {Channel,Group,Snapshot,Timestamp} from './api'
 import {accountLabel} from './account-label'
-import {accountTimingState,groupTimingState,secondsUntil,preparationDeadline} from './countdown'
+import {accountTimingState,groupTimingState,secondsUntil,preparationDeadline,groupScheduleText,retryDurationText} from './countdown'
 import {intervalSettings} from './interval'
 import {channelVerification} from './channel-window'
 import {browserOnline,logicalTargets} from './onboarding'
@@ -26,7 +26,9 @@ function preparationLead(s:Snapshot,channel:Channel|undefined) {
 export function GroupCountdown({group,s}:{group:Group;s:Snapshot}) {
   const channel=s.channels.find(c=>c.id===group.members[group.cursor%Math.max(1,group.members.length)])
   const {seconds,live}=useCountdown(group.nextPreparationAt===undefined?preparationDeadline(group.nextEligibleAt,preparationLead(s,channel)):group.nextPreparationAt)
-  return <span className="countdown-text">{!live&&group.status==='running'?'연결 상태 다시 확인 중':groupTimingState(group,seconds)}</span>
+  const send=useCountdown(group.nextEligibleAt)
+  const clock=useContext(Clock),attempt=s.attempts.find(a=>a.id===group.activeAttemptId)
+  return <span className="countdown-text">{!live&&group.status==='running'?'연결 상태 다시 확인 중':groupScheduleText(group,seconds,send.seconds)}{retryDurationText(group,attempt,clock.serverNow,clock.elapsed,live)}</span>
 }
 export function AccountCountdown({s,channel,group:assignedGroup}:{s:Snapshot;channel:Channel;group?:Group|null}) {
   const groups=s.groups.filter(g=>g.members.includes(channel.id)),group=assignedGroup===undefined?groups.find(g=>g.status==='running')||groups[0]:assignedGroup||undefined

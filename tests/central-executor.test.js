@@ -758,3 +758,17 @@ for(const stalledType of ['DICO_DRAFT_INSPECT','DICO_INSPECT'])for(const mode of
  assert.equal(r.reports.some(x=>x.type==='PREPARED'),false);
  assert.equal(r.messages.some(x=>x.type==='DICO_DELIVER'),false);
 });
+
+test('교체 탭에서는 게시 이력만 대조하며 원래 전송 탭의 영수증과 Enter를 재사용하지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_INSPECT'?{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0}:{status:'uncertain'};
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ const originalTab=r.state.attempts.attempt.tabId,calls=[];
+ r.chrome.tabs.sendMessage=async(id,m)=>{calls.push({id,type:m.type});return{status:'uncertain'};};
+ const recovery=cmd('RECONCILE');recovery.payload.recoveryTabId=999;
+ await r.client.handleCommand(recovery);
+ assert.ok(calls.some(m=>m.id===999&&m.type==='DICO_RECONCILE'));
+ assert.ok(!calls.some(m=>m.id===999&&m.type==='DICO_DELIVERY_RECEIPT'));
+ assert.ok(!calls.some(m=>['DICO_DELIVER','DICO_PREPARE'].includes(m.type)));
+ assert.equal(r.state.attempts.attempt.tabId,originalTab);assert.equal(r.state.attempts.attempt.phase,'unknown');
+});

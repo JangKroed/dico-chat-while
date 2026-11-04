@@ -44,3 +44,19 @@ export function accountTimingState(channel:Pick<Channel,'id'|'nextEligibleAt'>,g
   if(seconds===null)return '연결·설정 확인 필요'
   return seconds>0?`입력 준비까지 약 ${seconds}초`:'입력 준비 대기'
 }
+
+// 설정 간격과 5초 선행 입력 준비를 혼동하지 않도록 두 시각을 함께 표시합니다.
+export function groupScheduleText(group:TimingGroup,preparationSeconds:number|null,sendSeconds:number|null):string {
+  const state=groupTimingState(group,preparationSeconds)
+  if(group.status!=='running'||group.activeAttemptId||group.autoResume||sendSeconds===null||preparationSeconds===null)return state
+  return `발송 가능까지 약 ${sendSeconds}초 · ${state}`
+}
+
+// 같은 '재시도 중' 문구만 고정하지 않고 현재 시도의 실제 경과를 표시합니다.
+// 서버 시각을 못 받거나 연결이 오래되면 경과 시간을 추측하지 않습니다.
+export function retryDurationText(group:TimingGroup,attempt:Pick<Attempt,'permittedAt'>|undefined,serverNow:number|undefined,elapsedMs:number,live:boolean):string {
+  if(group.status!=='running'||group.waitReason!=='send_retry'||!attempt?.permittedAt||!live||serverNow===undefined||!Number.isFinite(elapsedMs)||elapsedMs<0||elapsedMs>20000)return ''
+  const at=typeof attempt.permittedAt==='number'?attempt.permittedAt:Date.parse(attempt.permittedAt)
+  const duration=serverNow+elapsedMs-at
+  return Number.isFinite(duration)&&duration>=0?` · ${Math.floor(duration/1000)}초 경과 · 입력창 비움 확인 전`:''
+}

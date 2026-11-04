@@ -8,8 +8,8 @@ export function connectionProgress(s:Snapshot,instance:Instance){
  let label='연결 상태 확인 중'
  if(!online)label='브라우저 연결 대기'
  else if(instance.legacyFrozen!==true||instance.legacyPending!==false)label='기존 실행기 확인 필요'
- else if(progress?.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED')label='이전 발송 결과 확인 필요'
- else if(progress?.stage==='blocked')label='연결 차단 원인 확인 필요'
+ else if(progress?.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED')label='이전 발송 결과 자동 대조 대기'
+ else if(progress?.stage==='blocked')label='연결 복구 조건 대기'
  else if(!account)label='로그인 계정 확인 중'
  else if(!channels.length)label='사용할 채널을 추가하세요'
  else if(verified<channels.length)label=`채널 확인 중 · ${verified}/${channels.length}`

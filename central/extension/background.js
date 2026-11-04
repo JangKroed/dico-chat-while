@@ -108,7 +108,7 @@ async function publishObservation(snapshot){
 async function restoreSavedConnections({onlyMissing=false}={}){
   const sessionId=executor.state.sessionId;
   return recoverConnections({chrome,onlyMissing,state:executor.state,isCurrent:()=>transport.connected&&executor.state.sessionId===sessionId,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
-    canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
+    canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isMaintenanceIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isMaintenanceIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
 async function runHeartbeat() {
@@ -132,7 +132,7 @@ async function runHeartbeat() {
     if(!current())return;
     for(const command of result.commands || [])void executor.handleCommand(command);
     if(executor.state.emergencyStopped)return;
-    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(current())lastError=null;
+    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isMaintenanceIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(current())lastError=null;
   }catch{if(!current())return;lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect({explicit=false}={}) {
@@ -199,7 +199,8 @@ async function openManagedChannelNow(p) {
   if(!/^\d{17,20}$/.test(p.accountId||'')||!/^\d{1,30}$/.test(p.guildId||'')||!/^\d{1,30}$/.test(p.channelId||''))throw Object.assign(Error('연결할 계정·채널 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
   ensureCurrent();
   const saved=currentRegistration(await chrome.storage.local.get('dicoCentralAccount'),resetEpoch).dicoCentralAccount;
-  if(!await currentAccount(p.accountId,saved?.sourceTabId))throw Object.assign(Error('이 브라우저의 로그인 계정을 다시 등록해 주세요.'),{code:'ACCOUNT_UNVERIFIED'});
+  const login=await currentAccount(p.accountId,saved?.sourceTabId);
+  if(!login)throw Object.assign(Error('이 브라우저의 로그인 계정을 다시 등록해 주세요.'),{code:'ACCOUNT_UNVERIFIED'});
   const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;
   ensureCurrent();
   // 주소는 후보 선별에만 사용합니다. 실제 로그인 계정과 화면 채널은 페이지에서
@@ -207,7 +208,7 @@ async function openManagedChannelNow(p) {
   const matches=seen=>seen?.verified===true&&seen.accountId===p.accountId&&seen.guildId===p.guildId&&seen.channelId===p.channelId;
   const matchesUrl=tab=>{try{const url=new URL(tab?.url);return url.origin==='https://discord.com'&&[ `/channels/${p.guildId}/${p.channelId}`,`/channels/${p.guildId}/${p.channelId}/`].includes(url.pathname);}catch{return false;}};
   const assertIdle=tabId=>{
-    if(Object.values(executor.state.attempts||{}).some(a=>(a.tabId===tabId||a.accountId===p.accountId&&a.guildId===p.guildId&&a.channelId===p.channelId)&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('기존 채널의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    if(Object.values(executor.state.attempts||{}).some(a=>(a.tabId===tabId||a.accountId===p.accountId&&a.guildId===p.guildId&&a.channelId===p.channelId)&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('기존 채널의 입력 차단을 기다리고 있습니다.'),{code:'ATTEMPT_UNRESOLVED'});
   };
   const existing=records.find(r=>r.accountId===p.accountId&&r.guildId===p.guildId&&r.channelId===p.channelId);
   if(p.recovery&&!existing)throw Object.assign(Error('연결 해제한 채널의 자동 복구를 취소했습니다.'),{code:'MANAGED_TAB_MISSING'});
@@ -215,7 +216,7 @@ async function openManagedChannelNow(p) {
     assertIdle(existing.tabId);
     const seen=await observe(existing.tabId);ensureCurrent();
     if(matches(seen)){await observation();ensureCurrent();return {alreadyConnected:true,tabId:existing.tabId};}
-    if(Object.values(executor.state.attempts).some(a=>a.tabId===existing.tabId&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('기존 전송용 창의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    if(Object.values(executor.state.attempts).some(a=>a.tabId===existing.tabId&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('기존 전송용 창의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
     try{await chrome.tabs.get(existing.tabId);throw Object.assign(Error('기존 전송용 창이 다른 화면에 있습니다. 원래 채널로 돌아가거나 창을 닫고 다시 연결하세요.'),{code:'TARGET_MISMATCH'});}catch(error){if(error.code==='TARGET_MISMATCH')throw error;}
     records.splice(records.indexOf(existing),1);
   }
@@ -245,12 +246,12 @@ async function openManagedChannelNow(p) {
   ensureCurrent();
   // 탭이 이미 닫혔더라도 같은 대상의 미확인 발송은 새 탭 생성으로 우회하지 않습니다.
   assertIdle(existing?.tabId);
-  const win=await createManagedWindow(chrome,p,ensureCurrent);
+  const win=await createManagedWindow(chrome,{...p,sourceTabId:login.tabId},ensureCurrent);
   // Chrome 생성 요청 자체는 취소할 수 없으므로 중지 중 완료된 새 창은 즉시 정리합니다.
   try{ensureCurrent();}catch(error){try{if(win.tabs?.[0]?.id)await chrome.tabs.remove(win.tabs[0].id);}catch{}throw error;}
   const tab=win.tabs?.[0];if(!tab)throw Error('전송용 창을 열지 못했습니다.');
   ensureCurrent();
-  records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id});await chrome.storage.local.set({dicoCentralTabs:records});
+  records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id,...(win.ownership?{ownership:win.ownership}:{})});await chrome.storage.local.set({dicoCentralTabs:records});
   for(let n=0;n<20;n++) {
     ensureCurrent();
     const ready=await observe(tab.id);

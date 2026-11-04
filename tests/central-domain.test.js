@@ -1184,9 +1184,9 @@ test('pre-permit preparation timeout safely retries the same turn with bounded b
  assert.throws(()=>f.prepared(c,first),{code:'ATTEMPT_STATE'});
  advance(5000);s=f.manager.snapshot();assert.equal(s.attempts.length,2);assert.equal(s.attempts[1].playlistIndex,0);
  advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[1].status,'not_sent');assert.equal(s.groups[0].status,'running');
- advance(5000);advance(31000);advance(5000);advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[3].status,'not_sent');assert.equal(s.groups[0].status,'paused');assert.equal(s.groups[0].activeAttemptId,null);
- assert.equal(s.incidents.some(i=>i.code==='delivery_unknown'),false);assert.equal(s.incidents.filter(i=>i.status==='open').length,1);
- advance(30000);assert.equal(f.manager.snapshot().attempts.length,4);f.manager.close();
+ advance(5000);advance(31000);advance(5000);advance(31000);s=f.manager.snapshot();assert.equal(s.attempts[3].status,'not_sent');assert.equal(s.groups[0].status,'running');assert.equal(s.groups[0].activeAttemptId,null);
+ assert.equal(s.incidents.some(i=>i.code==='delivery_unknown'),false);assert.equal(s.incidents.filter(i=>i.status==='open').length,0);
+ advance(30000);assert.equal(f.manager.snapshot().attempts.length,5);f.manager.close();
 });
 
 test('preparation rejection before permit retries only transient errors and repeated ACK is idempotent',()=>{

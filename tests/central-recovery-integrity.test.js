@@ -12,7 +12,7 @@ test('recovery uses exponential bounded backoff',async()=>{
  let time=0,calls=0;const scheduler=createRecoveryScheduler({now:()=>time});scheduler.observe(missing);
  const run=()=>scheduler.run({safe:()=>true,repair:async()=>{calls++;throw Error('temporary');}});
  await run();time=10000;await run();time=20000;await run();assert.equal(calls,2);
- time=30000;await run();assert.equal(calls,3);time=900000;await run();assert.equal(calls,3);
+ time=30000;await run();assert.equal(calls,3);time=900000;await run();assert.equal(calls,4);
 });
 test('account observation flapping does not refill exhausted budget',async()=>{
  let time=0;const scheduler=createRecoveryScheduler({now:()=>time,maxAttempts:1});scheduler.observe(missing);

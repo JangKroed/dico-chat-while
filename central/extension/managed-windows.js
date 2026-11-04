@@ -2,7 +2,7 @@ function fail(code,message){throw Object.assign(Error(message),{code});}
 function discordTab(tab){try{return new URL(tab?.url).origin==='https://discord.com';}catch{return false;}}
 function channelTab(tab,record){try{const url=new URL(tab?.url);return url.origin==='https://discord.com'&&[ `/channels/${record.guildId}/${record.channelId}`,`/channels/${record.guildId}/${record.channelId}/`].includes(url.pathname);}catch{return false;}}
 function ownsWindow(win,records){
-  return win?.type==='normal'&&win.tabs?.length>0&&win.tabs.every(tab=>records.some(record=>record.ownership!=='adopted'&&record.tabId===tab.id&&record.windowId===win.id&&channelTab(tab,record)));
+  return win?.type==='normal'&&win.tabs?.length>0&&win.tabs.every(tab=>records.some(record=>!['adopted','grouped'].includes(record.ownership)&&record.tabId===tab.id&&record.windowId===win.id&&channelTab(tab,record)));
 }
 // A stored window ID is provenance, not sufficient ownership: users can move
 // ordinary tabs into a managed window. Never minimize or reuse such a window.
@@ -16,6 +16,21 @@ async function ownedWindowId(chrome,saved){
 }
 export async function createManagedWindow(chrome,target,assertCurrent=()=>{}){
   assertCurrent();
+  // 새 채널은 계정 확인에 사용한 탭과 같은 창/프로필에 만듭니다.
+  // 사용자 창은 이동·최소화하지 않고, 서버별 DICO 탭 그룹만 관리합니다.
+  if(Number.isInteger(target.sourceTabId)){
+    const source=await chrome.tabs.get(target.sourceTabId);assertCurrent();
+    if(!discordTab(source)||!Number.isInteger(source.windowId))fail('ACCOUNT_UNVERIFIED','로그인 확인 탭을 찾을 수 없습니다.');
+    const tab=await chrome.tabs.create({windowId:source.windowId,active:false,url:`https://discord.com/channels/${target.guildId}/${target.channelId}`});
+    try{
+      assertCurrent();
+      const title=`DICO · ${target.guildId}`;
+      const groups=await chrome.tabGroups.query({windowId:source.windowId,title});assertCurrent();
+      const groupId=await chrome.tabs.group({tabIds:[tab.id],...(groups.length?{groupId:groups[0].id}:{createProperties:{windowId:source.windowId}})});assertCurrent();
+      await chrome.tabGroups.update(groupId,{title,color:'blue'});assertCurrent();
+      return{id:source.windowId,tabs:[tab],ownership:'grouped'};
+    }catch(error){try{await chrome.tabs.remove(tab.id);}catch{}throw error;}
+  }
   const saved=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralWindowId']);
   const windowId=await ownedWindowId(chrome,saved),url=`https://discord.com/channels/${target.guildId}/${target.channelId}`;
   assertCurrent();
@@ -38,7 +53,7 @@ export async function ensureConsolidatedManagedWindow(chrome,target,assertCurren
   assertCurrent();
   // 사용자가 이미 열어 둔 탭은 연결만 빌려 씁니다. 복구 과정에서 일반 창을
   // 전송 전용 창으로 바꾸거나 사용자 탭을 이동하면 안 됩니다.
-  if(record.ownership==='adopted')return tab.windowId;
+  if(['adopted','grouped'].includes(record.ownership))return tab.windowId;
   let windowId=await ownedWindowId(chrome,saved);
   assertCurrent();
   if(!Number.isInteger(windowId)){
@@ -58,7 +73,7 @@ async function managedTab(chrome,record){
 }
 async function separateRecord(chrome,records,record){
   const tab=await managedTab(chrome,record);
-  if(record.ownership==='adopted')return tab.windowId;
+  if(['adopted','grouped'].includes(record.ownership))return tab.windowId;
   const win=await chrome.windows.get(tab.windowId,{populate:true});
   let windowId=tab.windowId;
   if(win.type!=='normal'||win.tabs?.length!==1||win.tabs[0].id!==tab.id){

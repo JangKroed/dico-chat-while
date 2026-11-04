@@ -578,12 +578,15 @@
       }
     };
     const expectedDraft=Boolean(submissionTarget&&editor.isConnected&&composerMatches(editor,text));
+    // Enter 직전 검증한 계정을 제출 근거에 묶습니다. 이후 패널 응답 지연은
+    // 같은 채널·입력창의 실제 비움을 완료하는 데 추가 대기 조건이 아닙니다.
+    const accountVerifiedAtSubmission=Boolean(submissionTarget&&coordinatedAccountMatches(submissionTarget));
     const submittedEditor=editor,submittedForm=editor.closest?.('form');
     let submitted=false,composerReadable=false,editorReacquired=false,scopeChanged=false,ownSendFailed=false;
     let observer, timer, poll, resolve, latest, deadline=null, finished = false;
     let detail = '새 메시지가 화면에 나타나지 않았습니다.';
     const evidence = {newMessage:false,matchingMessage:false,sendingSeen:false,failedSeen:false,authorMismatch:false,authorUnknown:false,timeMismatch:false};
-    const composerEvidence=()=>submissionTarget?Object.fromEntries(['composerEmpty','editorPresent','sameEditor','sameComposer','editorReacquired','targetMatched','accountMatched','expectedDraftSubmitted','sendingActive','ownMessageSeen'].filter(key=>typeof evidence[key]==='boolean').map(key=>[key,evidence[key]])):{};
+    const composerEvidence=()=>submissionTarget?Object.fromEntries(['composerEmpty','editorPresent','sameEditor','sameComposer','editorReacquired','targetMatched','accountMatched','expectedDraftSubmitted','sendingActive','ownMessageSeen','scopeChanged','accountProofPending','accountVerifiedAtSubmission'].filter(key=>typeof evidence[key]==='boolean').map(key=>[key,evidence[key]])):{};
     let promise = new Promise(done => { resolve = done; });
     const finish = value => {
       if (finished) return;
@@ -606,7 +609,9 @@
         const targetMatched=matchesTarget(submissionTarget);
         // Expired proof is unknown, not evidence of an account switch.
         const panel=ownPanel(),ids=ownPanelIds(panel);
-        const accountChanged=ids.size>0?!(ids.size===1&&ids.has(submissionTarget.ownUserId)):Boolean(ownIdentityProof&&(!proofMatchesPanel(ownIdentityProof,panel,true)||ownIdentityProof.accountId!==submissionTarget.ownUserId));
+        // 패널 DOM 재생성/증명 만료는 미확인일 뿐 계정 변경의 증거가 아닙니다.
+        // 실제 ID 불일치 또는 현재 패널에 연결된 다른 계정 증명만 변경으로 고정합니다.
+        const accountChanged=ids.size>0?!(ids.size===1&&ids.has(submissionTarget.ownUserId)):Boolean(ownIdentityProof&&proofMatchesPanel(ownIdentityProof,panel,true)&&ownIdentityProof.accountId!==submissionTarget.ownUserId);
         if(!targetMatched||accountChanged)scopeChanged=true;
         const found=editors(),candidate=found.length===1?found[0]:null;
         // A Slate leaf can remount during submission while its live channel form
@@ -625,13 +630,14 @@
         const targetMatched=matchesTarget(submissionTarget),accountMatched=coordinatedAccountMatches(submissionTarget);
         const form=editor.closest?.('form')||editor.parentElement;
         composerReadable=!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]');
-        Object.assign(evidence,{editorPresent:found.length>0,sameEditor,sameComposer,editorReacquired,targetMatched,accountMatched,composerEmpty:Boolean(sameComposer&&empty),expectedDraftSubmitted:expectedDraft&&submitted});
-        validSubmittedComposer=expectedDraft&&submitted&&sameComposer&&targetMatched&&accountMatched&&composerReadable;
+        Object.assign(evidence,{scopeChanged,accountProofPending:!accountMatched,accountVerifiedAtSubmission,editorPresent:found.length>0,sameEditor,sameComposer,editorReacquired,targetMatched,accountMatched,composerEmpty:Boolean(sameComposer&&empty),expectedDraftSubmitted:expectedDraft&&submitted});
+        const submissionAccountMatched=accountMatched||accountVerifiedAtSubmission&&!scopeChanged;
+        validSubmittedComposer=expectedDraft&&submitted&&sameComposer&&targetMatched&&submissionAccountMatched&&composerReadable;
         // 중앙 완료 기준은 실제 제출한 입력창이 비워진 상태입니다. 먼저 같은
         // 계정·채널·입력창을 검증하여 빠른 채팅의 전체 목록 순회를 기다리지 않습니다.
         // 이미 관찰한 메시지 ID는 보존하되, ID를 얻으려고 완료를 늦추지 않습니다.
         // 초안이 남거나 범위가 불명확하면 아래 전송·실패 근거 검사를 그대로 수행합니다.
-        if(validSubmittedComposer&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor,sameComposer:true,editorReacquired,targetMatched:true,accountMatched:true}});return;}
+        if(validSubmittedComposer&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor,sameComposer:true,editorReacquired,targetMatched:true,accountMatched:true,accountVerifiedAtSubmission,accountProofPending:!accountMatched}});return;}
       }
       let sendingActive=false;
       const authorCache = new Map();
@@ -712,6 +718,8 @@
       const retained = Boolean(liveEditor&&composerMatches(liveEditor,text)&&(!submissionTarget||evidence.sameComposer));
       const retryDraft = retained && !evidence.newMessage && !evidence.sendingSeen && !evidence.failedSeen;
       if(submissionTarget){
+        // 일시적인 계정 응답 유실 동안은 입력·재전송 없이 원래 제출 관찰만 유지합니다.
+        if(managed&&!scopeChanged&&evidence.sameComposer&&evidence.targetMatched&&!evidence.accountMatched){deadline=Date.now()+5000;return;}
         if(managed&&retained&&composerReadable&&evidence.targetMatched&&evidence.accountMatched&&(evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen)){deadline=Date.now()+25000;return;}
         const code=evidence.failedSeen?'DISCORD_SEND_FAILED':!evidence.targetMatched?'TARGET_MISMATCH':!evidence.accountMatched?'ACCOUNT_UNVERIFIED':!evidence.editorPresent?'COMPOSER_EDITOR_MISSING':!evidence.sameComposer?'COMPOSER_EDITOR_CHANGED':!composerReadable?'COMPOSER_STATE_UNREADABLE':retained?'DELIVERY_DRAFT_RETAINED':!evidence.composerEmpty?'COMPOSER_DRAFT_CHANGED':'COMPOSER_STATE_UNREADABLE';
         const errors={DISCORD_SEND_FAILED:'Discord가 전송 실패를 표시했습니다. 초안과 오류 표시를 확인하세요.',TARGET_MISMATCH:'전송 후 다른 채널로 이동했습니다. 원래 채널의 입력 상태를 확인하세요.',ACCOUNT_UNVERIFIED:'전송 후 등록 계정을 확인할 수 없습니다. 로그인 계정과 입력 상태를 확인하세요.',COMPOSER_EDITOR_MISSING:'전송 후 입력창이 보이지 않습니다. 전송용 채널을 확인하세요.',COMPOSER_EDITOR_CHANGED:'전송 후 입력창이 바뀌었습니다. 남은 초안과 입력 상태를 확인하세요.',COMPOSER_STATE_UNREADABLE:'전송 후 입력 상태를 읽을 수 없습니다. 초안을 보존합니다.',COMPOSER_DRAFT_CHANGED:'전송 후 입력 문구가 바뀌었습니다. 변경된 초안을 보존합니다.',DELIVERY_DRAFT_RETAINED:'입력창에 문구가 남아 있습니다. 진행 중인 전송 표시와 초안을 확인하세요.'};
@@ -728,7 +736,7 @@
         await deliveryDelay({managed:true,coordinated:true},500);if(finished)break;
         if(submissionTarget)await refreshOwnIdentity(submissionTarget,true);if(finished)break;
         if(deadline!==null&&Date.now()>=deadline)expire(true);else check(true);
-        if(!finished&&submitted&&(evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen)&&Date.now()-lastObservationAt>=1000&&observationPermission){
+        if(!finished&&submitted&&!scopeChanged&&(evidence.sendingSeen||evidence.sendingActive||evidence.ownMessageSeen||!evidence.accountMatched)&&Date.now()-lastObservationAt>=1000&&observationPermission){
           lastObservationAt=Date.now();report({...evidence,observationPending:true});
           const permission=await observationPermission();if(finished)break;
           if(permission?.allowed!==true)finish({status:'uncertain',code:permission?.code||'OBSERVATION_CANCELLED',error:'자동 관찰이 중지되어 남은 초안을 보존합니다.'});

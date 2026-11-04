@@ -3,7 +3,7 @@
  * 초기화하지 않습니다. 대상 집합/세션이 바뀌거나 누락 상태가 해소돼야 재무장합니다.
  * 안전 조건으로 차단된 확인은 실제 복구 시도와 구분하며, 확인 자체도 간격을 둡니다.
  */
-export function createRecoveryScheduler({now=Date.now,intervalMs=10000,maxAttempts=3,maxDelayMs=60000}={}){
+export function createRecoveryScheduler({now=Date.now,intervalMs=10000,maxAttempts=Infinity,maxDelayMs=60000}={}){
  let fingerprint='',attempts=0,nextAt=0,running=false,eligible=false,generation=0;
  return {
   observe(snapshot){
@@ -20,10 +20,10 @@ export function createRecoveryScheduler({now=Date.now,intervalMs=10000,maxAttemp
     // 이전 장애의 늦은 완료가 새 장애의 예산/대기 시간을 덮어쓰지 않도록 합니다.
     if(version!==generation)return false;
     if(result?.attempted!==false)attempts++;
-    nextAt=now()+Math.min(maxDelayMs,intervalMs*2**Math.max(0,attempts-1));
+    nextAt=now()+Math.min(maxDelayMs,intervalMs*2**Math.min(16,Math.max(0,attempts-1)));
     return !result?.status||result.status==='completed';
    }catch{
-    if(version===generation){attempts++;nextAt=now()+Math.min(maxDelayMs,intervalMs*2**(attempts-1));}
+    if(version===generation){attempts++;nextAt=now()+Math.min(maxDelayMs,intervalMs*2**Math.min(16,Math.max(0,attempts-1)));}
     return false;
    }finally{running=false;}
   },

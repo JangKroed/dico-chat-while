@@ -4,7 +4,7 @@
  * 결과 확실성 검사를 통과해야 합니다. null은 이 내부 프로토콜 정책이며
  * 과거 설정(0/3/10 등)은 더 이상 실행을 멈추는 조건으로 사용하지 않습니다.
  * 이 값 자체가 재전송 허가나 미발송 증거는 아닙니다.
- * 입력 준비의 실제 일시 오류는 별도 제한으로 무한 복구하지 않습니다.
+ * 입력 준비의 일시 오류도 미발송 근거와 사용자 중지를 확인하며 계속 복구합니다.
  */
-export const DEFAULT_PREPARE_RETRIES=3;
+export const DEFAULT_PREPARE_RETRIES=null;
 export const normalizeSendRetries=()=>null;

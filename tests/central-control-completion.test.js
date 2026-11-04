@@ -78,7 +78,7 @@ test('거절된 중단은 자동 재시도하고 후속 적용으로 중단 알�
  }finally{f.manager.close();}
 });
 
-test('중단 자동 복구는 3회로 제한하고 새 발송을 만들지 않는다',()=>{
+test('중단 자동 복구는 3회 이후에도 계속하고 새 발송을 만들지 않는다',()=>{
  let time=1_800_000_000_000;const f=fixture({now:()=>time,monotonicNow:()=>time-1_799_999_999_000});
  try{
   f.unknown();f.manager.execute('group.stop',{id:f.group.id});f.ack(1);const owner=f.owners[0];
@@ -87,7 +87,7 @@ test('중단 자동 복구는 3회로 제한하고 새 발송을 만들지 않�
    f.manager.bridge({type:'ACK',sessionId:owner.sessionId,commandId:command.id,status:'rejected',rejectionCode:'NATIVE_REQUEST_TIMEOUT'},owner.instanceId);
    time+=3000;f.manager.tick();
   }
-  assert.equal(f.manager.commands(owner.instanceId).filter(c=>c.type==='CONTROL').length,0);
+  assert.equal(f.manager.commands(owner.instanceId).filter(c=>c.type==='CONTROL').length,1);
   assert.equal(f.manager.snapshot().groups[0].status,'stop_pending');assert.equal(f.manager.snapshot().attempts.length,1);
  }finally{f.manager.close();}
 });
@@ -98,5 +98,46 @@ test('실행이 끝난 미확인 시도는 자동 조회하고 같은 세션 완
   f.manager.tick();assert.ok(f.manager.commands(o.instanceId).some(c=>c.type==='RECONCILE'));
   f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'confirmed',confirmationBasis:'composer_cleared',recoveryCommandId:f.manager.commands(o.instanceId).find(c=>c.type==='RECONCILE').id,deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true}},o.instanceId);
   const s=f.manager.snapshot();assert.equal(s.attempts[0].status,'confirmed');assert.equal(s.incidents.find(i=>i.code==='delivery_unknown').status,'resolved');
+ }finally{f.manager.close();}
+});
+
+test('중지 적용 후 반복 미확인 보고가 중지 상태를 덮어쓰거나 사건을 반복 생성하지 않는다',()=>{
+ const f=fixture();try{
+  f.unknown();f.manager.execute('group.stop',{id:f.group.id});f.ack(0);f.ack(1);
+  assert.equal(f.manager.snapshot().groups[0].status,'stopped');
+  const count=f.manager.events({type:'delivery.unknown'}).length;
+  for(let n=0;n<4;n++)f.manager.bridge({type:'OBSERVATION',sessionId:f.owners[0].sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:999,verified:true}]},f.owners[0].instanceId);
+  assert.equal(f.manager.snapshot().groups[0].status,'stopped');
+  assert.equal(f.manager.events({type:'delivery.unknown'}).length,count,'차단된 시도의 새 탭 관찰은 과거 결과를 바꾸거나 오류를 반복 생성하지 않는다');
+ }finally{f.manager.close();}
+});
+
+test('자동 결과 확인이 성공하면 실행 중이던 그룹만 재개하고 사용자 중지는 유지한다',()=>{
+ for(const stopped of [false,true]){const f=fixture();try{
+  const o=f.owners[0];f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'unknown',executionBlocked:true},o.instanceId);
+  if(stopped){f.manager.execute('group.stop',{id:f.group.id});f.ack(0);f.ack(1);}
+  f.manager.tick();const cmd=f.manager.commands(o.instanceId).find(c=>c.type==='RECONCILE');assert.ok(cmd);
+  f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'confirmed',confirmationBasis:'composer_cleared',recoveryCommandId:cmd.id,deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true}},o.instanceId);
+  assert.equal(f.manager.snapshot().groups[0].status,stopped?'stopped':'running');
+ }finally{f.manager.close();}}
+});
+
+test('미확인 자동 조회는 3회 후에도 읽기 전용으로 계속하고 새 발송은 만들지 않는다',()=>{
+ let time=1_800_000_000_000;const f=fixture({now:()=>time,monotonicNow:()=>time-1_799_999_999_000});try{
+  const o=f.owners[0];f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'unknown',executionBlocked:true},o.instanceId);
+  for(let n=0;n<16;n++){
+   time+=5000;for(const owner of f.owners)f.manager.bridge({type:'HEARTBEAT',sessionId:owner.sessionId},owner.instanceId);f.manager.tick();
+   for(const cmd of f.manager.commands(o.instanceId).filter(c=>c.type==='RECONCILE'))f.manager.bridge({type:'ACK',sessionId:o.sessionId,commandId:cmd.id,status:'applied'},o.instanceId);
+  }
+  const s=f.manager.snapshot();assert.ok(s.attempts[0].recoveryCount>3);assert.equal(s.attempts.length,1);assert.equal(s.attempts[0].status,'unknown');
+ }finally{f.manager.close();}
+});
+
+test('차단된 미확인 발송의 새 탭 관찰은 검증을 복구하되 원래 전송 근거와 입력 금지는 유지한다',()=>{
+ const f=fixture();try{
+  const o=f.owners[0];f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'unknown',executionBlocked:true},o.instanceId);
+  f.manager.bridge({type:'OBSERVATION',sessionId:o.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:999,verified:true}]},o.instanceId);
+  const s=f.manager.snapshot(),binding=s.channels.find(c=>c.id===f.attempt.bindingId);assert.equal(binding.verified,true);assert.equal(binding.tabId,999);assert.equal(s.attempts[0].tabId,111);assert.equal(s.attempts[0].status,'unknown');
+  f.manager.tick();const cmd=f.manager.commands(o.instanceId).find(c=>c.type==='RECONCILE');assert.ok(cmd);assert.equal(cmd.payload.recoveryTabId,999);assert.equal(f.manager.snapshot().attempts.length,1);
  }finally{f.manager.close();}
 });

@@ -12,7 +12,7 @@ const effects:Record<Kind,string>={
 export function RemovalAction({kind,id,version,name,busy,run,onRemoved}:{kind:Kind;id:string;version?:number;name:string;busy:boolean;run:Run;onRemoved?:()=>void}){
   const disabled=busy||version===undefined||id.startsWith('legacy:')
   const remove=async()=>{
-    if(disabled||!confirm(`${name}\n\n${effects[kind]}\n관련 그룹에서 연결을 제외하며, 빈 그룹은 삭제됩니다. 진행 중·미확인 발송이 있으면 삭제할 수 없습니다. 오프라인 브라우저의 탭은 다음 연결 때 닫습니다.\n\n계속할까요?`))return
+    if(disabled||!confirm(`${name}\n\n${effects[kind]}\n관련 그룹에서 연결을 제외하며, 빈 그룹은 삭제됩니다. 진행 중인 입력은 중지 완료가 필요합니다. 입력 차단이 확인된 미확인 발송은 결과를 바꾸지 않고 기록에 보존합니다. 오프라인 브라우저의 탭은 다음 연결 때 닫습니다.\n\n계속할까요?`))return
     if(await run(`${kind}.delete`,{id,expectedVersion:version},kind==='channel'?'연결을 해제했습니다.':'삭제했습니다.'))onRemoved?.()
   }
   return <button type="button" className="text-action" disabled={disabled} aria-label={`${name} ${labels[kind]}`} onClick={()=>void remove()}>{labels[kind]}</button>

@@ -56,3 +56,15 @@ test('이전 발송이 미확인이면 준비 선행 시각이 지나도 다음 
   f.advance(30000);assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().groups[0].nextPreparationAt,null);
  }finally{f.manager.close();}
 });
+
+test('20초 저장값은 준비 시각 15초와 독립적이며 20초 전에 발송을 허가하지 않는다',()=>{
+ const f=fixture();try{
+  const g=f.manager.execute('group.create',{name:'20초 유지',members:f.peers.map(p=>p.bindingId),intervalMs:15000});
+  f.manager.execute('group.update',{id:g.id,expectedVersion:g.version,intervalMs:20000});
+  f.manager.execute('group.start',{id:g.id});f.manager.tick();const first=f.manager.snapshot().attempts[0];f.prepared(first);f.confirm(first);const at=f.now();
+  let current=f.manager.snapshot().groups[0];assert.equal(current.intervalMs,20000);assert.equal(current.nextEligibleAt,at+20000);assert.equal(current.nextPreparationAt,at+15000);
+  f.advance(15000);const next=f.manager.snapshot().attempts[1];assert.equal(f.prepared(next).permitIssued,false);
+  f.advance(4999);assert.equal(f.prepared(next).permitIssued,false);
+  f.advance(1);assert.ok(f.prepared(next).permitId);assert.equal(f.manager.snapshot().groups[0].intervalMs,20000);
+ }finally{f.manager.close();}
+});

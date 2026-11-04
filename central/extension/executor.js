@@ -19,7 +19,7 @@ function deliveryEvidence(value) {
   const evidence={};
   if(['prepare','commit','send'].includes(value.phase))evidence.phase=value.phase;
   if(['inspect','authorize','prepare','stable','enter','observe'].includes(value.stage))evidence.stage=value.stage;
-  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','sameComposer','editorReacquired','targetMatched','accountMatched','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')evidence[key]=value[key];
+  for(const key of ['enterAttempted','composerRetained','newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch','enterDefaultPrevented','keyupDefaultPrevented','documentHidden','documentFocused','composerCleared','expectedDraftSubmitted','sameEditor','sameComposer','editorReacquired','targetMatched','accountMatched','scopeChanged','accountProofPending','accountVerifiedAtSubmission','composerEmpty','editorPresent','sendingActive','ownMessageSeen'])if(typeof value[key]==='boolean')evidence[key]=value[key];
   if(Number.isSafeInteger(value.emptyStableMs)&&value.emptyStableMs>=0&&value.emptyStableMs<=30000)evidence.emptyStableMs=value.emptyStableMs;
   if(['keyboard','button'].includes(value.submitMethod))evidence.submitMethod=value.submitMethod;
   for(const key of ['retryCount','maxSendRetries'])if(Number.isSafeInteger(value[key])&&value[key]>=0)evidence[key]=value[key];
@@ -240,7 +240,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     } else if(c.type==='CLOSE_CHANNEL') {
       if(typeof manageChannelWindow!=='function')throw Object.assign(Error('채널 연결 해제를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
       if(p.tabId!==undefined&&!Number.isInteger(p.tabId)||!p.accountId||!p.guildId||!p.channelId)throw Object.assign(Error('닫을 전송 탭 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
-      if(Object.values(state.attempts).some(a=>(p.tabId!==undefined?a.tabId===p.tabId:['accountId','guildId','channelId'].every(key=>a[key]===p[key]))&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('진행 중인 발송 결과를 확인한 뒤 연결을 해제하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+      if(Object.values(state.attempts).some(a=>(p.tabId!==undefined?a.tabId===p.tabId:['accountId','guildId','channelId'].every(key=>a[key]===p[key]))&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('진행 중인 발송 입력 차단을 기다리고 있습니다.'),{code:'ATTEMPT_UNRESOLVED'});
       maintenance=true;
       try{
         await manageChannelWindow({...p,action:'close'});
@@ -348,6 +348,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       const a=state.attempts[p.attemptId];
       // This lane has drained any in-flight send. Revocation prevents any new
       // Enter, but does not claim an earlier Enter never reached Discord.
+      if(a?.result?.outcome==='unknown'){a.result.executionBlocked=true;await save();}
       await ack(c,'applied',{executionBlocked:true,...(p.attemptId?{attemptId:p.attemptId}:{})});
       if(a && !a.enterRequested){a.phase='cancelled';await save();}
     } else if(c.type==='RECONCILE') {
@@ -373,7 +374,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
             await save();await report(a);await ack(c,'applied');state.processed[c.id]=true;await save();return;
           }
         }
-        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_RECONCILE',target:target(a),delivery:delivery(a)});}catch{}
+        // 게시 이력 대조만 현재 검증 탭에서 수행합니다. 이전 입력·세션·영수증은 바꾸지 않습니다.
+        const recoveryTabId=Number.isInteger(p.recoveryTabId)?p.recoveryTabId:a.tabId;
+        try{result=await chrome.tabs.sendMessage(recoveryTabId,{type:'DICO_RECONCILE',target:{...target(a),tabId:recoveryTabId},delivery:delivery(a)});}catch{}
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationBasis:'message_observed'};state.attempts[p.attemptId]=a;await save();await report(a);}
         else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});

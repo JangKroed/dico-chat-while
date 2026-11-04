@@ -3,11 +3,11 @@ import type { Snapshot, UpdateStatus } from './api'
 export function updateInProgress(phase?:UpdateStatus['phase']) {return phase==='preparing'||phase==='ready'||phase==='applying'}
 export function updateBlockers(s:Snapshot):string[] {
   const reasons:string[]=[]
-  if(s.groups.some(g=>g.status==='running'))reasons.push('실행 중인 그룹을 먼저 중지하세요.')
-  if(s.groups.some(g=>!['stopped','paused','running','stop_pending','pause_pending','needs_review'].includes(g.status)))reasons.push('재개 대기 그룹을 포함해 모든 그룹을 중지하거나 일시정지하세요.')
-  if(s.groups.some(g=>g.activeAttemptId)||s.attempts.some(a=>['preparing','prepared','permitted','executing'].includes(a.status||'')))reasons.push('진행 중인 발송 시도의 결과를 확인하세요.')
-  if(s.attempts.some(a=>a.status==='unknown')||s.groups.some(g=>g.status==='needs_review'))reasons.push('미확인 시도의 실제 Discord 게시 여부를 확인하고 실행 기록에서 처리하세요.')
-  if(s.groups.some(g=>g.status==='stop_pending'||g.status==='pause_pending')||(s.commands??[]).some(c=>c.type==='CONTROL'&&['queued','received'].includes(String(c.status))))reasons.push('모든 확장의 중지·일시정지 확인 응답을 기다리세요.')
+  if(s.groups.some(g=>g.status==='running'))reasons.push('실행 중인 그룹이 있어 업데이트 적용 대기 중입니다.')
+  if(s.groups.some(g=>!['stopped','paused','running','stop_pending','pause_pending','needs_review'].includes(g.status)))reasons.push('그룹 중지 상태 확인 대기 중입니다.')
+  if(s.groups.some(g=>g.activeAttemptId)||s.attempts.some(a=>['preparing','prepared','permitted','executing'].includes(a.status||'')))reasons.push('진행 중인 발송 결과를 자동 관찰하고 있습니다.')
+  if(s.attempts.some(a=>a.status==='unknown'&&!(a.detached&&a.executionBlocked))||s.groups.some(g=>g.status==='needs_review'))reasons.push('게시 여부가 미확인인 기록을 보존하고 중복 전송을 차단하고 있습니다.')
+  if(s.groups.some(g=>g.status==='stop_pending'||g.status==='pause_pending')||(s.commands??[]).some(c=>c.type==='CONTROL'&&['queued','received'].includes(String(c.status))))reasons.push('브라우저의 중지·일시정지 확인 응답을 수신하는 중입니다.')
   return reasons
 }
 export function updatePollingDecision(phase:UpdateStatus['phase']|undefined,busyChecks:number,failures:number) {
@@ -48,3 +48,6 @@ export function safeUpdateMessage(message:string|undefined,fallback:string){
 export function rollbackPhaseMessage(phase:UpdateStatus['phase']){
  return {idle:'이전 버전 복원을 시작할 수 있습니다.',preparing:'보관된 이전 버전 파일과 현재 데이터의 호환성을 검사하고 있습니다.',ready:'검사를 마쳤습니다. 안전한 중지 상태를 확인한 뒤 복원합니다.',applying:'이전 버전 파일을 적용하고 관리 프로그램을 다시 시작하고 있습니다.',completed:'이전 버전 복원을 완료했습니다. 설정과 실행 기록은 유지되며 그룹은 자동으로 재개하지 않습니다.',failed:'이전 버전 복원을 완료하지 못했습니다. 아래 진단 결과에 중단 이유를 표시합니다.'}[phase]
 }
+
+// 완료된 작업에 현재 발송 상태를 과거의 미완료 업데이트처럼 표시하지 않습니다.
+export function showUpdateBlockers(phase:UpdateStatus['phase']|undefined){return phase!=='completed'}
