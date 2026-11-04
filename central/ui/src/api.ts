@@ -46,7 +46,38 @@ const requestErrorGuidance:Record<string,string> = {
   GROUP_RUNNING:'해당 브라우저에서 실행 중인 그룹을 중지하고 적용 응답을 확인한 뒤 전송 창을 모아 주세요.',
   EXTENSION_UPDATE_REQUIRED:'이 기능을 사용하려면 관리 프로그램과 모든 브라우저의 확장을 같은 최신 버전으로 업데이트한 뒤 다시 연결하세요.'
 }
-export function requestErrorMessage(error:unknown):string {
+// 일반 화면은 프로그램의 대기 상태만 안내합니다. 수동 진단 절차는 개발자 모드에서만 제공합니다.
+const userRequestGuidance:Record<string,string>={
+ ATTEMPT_UNRESOLVED:'이전 발송 결과를 자동 대조하는 중입니다. 중복 발송을 막으며 현재 차례를 보존합니다.',
+ EXECUTION_UNCERTAIN:'브라우저의 입력 차단 응답을 기다리고 있습니다. 과거 게시 결과는 별도로 보존합니다.',
+ CONTROL_PENDING:'브라우저에 중지 요청을 적용하고 있습니다. 적용 응답을 자동으로 확인합니다.',
+ ACCOUNT_UNVERIFIED:'계정·채널 검증 응답을 기다리고 있습니다. 검증 전에는 발송하지 않습니다.',
+ CONNECTION_LOST:'브라우저 연결 복구를 기다리고 있습니다. 연결 응답을 자동으로 다시 확인합니다.',
+ CONFIG_PENDING:'확장의 메시지·설정 적용 응답을 기다리고 있습니다.',
+ STALE_SESSION:'브라우저 연결 세션이 바뀌어 현재 계정·채널을 다시 검증하고 있습니다.',
+ MANAGED_TAB_MISSING:'등록된 채널 탭의 자동 복구를 기다리고 있습니다.',
+ TAB_NOT_FOUND:'등록된 채널 탭의 응답을 기다리고 있습니다.',
+ WINDOW_NOT_FOUND:'등록된 브라우저 창의 응답을 기다리고 있습니다.',
+ MANAGED_WINDOW_NOT_FOUND:'등록된 브라우저 창의 응답을 기다리고 있습니다.',
+ REMOVAL_BLOCKED:'연결 해제에 필요한 입력 차단이 아직 완료되지 않았습니다. 발송 결과는 보존됩니다.',
+ RESOURCE_BUSY:'같은 채널을 다른 그룹이 사용 중이어서 실행 요청을 적용하지 못했습니다.',
+ SERVICE_STOPPED:'관리 프로그램의 실행 준비 상태를 기다리고 있습니다.',
+ GROUP_RUNNING:'진행 중인 발송이 있어 이 변경을 적용하지 않았습니다.',
+ EXTENSION_UPDATE_REQUIRED:'연결된 확장이 이 기능을 지원하지 않습니다. 기존 설정과 발송 기록은 유지합니다.',
+ WINDOW_MANAGEMENT_PENDING:'전송 탭 정리 적용 응답을 기다리고 있습니다.',
+ WINDOW_SEPARATION_PARTIAL:'전송 탭 정리를 완료하지 못했습니다. 기존 탭과 초안은 유지합니다.',
+ WINDOW_NOT_DEDICATED:'사용자 탭이 포함된 창은 이동하거나 숨기지 않습니다.',
+ VERSION_CONFLICT:'다른 화면에서 설정이 변경됐습니다. 현재 입력 내용은 유지합니다.',
+ STALE_ATTEMPT:'현재 발송 상태가 변경되어 이전 요청을 적용하지 않았습니다.',
+ ATTEMPT_STATE:'이 발송의 상태가 변경되어 이전 요청을 적용하지 않았습니다.',
+ LEGACY_UNRESOLVED:'기존 실행기와 중복 발송할 가능성이 있어 새 발송을 차단했습니다.',
+ PLAYLIST_EMPTY:'이 계정에 사용할 메시지가 아직 적용되지 않았습니다. 채널 설정에서 메시지를 선택할 수 있습니다.'
+}
+export function requestErrorMessage(error:unknown,diagnostic=false):string {
+  if(!diagnostic){
+    if(error instanceof ApiError&&error.code)return userRequestGuidance[error.code]||(error.code==='VALIDATION'?error.message:'요청을 완료하지 못했습니다. 설정과 발송 기록은 유지합니다.')
+    return '요청 응답을 받지 못했습니다. 현재 상태를 다시 수신하고 있습니다.'
+  }
   if(error instanceof ApiError && error.code && requestErrorGuidance[error.code])return requestErrorGuidance[error.code]
   return error instanceof Error?error.message:'요청을 처리하지 못했습니다'
 }

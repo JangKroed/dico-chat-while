@@ -108,7 +108,7 @@ test('중지 적용 후 반복 미확인 보고가 중지 상태를 덮어쓰거
   const count=f.manager.events({type:'delivery.unknown'}).length;
   for(let n=0;n<4;n++)f.manager.bridge({type:'OBSERVATION',sessionId:f.owners[0].sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:999,verified:true}]},f.owners[0].instanceId);
   assert.equal(f.manager.snapshot().groups[0].status,'stopped');
-  assert.equal(f.manager.events({type:'delivery.unknown'}).length,count+1,'탭 변경 첫 보고만 기록하고 반복 관찰은 중복 생성하지 않는다');
+  assert.equal(f.manager.events({type:'delivery.unknown'}).length,count,'차단된 시도의 새 탭 관찰은 과거 결과를 바꾸거나 오류를 반복 생성하지 않는다');
  }finally{f.manager.close();}
 });
 
@@ -130,5 +130,14 @@ test('미확인 자동 조회는 3회 후에도 읽기 전용으로 계속하고
    for(const cmd of f.manager.commands(o.instanceId).filter(c=>c.type==='RECONCILE'))f.manager.bridge({type:'ACK',sessionId:o.sessionId,commandId:cmd.id,status:'applied'},o.instanceId);
   }
   const s=f.manager.snapshot();assert.ok(s.attempts[0].recoveryCount>3);assert.equal(s.attempts.length,1);assert.equal(s.attempts[0].status,'unknown');
+ }finally{f.manager.close();}
+});
+
+test('차단된 미확인 발송의 새 탭 관찰은 검증을 복구하되 원래 전송 근거와 입력 금지는 유지한다',()=>{
+ const f=fixture();try{
+  const o=f.owners[0];f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'unknown',executionBlocked:true},o.instanceId);
+  f.manager.bridge({type:'OBSERVATION',sessionId:o.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:999,verified:true}]},o.instanceId);
+  const s=f.manager.snapshot(),binding=s.channels.find(c=>c.id===f.attempt.bindingId);assert.equal(binding.verified,true);assert.equal(binding.tabId,999);assert.equal(s.attempts[0].tabId,111);assert.equal(s.attempts[0].status,'unknown');
+  f.manager.tick();const cmd=f.manager.commands(o.instanceId).find(c=>c.type==='RECONCILE');assert.ok(cmd);assert.equal(cmd.payload.recoveryTabId,999);assert.equal(f.manager.snapshot().attempts.length,1);
  }finally{f.manager.close();}
 });

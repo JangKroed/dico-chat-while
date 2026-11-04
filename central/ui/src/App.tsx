@@ -209,7 +209,7 @@ function App() {
       if(noticeSequence.current===noticeId)showNotice(result.refreshed?success:`${success} 요청은 접수됐으며 화면 상태를 다시 불러오고 있습니다.`)
       return true
     }
-    catch(error) {if(error instanceof ApiError&&error.code==='VERSION_CONFLICT')await refresh().catch(()=>{});if(noticeSequence.current===noticeId)showNotice(requestErrorMessage(error),'error'); return false}
+    catch(error) {if(error instanceof ApiError&&error.code==='VERSION_CONFLICT')await refresh().catch(()=>{});if(noticeSequence.current===noticeId)showNotice(requestErrorMessage(error,diagnosticRef.current),'error'); return false}
     finally {endAction(key)}
   }
   const retryNotSent = async (attemptId:string):Promise<RetryNotSentStatus|null> => {
@@ -224,7 +224,7 @@ function App() {
       setRetryWaitingId(result==='waiting'?attemptId:null)
       showNotice(retryNotSentMessage(result))
       return result
-    }catch(error){await refresh().catch(()=>{});showNotice(requestErrorMessage(error),'error');return null}
+    }catch(error){await refresh().catch(()=>{});showNotice(requestErrorMessage(error,diagnosticRef.current),'error');return null}
     finally{endAction(key)}
   }
   const openIncidents = snapshot.incidents.filter(isIncidentOpen)

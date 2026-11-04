@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ApiError,requestErrorMessage} from '../central/ui/src/api.ts';
+import {ApiError,requestErrorMessage as errorMessage} from '../central/ui/src/api.ts';
+// 기존 상세 복구 절차는 개발자 모드의 계약으로만 검증합니다.
+const requestErrorMessage=error=>errorMessage(error,true);
 
 test('version conflicts keep stale-edit guidance distinct from connection recovery',()=>{
   const stale=new ApiError('This item changed.',409,'VERSION_CONFLICT');
@@ -35,3 +37,10 @@ test('unknown errors preserve server detail and do not invent a cause',()=>{
   assert.equal(requestErrorMessage(new Error('연결 실패')),'연결 실패');
   assert.match(requestErrorMessage(null),/요청을 처리하지 못/);
 });
+
+ test('일반 화면의 오류가 숨겨진 로그 메뉴나 수동 게시 판정을 요구하지 않는다',()=>{
+  for(const code of ['ATTEMPT_UNRESOLVED','EXECUTION_UNCERTAIN','CONTROL_PENDING','CONNECTION_LOST','ACCOUNT_UNVERIFIED','STALE_SESSION','REMOVAL_BLOCKED','NEW_ERROR']){
+   const result=errorMessage(new ApiError('실제 Discord 내역을 확인한 뒤 실행 기록에서 직접 처리하세요.',409,code));
+   assert.doesNotMatch(result,/직접|확인하세요|처리하세요|실행 기록|로그|진단 자료/);
+  }
+ });

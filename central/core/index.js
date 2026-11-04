@@ -498,7 +498,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
     const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
-    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&retryCount<DEFAULT_PREPARE_RETRIES;
+    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient;
     // Only the service can issue a COMMIT permit. No permit means this attempt
     // cannot press Enter, even if its PREPARE response arrives after timeout.
     a.reasonCode=reasonCode;a.executionBlocked=true;finish(a,'not_sent');
@@ -837,7 +837,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(a.traceWindowCount>=120&&!['finished','exception'].includes(message.stage))return{ok:true,recorded:false};a.traceWindowCount++;
         event('delivery.trace',{attemptId:a.id,groupId:a.groupId,instanceId:i.id,stage:message.stage,observedAt:message.observedAt,sequence:message.sequence,data:traceData(message.data)});return{ok:true,recorded:true};
       }
-      if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&activeAttempt(a))};
+      if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&activeAttempt(a)&&!(a.status==='unknown'&&a.executionBlocked===true))};
       if(message.type==='CONNECTION_PROGRESS'){
         ensure(['account','channels','configuration','blocked'].includes(message.stage)&&Number.isInteger(message.total)&&message.total>=0&&message.total<=100&&Number.isInteger(message.completed)&&message.completed>=0&&message.completed<=message.total,'VALIDATION','Invalid connection progress.');
         const allowedReasons=new Set(['LEGACY_UNRESOLVED','ACCOUNT_UNVERIFIED','ATTEMPT_UNRESOLVED','TARGET_MISMATCH','CHANNEL_NOT_READY','CONTENT_UNAVAILABLE']);
@@ -975,7 +975,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           const createdChannel=!c;
           if(!c){c={id:id(),instanceId:i.id,accountId,guildId,channelId,name:pendingChannelName,nameCustomized:false,namePending:true,version:1,configVersion:0,appliedVersion:0,playlist:[],playlistIndex:0,intervalMode:'auto',intervalMs:3000,slowmodeMs:0,createdAt:now()};state.channels.push(c);event('channel.discovered',{channelId:c.id,instanceId:i.id});}
           const tabChanged=c.tabId!==observed.tabId||c.sessionId!==i.sessionId;
-          if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&activeAttempt(a)))markUnknown(a,'execution_tab_changed');continue;}
+          if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a)&&!(a.status==='unknown'&&a.executionBlocked===true))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&activeAttempt(a)))markUnknown(a,'execution_tab_changed');continue;}
           c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();c.observedMono=monotonicNow();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
             applyChannelName(c,{observedName:observed.channelName??observed.name},createdChannel);
@@ -1192,10 +1192,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
      */
     for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true)){
       const owner=state.instances.find(i=>i.id===a.instanceId),channel=state.channels.find(c=>c.id===a.bindingId);
-      if(!owner?.connected||owner.sessionId!==a.sessionId||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||channel.tabId!==a.tabId||channel.sessionId!==a.sessionId)continue;
+      if(!owner?.connected||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||!Number.isInteger(channel.tabId)||channel.sessionId!==owner.sessionId||channel.accountId!==a.accountId||channel.guildId!==a.guildId||channel.channelId!==a.channelId)continue;
+      // 읽기 전용 조회의 응답이 유실되어도 대기열에 영구히 묶이지 않습니다.
+      for(const cmd of state.commands.filter(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)&&now()-c.createdAt>=30000))cmd.status='superseded';
       if(now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;
       a.recoveryCount=(a.recoveryCount||0)+1;a.recoveryAfter=now()+Math.min(30000,5000*2**Math.min(3,Math.floor(a.recoveryCount/3)));
-      command('RECONCILE',a.instanceId,attemptPayload(a));
+      command('RECONCILE',a.instanceId,{...attemptPayload(a),recoveryTabId:channel.tabId});
       event('delivery.recovery_requested',{attemptId:a.id,groupId:a.groupId,retryCount:a.recoveryCount});
     }
     // 자동 재검사도 수동 재검사와 같은 근거 규칙을 사용합니다.

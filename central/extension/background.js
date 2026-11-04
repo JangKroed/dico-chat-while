@@ -108,7 +108,7 @@ async function publishObservation(snapshot){
 async function restoreSavedConnections({onlyMissing=false}={}){
   const sessionId=executor.state.sessionId;
   return recoverConnections({chrome,onlyMissing,state:executor.state,isCurrent:()=>transport.connected&&executor.state.sessionId===sessionId,findAccount:currentAccount,openChannel:p=>openManagedChannel({...p,recovery:true}),ensureManagedWindow:consolidateRecoveredChannel,
-    canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isIdle;},
+    canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isMaintenanceIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isMaintenanceIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
 async function runHeartbeat() {
@@ -132,7 +132,7 @@ async function runHeartbeat() {
     if(!current())return;
     for(const command of result.commands || [])void executor.handleCommand(command);
     if(executor.state.emergencyStopped)return;
-    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(current())lastError=null;
+    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isMaintenanceIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(current())lastError=null;
   }catch{if(!current())return;lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect({explicit=false}={}) {
@@ -208,7 +208,7 @@ async function openManagedChannelNow(p) {
   const matches=seen=>seen?.verified===true&&seen.accountId===p.accountId&&seen.guildId===p.guildId&&seen.channelId===p.channelId;
   const matchesUrl=tab=>{try{const url=new URL(tab?.url);return url.origin==='https://discord.com'&&[ `/channels/${p.guildId}/${p.channelId}`,`/channels/${p.guildId}/${p.channelId}/`].includes(url.pathname);}catch{return false;}};
   const assertIdle=tabId=>{
-    if(Object.values(executor.state.attempts||{}).some(a=>(a.tabId===tabId||a.accountId===p.accountId&&a.guildId===p.guildId&&a.channelId===p.channelId)&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('기존 채널의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    if(Object.values(executor.state.attempts||{}).some(a=>(a.tabId===tabId||a.accountId===p.accountId&&a.guildId===p.guildId&&a.channelId===p.channelId)&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('기존 채널의 입력 차단을 기다리고 있습니다.'),{code:'ATTEMPT_UNRESOLVED'});
   };
   const existing=records.find(r=>r.accountId===p.accountId&&r.guildId===p.guildId&&r.channelId===p.channelId);
   if(p.recovery&&!existing)throw Object.assign(Error('연결 해제한 채널의 자동 복구를 취소했습니다.'),{code:'MANAGED_TAB_MISSING'});
@@ -216,7 +216,7 @@ async function openManagedChannelNow(p) {
     assertIdle(existing.tabId);
     const seen=await observe(existing.tabId);ensureCurrent();
     if(matches(seen)){await observation();ensureCurrent();return {alreadyConnected:true,tabId:existing.tabId};}
-    if(Object.values(executor.state.attempts).some(a=>a.tabId===existing.tabId&&!['confirmed','not_sent','cancelled'].includes(a.phase)))throw Object.assign(Error('기존 전송용 창의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
+    if(Object.values(executor.state.attempts).some(a=>a.tabId===existing.tabId&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('기존 전송용 창의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
     try{await chrome.tabs.get(existing.tabId);throw Object.assign(Error('기존 전송용 창이 다른 화면에 있습니다. 원래 채널로 돌아가거나 창을 닫고 다시 연결하세요.'),{code:'TARGET_MISMATCH'});}catch(error){if(error.code==='TARGET_MISMATCH')throw error;}
     records.splice(records.indexOf(existing),1);
   }

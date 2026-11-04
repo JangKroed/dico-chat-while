@@ -103,7 +103,7 @@ test('해결 뒤 같은 장애가 재발하면 읽지 않은 새 사건으로 �
   assert.equal(second.status,'open');assert.equal(second.read,false);
 });
 
-test('기본 입력 준비 복구는 최초 시도와 3회 재시도 후 종료하고 최종 원인을 남긴다',t=>{
+test('일시적인 입력 준비 오류는 3회 이후에도 같은 차례에서 복구하고 Enter 허가는 발급하지 않는다',t=>{
   const f=fixture(t),channel=f.manager.snapshot().channels[0];
   const message=f.manager.execute('message.create',{name:'준비 실패',body:'fixture only'});
   f.manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:message.id}]});
@@ -114,9 +114,8 @@ test('기본 입력 준비 복구는 최초 시도와 3회 재시도 후 종료�
     f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:command.id,status:'rejected',rejectionCode:'CONTENT_UNAVAILABLE'},f.session.instanceId);
     f.advance();f.advance();f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);f.manager.tick();
   }
-  const snapshot=f.manager.snapshot();assert.equal(snapshot.groups[0].status,'paused');
-  assert.equal(snapshot.groups[0].waitReason,'preparation_failed');assert.equal(snapshot.attempts.length,4);
-  assert.ok(snapshot.attempts.every(a=>a.status==='not_sent'&&a.maxSendRetries===null));
+  const snapshot=f.manager.snapshot();assert.equal(snapshot.groups[0].status,'running');assert.equal(snapshot.attempts.length,5);
+  assert.ok(snapshot.attempts.slice(0,4).every(a=>a.status==='not_sent'&&a.maxSendRetries===null));assert.equal(snapshot.attempts[4].status,'preparing');
   assert.equal(snapshot.groups[0].cursor,0);assert.equal(snapshot.channels[0].playlistIndex,0);
-  assert.ok(snapshot.incidents.some(i=>i.status==='open'&&i.rejectionCode==='CONTENT_UNAVAILABLE'));
+  assert.equal(f.manager.events({type:'delivery.prepare_retry'}).length,4);assert.ok(!snapshot.commands.some(c=>c.type==='COMMIT_PERMIT'));
 });

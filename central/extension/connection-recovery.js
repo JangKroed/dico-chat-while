@@ -14,7 +14,7 @@ export async function recoverConnections({chrome,state,findAccount,openChannel,r
  if(!current())return cancelled();
  const records=saved.dicoCentralTabs||[];
  if(!saved.dicoCentralAccount&&!records.length)return{status:'skipped',skipped:true,attempted:false,completed};
- const locallySafe=()=>current()&&!Object.values(state.attempts||{}).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase));
+ const locallySafe=()=>current()&&!Object.values(state.attempts||{}).some(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true));
  const safe=async()=>locallySafe()&&await canRecover()&&locallySafe();
  const progress=(stage,reasonCode)=>current()?report({stage,total:records.length,completed,...(reasonCode?{reasonCode}:{})}):undefined;
  const blocked=async reasonCode=>{if(!current())return cancelled();await progress('blocked',reasonCode);return{status:'blocked',attempted,completed,reasonCode};};

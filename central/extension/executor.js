@@ -374,7 +374,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
             await save();await report(a);await ack(c,'applied');state.processed[c.id]=true;await save();return;
           }
         }
-        try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_RECONCILE',target:target(a),delivery:delivery(a)});}catch{}
+        // 게시 이력 대조만 현재 검증 탭에서 수행합니다. 이전 입력·세션·영수증은 바꾸지 않습니다.
+        const recoveryTabId=Number.isInteger(p.recoveryTabId)?p.recoveryTabId:a.tabId;
+        try{result=await chrome.tabs.sendMessage(recoveryTabId,{type:'DICO_RECONCILE',target:{...target(a),tabId:recoveryTabId},delivery:delivery(a)});}catch{}
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationBasis:'message_observed'};state.attempts[p.attemptId]=a;await save();await report(a);}
         else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});

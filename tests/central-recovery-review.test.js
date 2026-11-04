@@ -24,3 +24,8 @@ test('emergency stop during recovery prevents opening the next missing tab',asyn
   assert.equal(result.status,'cancelled');
   assert.equal(f.progress.at(-1).stage,'channels');
 });
+
+test('이미 입력 차단된 미확인 이력이 있어도 누락 탭 복구를 계속하며 결과는 바꾸지 않는다',async()=>{
+ const f=fixture();f.state.attempts.old={phase:'unknown',result:{outcome:'unknown',executionBlocked:true}};
+ const result=await recoverConnections(f);assert.equal(result.status,'completed');assert.equal(f.opened.length,1);assert.equal(f.state.attempts.old.result.outcome,'unknown');
+});
