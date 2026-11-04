@@ -55,7 +55,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const DateMock=class extends Date {static now(){return clock}};
  const pageLocation={origin:'https://discord.com',pathname:`/channels/${guildId}/${channelId}`};
  runInNewContext(source,{document,window:{getSelection:()=>selection},location:pageLocation,Date:DateMock,
- chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false,reasonCode:'DELAY_UNREGISTERED_TAB'};if(m.type==='DICO_DELAY')return managedPageDelay(m,{id:'ext',url:'https://discord.com/channels/g/c',tab:{id:7}},{bindings:{binding:{tabId:7,guildId:'g',channelId:'c'}}},{extensionId:'ext',wait:()=>new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve();}))});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook){const handled=await runtimeHook(m);if(handled!==undefined)return handled;}if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.phase==='commit'&&++commitAuthorizations===2){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
+ chrome:{runtime:{id:'ext',onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{if(m.type==='DICO_TRACE'){traces.push(m);return {ok:true}}requests.push({...m,at:clock});if(m.type==='DICO_DELAY'&&workerDelayFails)return{ok:false,reasonCode:'DELAY_UNREGISTERED_TAB'};if(m.type==='DICO_DELAY')return managedPageDelay(m,{id:'ext',url:'https://discord.com/channels/g/c',tab:{id:7}},{bindings:{binding:{tabId:7,guildId:'g',channelId:'c'}}},{extensionId:'ext',wait:()=>new Promise(resolve=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(m.durationMs+delay);if(delay)onDelayed?.();resolve();}))});if(m.type==='DICO_CAN_SEND')authorizationHook?.(m);if(m.type==='DICO_PRE_ENTER_WAIT')waitHook?.(m);if(m.type==='DICO_RETRY_WAIT')retryHook?.(m);if(runtimeHook){const handled=await runtimeHook(m);if(handled!==undefined)return handled;}if(m.type==='DICO_ACCOUNT_IDENTITY')return identity();if(['DICO_PRE_ENTER_WAIT','DICO_RETRY_WAIT'].includes(m.type))return{allowed};const authorizedAt=clock;if(m.type==='DICO_CAN_SEND'&&m.phase==='commit'&&++commitAuthorizations===1){clock+=authorizationLag;if(lateCooldown!==null)cooldown=lateCooldown;}return {allowed:allowed&&(m.phase==='prepare'||clock>=delivery.scheduledAt),authorizedAt,maxAgeMs:2000,...(defaultAvatar?{identity:identity()}:{})}}}},
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
@@ -296,7 +296,7 @@ test('known live cooldown keeps the same commit pending and sends once only afte
 test('cooldown appearing during final authorization is waited out without replacing the attempt or repeating Enter',async()=>{
  let unlock;const r=rig({managed:true,lateCooldown:now=>{unlock??=now+3000;return now<unlock?'00:03':'';}});
  await r.request('DICO_PREPARE');r.tick(3000);assert.equal((await r.request('DICO_DELIVER')).status,'confirmed');
- assert.ok(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length>=3);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.ok(r.events.find(e=>e.type==='keydown').at>=unlock);
+ assert.ok(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length===2);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.ok(r.events.find(e=>e.type==='keydown').at>=unlock);
 });
 test('stop, edited draft, changed account, and unreadable countdown interrupt a pending pre-Enter wait',async()=>{
  for(const mode of ['stop','draft','account','unknown']){
@@ -561,6 +561,23 @@ async function preparedComposerRig(options={}){
  const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,...options});r.target.coordinated=true;r.delivery.maxSendRetries=0;
  assert.equal((await r.request('DICO_PREPARE')).status,'prepared');r.tick(3000);return r;
 }
+test('준비된 중앙 초안은 발송 직전 승인 한 번으로 제출하며 중복 왕복을 기다리지 않는다',async()=>{
+ const r=await preparedComposerRig();r.delivery.strictAuthorization=true;const began=r.now();
+ r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&m.phase==='commit'){const authorizedAt=r.now();r.tick(750);return{allowed:true,authorizedAt,maxAgeMs:2000};}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+ assert.equal(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length,1);
+ assert.equal(r.events.find(e=>e.type==='keydown').at-began,1250);
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+});
+test('재승인까지 기다린 총시간으로 마지막의 신선한 승인까지 만료시키지 않는다',async()=>{
+ const r=await preparedComposerRig();r.delivery.strictAuthorization=true;let calls=0;
+ r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&m.phase==='commit'){
+  calls++;const authorizedAt=r.now();r.tick(200);
+  return calls<=2?{allowed:false,retryable:true,code:'NATIVE_REQUEST_TIMEOUT',retryAfterMs:1500}:{allowed:true,authorizedAt,maxAgeMs:2000};
+ }});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+ assert.equal(calls,3);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
 test('중앙 발송은 실제 제출 뒤 같은 입력창이 비면 게시 메시지 DOM과 추가 대기 없이 즉시 처리한다',async()=>{
  const r=await preparedComposerRig({defaultAvatar:true});const result=await r.request('DICO_DELIVER');
  assert.equal(result.status,'confirmed');assert.equal(result.confirmationBasis,'composer_cleared');assert.equal(result.messageId,undefined);assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
@@ -670,10 +687,10 @@ test('재시도 직전 안정 확인 중 같은 초안 입력창이 교체되면
 
 
 test('중앙 발송의 일시 승인 거절은 같은 초안과 시도에서 재승인하고 한 번만 제출한다',async()=>{
- for(const phase of ['initial','final','retry']){
+ for(const phase of ['final','repeated','retry']){
   const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:phase==='retry'?1:0,maxSendRetries:null});r.target.coordinated=true;
   await r.request('DICO_PREPARE');r.tick(3000);let calls=0,deniedAt;
-  r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&m.phase==='commit'){calls++;if(calls===({initial:1,final:2,retry:3})[phase]){deniedAt=r.now();return{allowed:false,retryable:true,code:'COORDINATOR_UNAVAILABLE',retryAfterMs:1500};}}});
+  r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&m.phase==='commit'){calls++;if(calls===({final:1,repeated:1,retry:2})[phase]||phase==='repeated'&&calls===2){deniedAt=r.now();return{allowed:false,retryable:true,code:'COORDINATOR_UNAVAILABLE',retryAfterMs:1500};}}});
   const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed',phase);
   assert.equal(r.events.filter(e=>e.type==='keydown').length,phase==='retry'?2:1,phase);assert.equal(r.events.filter(e=>e.type==='paste').length,1);
   assert.ok(r.events.filter(e=>e.type==='keydown').at(-1).at>=deniedAt+1500);
@@ -690,8 +707,8 @@ test('중앙 재승인 대기 중 중지·계정·채널·초안 변경은 Enter
 });
 test('중앙의 늦은 승인은 같은 초안을 재검사하고 새 승인을 받아 제출한다',async()=>{
  const r=await preparedComposerRig();r.delivery.strictAuthorization=true;let delayed=false;
- r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&!delayed&&r.requests.filter(x=>x.type==='DICO_CAN_SEND'&&x.phase==='commit').length===2){delayed=true;const authorizedAt=r.now();r.tick(3001);return{allowed:true,authorizedAt,maxAgeMs:2000};}});
- const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.equal(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length,3);
+ r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&!delayed&&r.requests.filter(x=>x.type==='DICO_CAN_SEND'&&x.phase==='commit').length===1){delayed=true;const authorizedAt=r.now();r.tick(3001);return{allowed:true,authorizedAt,maxAgeMs:2000};}});
+ const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.equal(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length,2);
 });
 test('빠른 채팅 중 2초를 넘긴 승인이 세 번 반복돼도 초안을 다시 붙여넣거나 중복 전송하지 않는다',async()=>{
  const r=await preparedComposerRig();r.delivery.strictAuthorization=true;let delayed=0;

@@ -291,8 +291,13 @@
         if(found.length!==1||!found[0].isConnected||composing||!composerMatches(found[0],delivery.text))return {allowed:false,code:'DRAFT_MISMATCH'};
         if(found[0]!==original&&!(original?.isConnected===false&&originalForm?.isConnected===true&&found[0].closest?.('form')===originalForm))return {allowed:false,code:'COMPOSER_EDITOR_CHANGED'};
       }
+      // 승인 유효시간은 성공한 개별 요청을 기준으로 계산합니다. 이전 거절과
+      // 백오프까지 합산하면 방금 받은 정상 승인을 다시 만료시켜 불필요한 왕복이
+      // 생깁니다. 서버 시각을 덮어쓰지 않고 페이지의 wall/monotonic 시작점도 보존합니다.
+      const requestStartedAt=Date.now(),requestMonoStartedAt=globalThis.performance?.now() ?? requestStartedAt;
       const response=await requestInputAuthorization(target,message);
-      if(response?.allowed===true||response?.retryable!==true||!managedTiming(target)||delivery.phase!=='commit')return response;
+      if(response?.allowed===true)return{...response,requestStartedAt,requestMonoStartedAt};
+      if(response?.retryable!==true||!managedTiming(target)||delivery.phase!=='commit')return response;
       // A transient denial grants no input permission. Keep the original
       // operation and exact draft, then ask again; cancellation stays terminal.
       const found=editors();
@@ -955,12 +960,17 @@
       if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       if(delivery.phase!=='prepare'&&!result.cooldownKnown)return{status:'deferred',code:'COOLDOWN_UNVERIFIED',error:'Discord의 남은 대기 시간을 읽지 못했습니다. 초안을 보존하고 중지합니다.'};
       if (delivery.phase!=='prepare' && delivery.phase!=='commit' && result.cooldownMs > 0) return {status:'deferred',retryAfterMs:result.cooldownMs};
-      // Distinguish a blocked worker/permission reply from slow editor preparation.
-      evidence.stage='authorize';
-      trace('authorization-request');
-      const authorization = await requestDeliveryPermission(target,delivery,{ type: 'DICO_CAN_SEND', id: delivery.id, phase:delivery.phase, ...(delivery.phase==='commit'?{retryCount:0}:{}) });
-      trace('authorization-response',{authorized:authorization?.allowed===true});
-      if (!authorization?.allowed) return { status: 'blocked',code:authorization?.code||'AUTHORIZATION_DENIED', error: '전송 예약이 취소되었거나 만료되었습니다.' };
+      // 준비 단계는 본문을 바꾸기 전에 승인이 필요합니다. 반면 commit은 이미
+      // 준비된 초안을 읽기만 하므로 여기서 승인을 받으면 안정 검사 뒤 다시 받는
+      // 최종 승인과 중복됩니다. commit의 승인은 prepareCommit에서 Enter 직전에
+      // 한 번 요청하며 중지·계정·채널·초안 검증과 승인 유효기간은 그대로 유지합니다.
+      if(delivery.phase!=='commit'){
+        evidence.stage='authorize';
+        trace('authorization-request');
+        const authorization=await requestDeliveryPermission(target,delivery,{type:'DICO_CAN_SEND',id:delivery.id,phase:delivery.phase});
+        trace('authorization-response',{authorized:authorization?.allowed===true});
+        if(!authorization?.allowed)return{status:'blocked',code:authorization?.code||'AUTHORIZATION_DENIED',error:'전송 예약이 취소되었거나 만료되었습니다.'};
+      }
       result = inspectForDelivery(target,delivery);
       if (!result.ok) return { status: 'blocked', ...(result.code?{code:result.code}:{}), error: result.error };
       let editor = editors()[0];
@@ -989,10 +999,12 @@
           if(!stable)return {status:'blocked',code:'COMMIT_EDITOR_UNSTABLE',error:'전송 직전 입력 상태가 불안정합니다. 초안을 보존하고 중지합니다.'};
           evidence.stage='authorize';
           const authorizationStarted=Date.now(),authorizationMonoStarted=globalThis.performance?.now() ?? authorizationStarted;
+          trace('authorization-request');
           const finalAuthorization=await requestDeliveryPermission(target,delivery,{type:'DICO_CAN_SEND',id:delivery.id,phase:'commit',retryCount},cooldownWait.guard);
+          trace('authorization-response',{authorized:finalAuthorization?.allowed===true});
           const afterAuthorization=await cooldownWait.guard?.();if(afterAuthorization)return afterAuthorization;
-          const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-authorizationStarted;
-          const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-authorizationMonoStarted;
+          const authorizationNow=Date.now(),authorizationElapsed=authorizationNow-(finalAuthorization?.requestStartedAt??authorizationStarted);
+          const authorizationMonoElapsed=(globalThis.performance?.now() ?? authorizationNow)-(finalAuthorization?.requestMonoStartedAt??authorizationMonoStarted);
           const staleAuthorization=delivery.strictAuthorization && (!Number.isFinite(finalAuthorization?.authorizedAt) || authorizationElapsed<0 || authorizationElapsed>2000 || authorizationMonoElapsed<0 || authorizationMonoElapsed>2000 || Math.abs(authorizationElapsed-authorizationMonoElapsed)>1000 || authorizationNow-finalAuthorization.authorizedAt<0 || authorizationNow-finalAuthorization.authorizedAt>2000);
           if(finalAuthorization?.outcome)return finalAuthorization.outcome;
           if(staleAuthorization&&finalAuthorization?.allowed&&managedTiming(target)){await deliveryDelay(target,500);continue;}
