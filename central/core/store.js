@@ -70,12 +70,29 @@ export class CentralStore {
     } catch(error) { this.db.exec('ROLLBACK'); throw error; }
   }
   events({after=0,limit=200,from=0,to=Number.MAX_SAFE_INTEGER,type,groupId,instanceId,attemptId,level}={}) {
-    const rows=this.db.prepare('SELECT event_id,data FROM events WHERE event_id>? AND at>=? AND at<=? ORDER BY event_id').iterate(Number(after)||0,Number(from)||0,Number(to)||Number.MAX_SAFE_INTEGER);
+    // 이벤트 ID 기본키를 따라 이어서 조회합니다. 시간 인덱스를 선택하면
+    // 내보내기의 매 페이지마다 남은 이력을 다시 정렬하여 발송 처리를 지연시킵니다.
+    const rows=this.db.prepare('SELECT event_id,data FROM events NOT INDEXED WHERE event_id>? AND at>=? AND at<=? ORDER BY event_id').iterate(Number(after)||0,Number(from)||0,Number(to)||Number.MAX_SAFE_INTEGER);
     const found=[];
     for(const row of rows){const event={...JSON.parse(row.data),eventId:row.event_id};
       if(type&&event.type!==type||groupId&&event.groupId!==groupId||instanceId&&event.instanceId!==instanceId||attemptId&&event.attemptId!==attemptId||level&&event.level!==level)continue;
       found.push(event);if(found.length>=Math.min(1000,Math.max(1,Number(limit)||200)))break;
     }return found;
+  }
+  *supportEvents({from=0,to=Number.MAX_SAFE_INTEGER,attemptIds=[],commandIds=[],groupIds=[],instanceIds=[],attemptScoped=false}={}) {
+    // SQLite에서 보고서 범위를 먼저 거른 뒤 필요한 JSON만 한 번 해석합니다.
+    // 미해결 시도·명령의 근거는 기간 밖도 포함하며, 개별 시도 조회에는
+    // 해당 시도의 맥락만 추가하여 기존 개인정보·조회 범위를 유지합니다.
+    const rows=this.db.prepare(`SELECT event_id,data FROM events NOT INDEXED
+      WHERE json_extract(data,'$.attemptId') IN (SELECT value FROM json_each(?))
+        OR json_extract(data,'$.commandId') IN (SELECT value FROM json_each(?))
+        OR (at>=? AND at<=? AND (?=0 OR (
+          COALESCE(json_extract(data,'$.attemptId'),'')=''
+          AND (json_extract(data,'$.groupId') IN (SELECT value FROM json_each(?))
+            OR json_extract(data,'$.instanceId') IN (SELECT value FROM json_each(?))
+            OR type IN ('service.clock_gap','service.started','service.stopped','settings.updated')))))
+      ORDER BY event_id`).iterate(JSON.stringify(attemptIds),JSON.stringify(commandIds),from,to,attemptScoped?1:0,JSON.stringify(groupIds),JSON.stringify(instanceIds));
+    for(const row of rows)yield{...JSON.parse(row.data),eventId:row.event_id};
   }
   eventPage({cursor,limit=100,from=0,to=Number.MAX_SAFE_INTEGER,level,query=''}={}) {
     const size=Math.min(500,Math.max(1,Number(limit)||100)),before=Number(cursor)||Number.MAX_SAFE_INTEGER,q=String(query).toLocaleLowerCase();

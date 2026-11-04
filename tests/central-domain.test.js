@@ -267,17 +267,18 @@ test('preparation duration is not mislabeled as eligible-only central permit lat
   assert.equal(permitted.prepareDurationMs,2000);assert.equal(permitted.permitDelayMs,undefined);f.manager.close();
 });
 
-test('disconnect and reconnection never restart an idle running group without explicit resume', () => {
+test('disconnect and reconnection require current control ACK before automatic resume', () => {
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.manager.execute('group.start',{id:g.id});
-  f.manager.bridge({type:'DISCONNECT',sessionId:c.sessionId},c.instanceId);assert.equal(f.manager.snapshot().groups[0].status,'resume_required');
+  f.manager.bridge({type:'DISCONNECT',sessionId:c.sessionId},c.instanceId);assert.equal(f.manager.snapshot().groups[0].status,'pause_pending');
   const fresh=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});f.manager.bridge({type:'OBSERVATION',sessionId:fresh.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:c.channel.accountId,guildId:'guild',channelId:'channel',tabId:1,verified:true}]},c.instanceId);
   const cfg=f.manager.commands(c.instanceId).find(c=>c.type==='CONFIG_SYNC');f.manager.bridge({type:'ACK',sessionId:fresh.sessionId,commandId:cfg.id,status:'applied'},c.instanceId);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,0);
-  f.manager.execute('group.resume',{id:g.id});f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);f.manager.close();
+  const control=f.manager.commands(c.instanceId).find(c=>c.type==='CONTROL');f.manager.bridge({type:'ACK',sessionId:fresh.sessionId,commandId:control.id,status:'applied'},c.instanceId);
+  f.advance(3000);f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);f.manager.close();
 });
 
 test('unexpected HELLO session replacement fences idle execution even without prior disconnect report', () => {
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.manager.execute('group.start',{id:g.id});f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});
-  assert.equal(f.manager.snapshot().groups[0].status,'resume_required');f.manager.close();
+  assert.equal(f.manager.snapshot().groups[0].status,'pause_pending');assert.ok(f.manager.snapshot().groups[0].autoResume);f.manager.close();
 });
 
 test('each explicit run has a stable command identity and resuming creates a different identity', () => {
@@ -538,7 +539,7 @@ test('an account switch fences old bindings and prevents a running group from co
   const f=fixture(),c=f.connect('111');f.apply(c,[f.message()]);f.start(f.group([c]));
   const registered=f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'222',verified:true},c.instanceId);
   const s=f.manager.snapshot();assert.equal(registered.account.accountId,'222');assert.equal(s.accounts.find(a=>a.accountId==='111').verified,false);
-  assert.equal(s.channels[0].verified,false);assert.equal(s.groups[0].status,'needs_review');assert.equal(s.attempts[0].status,'unknown');
+  assert.equal(s.channels[0].verified,false);assert.equal(s.groups[0].status,'pause_pending');assert.equal(s.attempts[0].status,'unknown');
   assert.throws(()=>f.prepared(c,s.attempts[0]));f.manager.close();
 });
 
@@ -560,7 +561,7 @@ test('reset token includes independent accounts and targets and reset clears the
 test('missing account verification revokes identity and fences affected execution immediately', () => {
   const f=fixture(),c=f.connect('111');f.apply(c,[f.message()]);f.start(f.group([c]));
   f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:c.sessionId,accountId:'111',verified:false},c.instanceId);
-  const s=f.manager.snapshot();assert.equal(s.accounts[0].verified,false);assert.equal(s.channels[0].verified,false);assert.equal(s.groups[0].status,'needs_review');assert.equal(s.attempts[0].status,'unknown');f.manager.close();
+  const s=f.manager.snapshot();assert.equal(s.accounts[0].verified,false);assert.equal(s.channels[0].verified,false);assert.equal(s.groups[0].status,'pause_pending');assert.equal(s.attempts[0].status,'unknown');f.manager.close();
 });
 
 test('account verification can declare the legacy freeze without a channel observation', () => {

@@ -39,7 +39,7 @@ test('restored channel identity does not resume a group fenced by a confirmed ac
     f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:f.session.sessionId,accountId:'999',verified:true},f.session.instanceId);
     f.advance();f.observe(f.records);
     const group=f.manager.snapshot().groups[0];
-    assert.equal(group.status,'resume_required');assert.equal(group.waitReason,'account_mismatch');
+    assert.equal(group.status,'pause_pending');assert.equal(group.waitReason,'account_mismatch');
     assert.equal(f.manager.snapshot().attempts.length,0);
   }finally{f.manager.close();}
 });

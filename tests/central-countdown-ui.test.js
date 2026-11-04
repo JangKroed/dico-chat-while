@@ -86,3 +86,16 @@ test('authorization recovery waits describe automatic progress for the current a
  assert.equal(accountTimingState({id:'current'},group,{status:'permitted'},null),'전송 허가 연결 자동 복구 중');
  assert.equal(accountTimingState({id:'next'},group,undefined,null),'차례 대기');
 });
+
+test('system-paused groups explain automatic recovery without a send countdown',()=>{
+ const autoResume={reasonCode:'connection_lost',requestedAt:1000,retryCount:0};
+ for(const status of ['paused','pause_pending','resume_required','needs_review']){
+  const group={status,autoResume,members:['a'],cursor:0};
+  assert.equal(groupTimingState(group,12),'자동 복구 중 · 정상 확인 후 재개');
+  assert.equal(accountTimingState({id:'a'},group,undefined,12),'자동 복구 중 · 정상 확인 후 재개');
+  assert.equal(groupTimingState({...group,activeAttemptId:'unknown-attempt'},12),'발송 결과 확인 중 · 자동 복구 대기');
+  assert.equal(accountTimingState({id:'a'},{...group,activeAttemptId:'unknown-attempt'},{status:'unknown'},12),'발송 결과 확인 중 · 자동 복구 대기');
+ }
+ assert.equal(groupTimingState({status:'paused'},12),'일시정지됨');
+ assert.equal(groupTimingState({status:'stopped'},12),'중지됨');
+});

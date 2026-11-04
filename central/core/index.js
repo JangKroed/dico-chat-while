@@ -363,15 +363,22 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const attempt=state.attempts.find(a=>a.id===g.activeAttemptId);
     return{action:g.controlIntent,groupId:g.id,runId:g.runId||null,controlGeneration:g.controlGeneration,attemptId:attempt?.instanceId===instanceId?attempt.id:null};
   }
-  function control(g,intent){
+  function control(g,intent,{systemReason}={}){
+    // 사용자 명령은 이미 예약된 시스템 복구보다 항상 우선합니다. 보호 중단에서만
+    // 재개 의도를 저장하고, 사용자 pause/stop은 대기 중·적용 완료 여부와 관계없이 취소합니다.
+    if(systemReason){
+      g.autoResume={reasonCode:systemReason,requestedAt:now(),requestedMono:monotonicNow(),retryCount:0,retryAfterMono:monotonicNow()+3000};
+    }else delete g.autoResume;
     g.controlRecoveryCount=0;g.controlRecoveryAfter=0;
     g.controlIntent=intent;g.controlGeneration=(g.controlGeneration||0)+1;g.status=intent==='stop'?'stop_pending':'pause_pending';g.nextEligibleAt=null;
     for(const instanceId of new Set(g.members.map(m=>get('channels',m).instanceId)))command('CONTROL',instanceId,controlPayload(g,instanceId));
     event(`group.${intent}_requested`,{groupId:g.id});controlComplete(g);
   }
   function blockInstanceGroups(instanceId,reasonCode){
-    for(const g of state.groups.filter(g=>g.status==='running'&&g.members.some(m=>get('channels',m).instanceId===instanceId))){
-      g.status=g.activeAttemptId?'needs_review':'resume_required';g.waitReason=reasonCode;g.nextEligibleAt=null;
+    for(const g of state.groups.filter(g=>(g.status==='running'||g.autoResume)&&g.members.some(m=>get('channels',m).instanceId===instanceId))){
+      if(!g.controlIntent)control(g,'pause',{systemReason:reasonCode});
+      else if(g.autoResume){g.autoResume.requestedMono=monotonicNow();g.autoResume.retryAfterMono=monotonicNow()+3000;}
+      g.waitReason=reasonCode;g.nextEligibleAt=null;
       incident(reasonCode==='connection_lost'?'connection_lost':'account_mismatch',{instanceId});event('group.resume_required',{groupId:g.id,instanceId,reasonCode},'warning');
     }
   }
@@ -385,8 +392,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
    * 그룹 실행에 필요한 잠금을 확보합니다. 동일 자원을 여러 그룹이 동시에 사용해
    * 계정별 발송 순서가 섞이지 않도록 하는 경계입니다.
    */
+  function resourceKeys(g){return[`channel:${g.guildId}:${g.channelId}`,...g.members.map(m=>{const c=get('channels',m);return `account:${c.accountId}:${c.channelId}`;})];}
   function acquire(g){
-    const keys=[`channel:${g.guildId}:${g.channelId}`,...g.members.map(m=>{const c=get('channels',m);return `account:${c.accountId}:${c.channelId}`;})];
+    const keys=resourceKeys(g);
     ensure(!state.locks.some(l=>keys.includes(l.key)&&l.groupId!==g.id),'RESOURCE_BUSY','This channel or account is already controlled by another group.',409);
     for(const key of keys)if(!state.locks.some(l=>l.key===key))state.locks.push({key,groupId:g.id});
   }
@@ -505,7 +513,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       restoreConfirmedDeadlines();
     }
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
-    delete g.prepareRetryCount;delete g.prepareRetryAfterMono;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
+    delete g.autoResume;delete g.prepareRetryCount;delete g.prepareRetryAfterMono;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
   }
   /**
    * 화면에서 요청한 설정·실행·중지 등 업무 명령의 입구입니다.
@@ -938,7 +946,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(!c){c={id:id(),instanceId:i.id,accountId,guildId,channelId,name:pendingChannelName,nameCustomized:false,namePending:true,version:1,configVersion:0,appliedVersion:0,playlist:[],playlistIndex:0,intervalMode:'auto',intervalMs:3000,slowmodeMs:0,createdAt:now()};state.channels.push(c);event('channel.discovered',{channelId:c.id,instanceId:i.id});}
           const tabChanged=c.tabId!==observed.tabId||c.sessionId!==i.sessionId;
           if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&ACTIVE.has(a.status))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&ACTIVE.has(a.status)))markUnknown(a,'execution_tab_changed');continue;}
-          c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
+          c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();c.observedMono=monotonicNow();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
             applyChannelName(c,{observedName:observed.channelName??observed.name},createdChannel);
             upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId,accountName:observed.accountName,username:observed.username});upsertTarget(guildId,channelId,{observedName:c.observedName});
@@ -1010,7 +1018,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(monotonicNow()<Math.max(g.nextMono||0,c.nextMono||0)){
           // Existing executors understand CONTROL and treat a thrown PREPARED
           // response as uncertain. Withhold the permit and wait for blocking proof.
-          control(g,'pause');g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';
+          control(g,'pause',{systemReason:'interval_protection'});g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';
           event('delivery.interval_wait',{attemptId:a.id,groupId:g.id,instanceId:i.id,reasonCode:'INTERVAL_NOT_ELAPSED'});
           return{ok:true,permitIssued:false,reasonCode:'INTERVAL_NOT_ELAPSED'};
         }
@@ -1059,19 +1067,63 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const clockDiagnostic={wallDeltaMs:Math.round(wallDelta),monotonicDeltaMs:Math.round(monoDelta),driftMs:Math.round(wallDelta-monoDelta),trigger:monoDelta<0?'monotonic_reversal':Math.abs(wallDelta-monoDelta)>2000?'clock_drift':'loop_delay'};
     state.service.clockDiagnostic=clockDiagnostic;
     state.service.status='ready';state.service.reasonCode='clock_or_sleep_gap';
-    const affected=state.groups.filter(g=>g.status==='running'||g.activeAttemptId);
+    const affected=state.groups.filter(g=>g.status==='running'||g.activeAttemptId||g.autoResume);
+    const resumable=new Set(affected.filter(g=>g.status==='running'&&!g.controlIntent).map(g=>g.id));
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status))){
       markUnknown(a,'clock_or_sleep_gap');
       // Keep the durable permit on the attempt, but stop transport retries.
       // Its outcome remains uncertain until executor reconciliation proves it.
       for(const c of state.commands.filter(c=>c.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT'].includes(c.type)&&['queued','received'].includes(c.status)))c.status='superseded';
     }
-    for(const g of affected){if(!g.controlIntent)control(g,'pause');g.waitReason='manual_resume';g.nextEligibleAt=null;}
-    // The service remains available for management. Only affected groups need
-    // an explicit start after their controls/results are resolved. Rebuild the
-    // timing baseline without reviving any group or issuing a catch-up permit.
+    for(const g of affected){
+      // 사용자가 요청한 중지는 시계 보호가 덮어쓰지 않습니다. 이미 보호 복구 중이면
+      // 새 시계 기준으로 대기만 다시 시작하고 CONTROL 명령을 반복 발급하지 않습니다.
+      if(!g.controlIntent&&(resumable.has(g.id)||g.autoResume))control(g,'pause',{systemReason:'clock_or_sleep_gap'});
+      else if(g.autoResume){g.autoResume.requestedMono=monotonicNow();g.autoResume.retryAfterMono=monotonicNow()+3000;}
+      g.waitReason=g.autoResume?'clock_or_sleep_gap':g.waitReason;g.nextEligibleAt=null;
+    }
+    // 간격 기준을 다시 만들되 이 호출에서는 재개하거나 밀린 발송을 승인하지 않습니다.
+    // 후속 tick에서 현재 제어 적용·관찰·안정 시간이 확인된 그룹만 재개합니다.
     restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();
     event('service.resume_required',{reasonCode:'clock_or_sleep_gap',clockDiagnostic},'warning');
+  }
+  /**
+   * 자동 재개는 시스템 보호 중단의 명시적 의도가 있는 그룹에만 허용합니다.
+   * CONTROL 적용은 과거 발송 결과를 확정하지 않으므로 unknown/active가 하나라도
+   * 남으면 대기합니다. 모든 멤버를 현재 세션에서 새로 관찰하고 설정 적용까지
+   * 확인한 뒤 기존 start 경로로 잠금·새 runId를 확보합니다. 입력 재발급은 하지 않습니다.
+   */
+  function autoResumeGroups(){
+    const mono=monotonicNow();
+    for(const g of state.groups.filter(g=>g.autoResume)){
+      const intent=g.autoResume;
+      if(g.controlIntent||g.status!=='paused'||g.activeAttemptId||state.attempts.some(a=>a.groupId===g.id&&ACTIVE.has(a.status)))continue;
+      if((intent.retryCount||0)>=3||mono<intent.retryAfterMono||mono-intent.requestedMono<3000)continue;
+      const controls=state.commands.filter(c=>c.type==='CONTROL'&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded');
+      const members=g.members.map(member=>get('channels',member));
+      if(!controls.length||!controls.every(c=>c.status==='applied')||!members.every(c=>{
+        const owner=get('instances',c.instanceId);
+        return controls.some(cmd=>cmd.instanceId===owner.id&&cmd.sessionId===owner.sessionId)&&Number.isFinite(c.observedMono)&&c.observedMono>=intent.requestedMono&&mono-c.observedMono>=0&&mono-c.observedMono<=15000&&mono-(owner.stableSinceMono??mono)>=3000;
+      }))continue;
+      // 자원 경합은 정상적인 조건 대기이므로 실패 예산을 소모하지 않습니다.
+      // tick마다 start를 호출하지 않고 3초 간격으로 잠금을 확인하며, 대기 상태가
+      // 바뀔 때만 사건을 남깁니다. 경쟁 그룹이 종료되면 시간 경과와 무관하게 재개됩니다.
+      const keys=resourceKeys(g);
+      if(state.locks.some(lock=>keys.includes(lock.key)&&lock.groupId!==g.id)){
+        if(g.waitReason!=='resource_busy')event('group.auto_resume_waiting',{groupId:g.id,reasonCode:'RESOURCE_BUSY'});
+        g.waitReason='resource_busy';intent.retryAfterMono=mono+3000;continue;
+      }
+      // 연결/설정 대기는 예산을 소모하지 않습니다. 사전 검사 이후 예상하지 못한
+      // start 오류에만 최대 3회, 증가하는 간격을 적용하여 무한 오류 반복을 막습니다.
+      try{members.forEach(eligibleChannel);}catch{continue;}
+      try{
+        start(g);event('group.auto_resumed',{groupId:g.id,reasonCode:intent.reasonCode});
+      }catch(error){
+        release(g);intent.retryCount=(intent.retryCount||0)+1;intent.retryAfterMono=mono+3000*2**intent.retryCount;
+        g.waitReason=error.code?.toLowerCase()||'resume_required';
+        event('group.auto_resume_deferred',{groupId:g.id,reasonCode:error.code,retryCount:intent.retryCount},'warning');
+      }
+    }
   }
   /**
    * 런타임의 주기 호출로 연결 유효성·중지 완료·시도 제한시간·다음 차례를 검사합니다.
@@ -1118,6 +1170,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     // 경고를 숨기거나 미확인 발송을 성공으로 바꾸지 않고, 후속 복구가 증명된 알림만 해결합니다.
     recheckIncidents(undefined,{automatic:true});
     if(state.service.status!=='ready')return{ok:true};
+    autoResumeGroups();
     for(const g of state.groups.filter(g=>g.status==='running'&&!g.activeAttemptId&&!g.controlIntent)){
       const c=get('channels',g.members[g.cursor]);
       try{eligibleChannel(c);}catch(error){g.waitReason=error.code.toLowerCase();g.nextEligibleAt=null;continue;}
@@ -1199,15 +1252,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const commandIds=new Set(relatedCommands.map(c=>c.id)),importantEvents=supportRecordBuffer(),traceEvents=supportRecordBuffer();let after=0;
     // Retained unresolved attempts can predate a selected period. Include their
     // full attempt/command evidence as well as context within the selected period.
-    for(;;){
-      const batch=store.events({after,limit:1000});
-      for(const e of batch){
-        const related=attemptIds.has(e.attemptId)||commandIds.has(e.commandId),inPeriod=e.at>=contextFrom&&e.at<=contextTo;
-        const context=!e.attemptId&&(groupIds.has(e.groupId)||instanceIds.has(e.instanceId)||['service.clock_gap','service.started','service.stopped','settings.updated'].includes(e.type));
-        if(!related&&(!inPeriod||attemptId&&!context))continue;
-        (e.type==='delivery.trace'?traceEvents:importantEvents).add(e);
-      }
-      if(batch.length<1000)break;after=batch.at(-1).eventId;
+    // 보고서와 무관한 과거 이벤트를 매 배치마다 다시 정렬·해석하지 않습니다.
+    // 저장소가 동일한 기간·시도·명령·맥락 조건으로 한 번 순회하며, 기간 밖에
+    // 남아 있는 미해결 시도의 관련 근거도 포함합니다. 기록 예산은 그대로 적용합니다.
+    for(const e of store.supportEvents({from:contextFrom,to:contextTo,attemptIds:[...attemptIds],commandIds:[...commandIds],groupIds:[...groupIds],instanceIds:[...instanceIds],attemptScoped:!!attemptId})){
+      (e.type==='delivery.trace'?traceEvents:importantEvents).add(e);
     }
     const events=[...importantEvents.values(),...traceEvents.values()].sort((a,b)=>a.eventId-b.eventId);
     return{omittedEvents:importantEvents.omitted+traceEvents.omitted,contextFrom,contextTo,serverNow:now(),stateVersion:state.stateVersion,retainedFrom:state.prunedBefore||null,service:clone(state.service),settings:clone(state.settings),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c)),groups:state.groups.map(g=>publicGroup(g)),attempts:selected.map(a=>({...publicAttempt(a),bodyAvailable:typeof a.body==='string'})),commands:relatedCommands.map(publicCommand),events,incidents:state.incidents.filter(i=>!attemptId||attemptIds.has(i.attemptId)||commandIds.has(i.commandId)||groupIds.has(i.groupId)||instanceIds.has(i.instanceId)).map(clone),intervals:state.intervals.filter(span=>(!attemptId||groupIds.has(span.targetId)||instanceIds.has(span.targetId))&&(span.to===null||span.to>=contextFrom)&&span.from<=contextTo).map(clone),locks:clone(state.locks)};
@@ -1230,7 +1279,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
     for(const i of state.instances){invalidateAccounts(i.id);i.connected=false;i.sessionId=id();delete i.lastSeenMono;}
     for(const c of state.channels){c.verified=false;c.appliedVersion=0;delete c.tabId;delete c.sessionId;delete c.nextMono;delete c.lastConfirmedMono;}
-    for(const g of state.groups){delete g.nextMono;if(g.status==='running')g.status='resume_required';}
+    // 프로세스 재시작은 새 실행 지시가 아니므로 저장된 보호 복구 예약도 취소합니다.
+    for(const g of state.groups){delete g.autoResume;delete g.nextMono;if(g.status==='running')g.status='resume_required';}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
     for(const a of state.attempts.filter(a=>ACTIVE.has(a.status)))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
