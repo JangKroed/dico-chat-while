@@ -693,6 +693,22 @@ test('중앙의 늦은 승인은 같은 초안을 재검사하고 새 승인을 
  r.onRuntime(m=>{if(m.type==='DICO_CAN_SEND'&&!delayed&&r.requests.filter(x=>x.type==='DICO_CAN_SEND'&&x.phase==='commit').length===2){delayed=true;const authorizedAt=r.now();r.tick(3001);return{allowed:true,authorizedAt,maxAgeMs:2000};}});
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);assert.equal(r.requests.filter(m=>m.type==='DICO_CAN_SEND'&&m.phase==='commit').length,3);
 });
+test('빠른 채팅 중 2초를 넘긴 승인이 세 번 반복돼도 초안을 다시 붙여넣거나 중복 전송하지 않는다',async()=>{
+ const r=await preparedComposerRig();r.delivery.strictAuthorization=true;let delayed=0;
+ // 제보에서 관찰한 2.020~3.186초 승인 지연을 재현합니다. 다른 사람의
+ // 메시지가 계속 추가되어도 내 시도와 초안을 유지하고 유효한 승인만 사용합니다.
+ r.onRuntime(m=>{
+  if(m.type!=='DICO_CAN_SEND'||m.phase!=='commit'||delayed>=3)return;
+  delayed++;r.tick(2500);
+  for(let i=0;i<30;i++)r.post({text:'다른 사람의 채팅',author:'999999999999999999',sending:true});
+  return{allowed:false,retryable:true,code:'AUTHORIZATION_EXPIRED',retryAfterMs:500};
+ });
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');assert.equal(delayed,3);
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+ assert.ok(r.requests.filter(m=>m.type==='DICO_CAN_SEND').every(m=>m.id===r.delivery.id));
+});
 test('늦게 렌더된 과거 자기 메시지와 실패 표시는 같은 중앙 초안의 재시도를 중단하지 않는다',async()=>{
  for(const mode of ['old-message','failed']){
   const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:1,maxSendRetries:null});r.target.coordinated=true;

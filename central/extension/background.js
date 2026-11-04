@@ -275,7 +275,12 @@ async function bindActive(windowId) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id)return false;
-  if(message?.type==='DICO_DELAY'){void executor.load().then(()=>managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id})).then(respond).catch(()=>respond({ok:false}));return true;}
+  if(message?.type==='DICO_DELAY'){void executor.load().then(()=>managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id,resolveDocument:async source=>{
+    // SPA 이동으로 sender.url이 오래된 경우에만 호출됩니다. Chrome이 부여한
+    // documentId를 지정해 새 문서나 다른 프레임의 경로를 대신 읽지 않습니다.
+    const [current]=await chrome.scripting.executeScript({target:{tabId:source.tab.id,documentIds:[source.documentId]},func:()=>location.href});
+    return current&&{url:current.result,documentId:current.documentId,frameId:current.frameId};
+  }})).then(respond).catch(()=>respond({ok:false,reasonCode:'DELAY_RESPONSE_UNAVAILABLE'}));return true;}
   if(message?.type==='DICO_PRE_ENTER_WAIT'&&sender.tab){executor.authorizePreEnterWait(message,sender.tab.id).then(respond).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_RETRY_WAIT'&&sender.tab){executor.authorizeRetryWait(message,sender.tab.id).then(respond).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_OBSERVE_WAIT'&&sender.tab){executor.observationWait(message,sender.tab.id).then(respond).catch(()=>respond({allowed:false,retryable:true,code:'AUTHORIZATION_UNAVAILABLE',retryAfterMs:500}));return true;}

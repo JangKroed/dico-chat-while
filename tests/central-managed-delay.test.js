@@ -72,12 +72,30 @@ test('대기 거절은 본문이나 식별자 없이 고정 진단 코드로 구
   [{durationMs:1500},sender,state,'DELAY_INVALID_DURATION'],
   [{durationMs:100},{...sender,id:'foreign'},state,'DELAY_INVALID_SENDER'],
   [{durationMs:100},{...sender,tab:{id:99}},state,'DELAY_UNREGISTERED_TAB'],
-  [{durationMs:100},{...sender,url:'https://discord.com/channels/g/other'},state,'DELAY_ROUTE_MISMATCH'],
+  [{durationMs:100},{...sender,url:'https://discord.com/channels/g/other',tab:{...sender.tab,url:'https://discord.com/channels/g/other'}},state,'DELAY_ROUTE_MISMATCH'],
   [{durationMs:100},{...sender,tab:{id:8}},{sessionId:'new',bindings:state.bindings,attempts:{a:{bindingId:'binding',tabId:8,guildId:'g',channelId:'c',sessionId:'old',phase:'preparing'}}},'DELAY_SESSION_MISMATCH'],
  ];
  for(const [message,source,current,reasonCode] of cases)assert.deepEqual(await managedPageDelay(message,source,current,{extensionId:'extension',wait:()=>{throw Error('unexpected timer');}}),{ok:false,reasonCode});
 });
 
 test('같은 Discord 채널의 마지막 슬래시는 관리 대기를 거절하지 않는다',async()=>{
- assert.deepEqual(await managedPageDelay({durationMs:100},{...sender,url:sender.url+'/'},state,{extensionId:'extension',wait:async()=>{}}),{ok:true});
+ assert.deepEqual(await managedPageDelay({durationMs:100},{...sender,url:sender.url+'/',tab:{...sender.tab,url:sender.url+'/'}},state,{extensionId:'extension',wait:async()=>{}}),{ok:true});
+});
+
+test('SPA 이동의 오래된 sender.url은 같은 현재 문서의 실제 경로로 대조한다',async()=>{
+ const source={...sender,url:'https://discord.com/channels/g/old',documentId:'document',documentLifecycle:'active'};let lookups=0;
+ const result=await managedPageDelay({durationMs:100},source,{...state,sessionId:'session'},{extensionId:'extension',wait:async()=>{},resolveDocument:async s=>{lookups++;assert.equal(s.documentId,'document');return{url:sender.url,documentId:'document',frameId:0};}});
+ assert.deepEqual(result,{ok:true});assert.equal(lookups,2);
+});
+
+test('SPA 대기는 문서 교체·문서 부재·다른 경로·다른 출처·비활성 문서·세션 변경을 통과시키지 않는다',async()=>{
+ const source={...sender,url:'https://discord.com/channels/g/old',documentId:'document',documentLifecycle:'active'};
+ for(const mode of ['document','missing','route','origin','inactive','session','lookup-error']){
+  let lookups=0;const current={...state,sessionId:'session'};
+  const result=await managedPageDelay({durationMs:100},{...source,...(mode==='missing'?{documentId:undefined}:{}),...(mode==='inactive'?{documentLifecycle:'cached'}:{})},current,{extensionId:'extension',wait:async()=>{if(mode==='session')current.sessionId='new';},resolveDocument:async()=>{
+   lookups++;if(mode==='lookup-error')throw Error('document gone');
+   return{url:mode==='route'?'https://discord.com/channels/g/other':mode==='origin'?'https://example.com/':sender.url,documentId:mode==='document'&&lookups===2?'replacement':'document',frameId:0};
+  }});
+  assert.equal(result.ok,false,mode);
+ }
 });

@@ -1123,9 +1123,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       try{eligibleChannel(c);}catch(error){g.waitReason=error.code.toLowerCase();g.nextEligibleAt=null;continue;}
       if(monotonicNow()<(g.prepareRetryAfterMono||0)){g.waitReason='preparation_retry';g.nextEligibleAt=wall+(g.prepareRetryAfterMono-mono);continue;}
       const due=Math.max(g.nextMono||0,c.nextMono||0),earlyPrepare=get('instances',c.instanceId).capabilities?.includes('early-prepare-v1')===true;
-      // Input may lead an account cooldown, but never consumes the group's
-      // full post-confirmation gap. Preparation/response latency adds afterward.
-      const prepareDue=Math.max(g.nextMono||0,(c.nextMono||0)-(earlyPrepare?5000:0));
+      // 입력 준비는 실제 발송 가능 시각보다 최대 5초 앞서 진행합니다.
+      // 그룹 간격과 계정 쿨다운은 PREPARED/Enter 승인에서 원래 시각까지 지킵니다.
+      const prepareDue=due-(earlyPrepare?5000:0);
       if(mono<prepareDue){g.waitReason=(c.nextMono||0)>(g.nextMono||0)?'account_interval':'group_interval';g.nextEligibleAt=wall+(due-mono);continue;}
       const item=c.playlist[c.playlistIndex%c.playlist.length],m=get('messages',item.messageId),revision=m.revisions.find(r=>r.id===item.revisionId);
       const a={id:id(),groupId:g.id,runId:g.runId,bindingId:c.id,instanceId:c.instanceId,sessionId:get('instances',c.instanceId).sessionId,accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,tabId:c.tabId,configVersion:c.configVersion,groupVersion:g.version,messageIdRef:m.id,messageName:m.name,revisionId:revision.id,revisionVersion:revision.version,body:revision.body,playlistIndex:c.playlistIndex,status:'preparing',createdAt:wall,readyMono:mono,earlyPrepare,executionBlocked:false,maxSendRetries:normalizeSendRetries()};
@@ -1157,7 +1157,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const groupAt=clock.wall+Math.max(0,(nextMono??clock.mono)-clock.mono);
         nextEligibleAt=Math.max(channelAt,groupAt);
         const lead=get('instances',channel.instanceId).capabilities?.includes('early-prepare-v1')===true?5000:0;
-        nextPreparationAt=Math.max(groupAt,channelAt-lead);
+        nextPreparationAt=Math.max(clock.wall,nextEligibleAt-lead);
       }
     }
     return{...clone(dto),nextEligibleAt,nextPreparationAt};
