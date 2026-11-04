@@ -24,7 +24,14 @@ export function createNativeTransport(chrome,{host='com.dico.manager',timeoutMs=
     return new Promise((resolve,reject)=>{
       let requestId,timer;
       try{connect();requestId=String(++serial);timer=setTimeout(()=>{pending.delete(requestId);reject(transportError('관리 프로그램 응답이 지연됩니다.',{},'NATIVE_REQUEST_TIMEOUT'));},timeoutMs);pending.set(requestId,{resolve,reject,timer});port.postMessage({requestId,message,...(instanceId?{instanceId}:{})});}
-      catch(error){if(timer)clearTimeout(timer);if(requestId)pending.delete(requestId);reject(transportError('관리 프로그램에 요청을 전달하지 못했습니다.',error,'NATIVE_SEND_FAILED'));}
+      catch(error){
+        if(timer)clearTimeout(timer);if(requestId)pending.delete(requestId);
+        reject(transportError('관리 프로그램에 요청을 전달하지 못했습니다.',error,'NATIVE_SEND_FAILED'));
+        // 포트 생성·전송의 동기 실패도 기존 30초 알람 복구 경로에 알립니다.
+        // 즉시 재시도하지 않으며, 낡은 포트의 뒤늦은 종료 알림은 무시합니다.
+        const previous=port;finish('관리 프로그램 연결을 시작하지 못했습니다.');
+        try{previous?.disconnect();}catch{}
+      }
     });
   }};
 }

@@ -731,3 +731,30 @@ test('재사용 채널 URL의 마지막 슬래시는 입력 준비 대상을 바
  assert.equal(r.state.attempts.attempt?.phase,'prepared');
  assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
 });
+
+for(const stalledType of ['DICO_DRAFT_INSPECT','DICO_INSPECT'])for(const mode of ['stop','timeout'])test(`${stalledType} ${mode}는 준비 권한과 대기열을 해제하며 늦은 응답을 무시한다`,async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const r=rig();await configured(r);let release,started;
+ const began=new Promise(resolve=>{started=resolve;});
+ const original=r.chrome.tabs.sendMessage;
+ r.chrome.tabs.sendMessage=async(id,m)=>{
+  if(m.type===stalledType){started();return new Promise(resolve=>{release=resolve;});}
+  return original(id,m);
+ };
+ const job=r.client.handleCommand(cmd('PREPARE'));await began;
+ const stop=mode==='stop'?r.client.handleCommand({id:'inspection-stop',type:'CONTROL',instanceId:'instance',sessionId:'session',payload:{action:'stop',groupId:'group',runId:'run',attemptId:'attempt'}}):Promise.resolve();
+ if(mode==='timeout')t.mock.timers.tick(20001);
+ await Promise.all([job,stop]);
+ assert.equal(await r.client.canSend({id:'attempt',phase:'prepare'},7),false);
+ assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='PREPARE'&&x.status==='rejected'&&x.rejectionCode===(mode==='stop'?'EXECUTION_STOPPED':'CONTENT_INSPECTION_TIMEOUT')));
+ if(mode==='stop')assert.ok(r.reports.some(x=>x.type==='ACK'&&x.commandId==='inspection-stop'&&x.status==='applied'));
+ assert.equal(r.state.attempts.attempt.body,'공지');
+ assert.equal(r.messages.some(x=>x.type==='DICO_PREPARE'),stalledType==='DICO_INSPECT');
+ assert.equal(r.client.isIdle,true);
+ const snapshot=structuredClone(r.state);
+ release(stalledType==='DICO_DRAFT_INSPECT'?emptyDraft():{ok:true,draftMatches:true,cooldownKnown:true,cooldownMs:0});
+ await Promise.resolve();await Promise.resolve();
+ assert.deepEqual(r.state,snapshot);
+ assert.equal(r.reports.some(x=>x.type==='PREPARED'),false);
+ assert.equal(r.messages.some(x=>x.type==='DICO_DELIVER'),false);
+});

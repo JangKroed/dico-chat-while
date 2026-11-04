@@ -86,3 +86,13 @@ test('unchanged, manual and failed update checks retain the thirty-second backof
   now+=25000;await updater.check();assert.equal(checks,2,mode);assert.equal(reloads,mode==='reload-error'?2:0);
  }
 });
+
+test('content refresh accepts one trailing slash but rejects another channel or origin',async()=>{
+ const {ensureManagedContent}=await import('../central/extension/update.js');
+ let injected=0,url='https://discord.com/channels/1/2/';
+ const chrome={tabs:{get:async()=>({url}),sendMessage:async()=>({buildId:injected?'new':undefined})},scripting:{executeScript:async()=>injected++}};
+ const records=[{tabId:1,guildId:'1',channelId:'2'}];
+ assert.equal((await ensureManagedContent(chrome,records,'new'))[0]?.ready,true);assert.equal(injected,1);
+ for(url of ['https://discord.com/channels/1/3/','https://example.com/channels/1/2/','https://discord.com/channels/1/2//'])assert.deepEqual(await ensureManagedContent(chrome,records,'new'),[]);
+ assert.equal(injected,1);
+});

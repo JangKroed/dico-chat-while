@@ -22,3 +22,27 @@ test('native timeout has an explicit retryable cause',async()=>{
  const chrome={runtime:{connectNative:()=>({onMessage:{addListener(){}},onDisconnect:{addListener(){}},postMessage(){}})}};
  await assert.rejects(createNativeTransport(chrome,{timeoutMs:1}).request({type:'AUTHORIZE_ENTER'}),error=>error.code==='NATIVE_REQUEST_TIMEOUT'&&error.retryable===true);
 });
+
+test('synchronous native connection failure notifies recovery once without immediate retries',async()=>{
+ let tries=0,signals=0;
+ const transport=createNativeTransport({runtime:{connectNative(){tries++;throw Error('temporarily unavailable');}}});
+ transport.onDisconnect(()=>signals++);
+ await assert.rejects(transport.request({type:'HELLO'}),error=>error.code==='NATIVE_SEND_FAILED');
+ assert.equal(signals,1);assert.equal(tries,1);assert.equal(transport.connected,false);
+ transport.disconnect();assert.equal(signals,1);
+});
+
+test('synchronous send failure closes its port and a later request uses a fresh one',async()=>{
+ let connections=0,signals=0,closed=0,oldDisconnect;
+ const transport=createNativeTransport({runtime:{connectNative(){
+  const number=++connections;let respond;
+  return {onMessage:{addListener:fn=>{respond=fn;}},onDisconnect:{addListener:fn=>{if(number===1)oldDisconnect=fn;}},
+   postMessage(packet){if(number===1)throw Error('port failed');queueMicrotask(()=>respond({type:'RESPONSE',requestId:packet.requestId,ok:true,result:'ready'}));},
+   disconnect(){closed++;oldDisconnect();}};
+ }}});
+ transport.onDisconnect(()=>signals++);
+ await assert.rejects(transport.request({type:'HELLO'}),error=>error.code==='NATIVE_SEND_FAILED');
+ assert.equal(transport.connected,false);assert.equal(signals,1);assert.equal(closed,1);
+ assert.equal(await transport.request({type:'HELLO'}),'ready');oldDisconnect();
+ assert.equal(transport.connected,true);assert.equal(connections,2);assert.equal(signals,1);
+});

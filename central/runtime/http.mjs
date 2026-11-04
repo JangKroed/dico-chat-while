@@ -4,6 +4,7 @@ import {resolve,extname,sep} from 'node:path';
 import {safeToUpdate,safeToReloadExtension} from './updater.mjs';
 import {normalizeSessions,UI_SESSION_TTL} from './ui-state.mjs';
 import {createSupportReport,inspectSupportReport,SUPPORT_REPORT_MAX_BYTES} from './support-report.mjs';
+import {createCoalescedRefresh} from './coalesced-refresh.mjs';
 
 const secret=()=>randomBytes(32).toString('hex');
 const equal=(a,b)=>typeof a==='string' && typeof b==='string' && Buffer.byteLength(a)===Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -153,14 +154,18 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         if (path==='/api/events' && req.method==='GET') {
           res.setHeader('Content-Type','text/event-stream');res.setHeader('Connection','keep-alive');res.writeHead(200);
           const write=(type,data,id)=>res.write(`${id?`id: ${id}\n`:''}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
-          let heartbeat,unsubscribe=()=>{},ended=false;
-          const finish=()=>{if(ended)return;ended=true;clearInterval(heartbeat);unsubscribe();streams.delete(res);};
+          let heartbeat,snapshotRefresh,unsubscribe=()=>{},ended=false;
+          const finish=()=>{if(ended)return;ended=true;clearInterval(heartbeat);snapshotRefresh?.close();unsubscribe();streams.delete(res);};
           const authorized=()=>{if(ended)return false;try{if(!closed&&uiSession(req)===session)return true;}catch{}finish();res.end();return false;};
           res.on('close',finish);streams.add(res);
+          // 진단 이벤트마다 통계·기록을 다시 계산하면 승인 응답도 그 계산을 기다립니다.
+          // 이벤트는 즉시 보존·전달하고 화면용 최신 상태만 최대 50ms 단위로 합칩니다.
+          // 실행 시 인증을 다시 확인하여 대기 중 만료된 세션으로 내용을 보내지 않습니다.
+          snapshotRefresh=createCoalescedRefresh(()=>{if(authorized())write('snapshot',manager.snapshot());},{onError:()=>{finish();res.end();}});
           write('snapshot',manager.snapshot());
           // An open stream does not extend cookie authentication. Check the
           // live session before every push, and revoke idle expired streams.
-          unsubscribe=manager.subscribe(event=>{if(!authorized())return;write('event',event,event.eventId);write('snapshot',manager.snapshot());});
+          unsubscribe=manager.subscribe(event=>{if(!authorized())return;write('event',event,event.eventId);snapshotRefresh.request();});
           if(ended){unsubscribe();return;}
           heartbeat=setInterval(()=>{if(authorized())res.write(': keepalive\n\n');},15000);heartbeat.unref?.();return;
         }

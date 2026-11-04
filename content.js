@@ -619,6 +619,20 @@
       // Skipping server confirmation must not skip evidence that Enter submitted
       // the composer. Never advance A/B merely because dispatchEvent returned.
       if (submissionOnly && empty) { finish({status:'unverified'}); return; }
+      let validSubmittedComposer=false;
+      if(submissionTarget){
+        const found=editors(),sameComposer=Boolean(!scopeChanged&&editor.isConnected&&found.length===1&&found[0]===editor),sameEditor=Boolean(editor===submittedEditor&&editor.isConnected&&found.length===1&&found[0]===editor);
+        const targetMatched=matchesTarget(submissionTarget),accountMatched=coordinatedAccountMatches(submissionTarget);
+        const form=editor.closest?.('form')||editor.parentElement;
+        composerReadable=!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]');
+        Object.assign(evidence,{editorPresent:found.length>0,sameEditor,sameComposer,editorReacquired,targetMatched,accountMatched,composerEmpty:Boolean(sameComposer&&empty),expectedDraftSubmitted:expectedDraft&&submitted});
+        validSubmittedComposer=expectedDraft&&submitted&&sameComposer&&targetMatched&&accountMatched&&composerReadable;
+        // 중앙 완료 기준은 실제 제출한 입력창이 비워진 상태입니다. 먼저 같은
+        // 계정·채널·입력창을 검증하여 빠른 채팅의 전체 목록 순회를 기다리지 않습니다.
+        // 이미 관찰한 메시지 ID는 보존하되, ID를 얻으려고 완료를 늦추지 않습니다.
+        // 초안이 남거나 범위가 불명확하면 아래 전송·실패 근거 검사를 그대로 수행합니다.
+        if(validSubmittedComposer&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor,sameComposer:true,editorReacquired,targetMatched:true,accountMatched:true}});return;}
+      }
       let sendingActive=false;
       const authorCache = new Map();
       for (const node of document.querySelectorAll(selector)) {
@@ -678,19 +692,11 @@
         if(!submissionTarget){finish({status:'confirmed',messageId:id,confirmationBasis:'message_observed'});return;}
       }
       if(submissionTarget){
-        const found=editors(),sameComposer=Boolean(!scopeChanged&&editor.isConnected&&found.length===1&&found[0]===editor),sameEditor=Boolean(editor===submittedEditor&&editor.isConnected&&found.length===1&&found[0]===editor);
-        const targetMatched=matchesTarget(submissionTarget),accountMatched=coordinatedAccountMatches(submissionTarget);
-        const form=editor.closest?.('form')||editor.parentElement;
-        composerReadable=!composing&&!editorContent(editor).unsupported&&!form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]');
-        Object.assign(evidence,{editorPresent:found.length>0,sameEditor,sameComposer,editorReacquired,targetMatched,accountMatched,composerEmpty:Boolean(sameComposer&&empty),expectedDraftSubmitted:expectedDraft&&submitted,sendingActive});
-        const valid=expectedDraft&&submitted&&sameComposer&&targetMatched&&accountMatched&&composerReadable;
-        // The user's completion criterion is the actual submitted composer
-        // becoming empty. There is no duration or posted-message requirement.
-        if(valid&&empty){finish({status:'confirmed',confirmationBasis:'composer_cleared',...(evidence.messageId?{messageId:evidence.messageId}:{}),deliveryEvidence:{composerCleared:true,expectedDraftSubmitted:true,sameEditor,sameComposer:true,editorReacquired,targetMatched:true,accountMatched:true}});return;}
+        evidence.sendingActive=sendingActive;
         if(ownSendFailed&&!empty){finish({status:'uncertain',code:'DISCORD_SEND_FAILED',deliveryEvidence:{composerRetained:composerMatches(editor,text)},error:'이번 전송에 실패 표시가 확인되어 추가 Enter를 중지하고 초안을 보존합니다.'});return;}
         // Give the page its next observation turn; do not repeatedly spend a
         // 25-second post-confirmation window on a retained exact draft.
-        if(freshIdentity&&deadline!==null&&valid&&composerMatches(editor,text)&&!evidence.sendingSeen&&!sendingActive&&!evidence.ownMessageSeen)finish({status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{composerRetained:true},error:'입력창에 같은 문구가 남아 있어 실제 쿨다운 해제 후 재시도합니다.'});
+        if(freshIdentity&&deadline!==null&&validSubmittedComposer&&composerMatches(editor,text)&&!evidence.sendingSeen&&!sendingActive&&!evidence.ownMessageSeen)finish({status:'draft-retained',code:'DELIVERY_DRAFT_RETAINED',deliveryEvidence:{composerRetained:true},error:'입력창에 같은 문구가 남아 있어 실제 쿨다운 해제 후 재시도합니다.'});
       }
     };
     observer = new MutationObserver(records=>{linkReplacements(records);check();});

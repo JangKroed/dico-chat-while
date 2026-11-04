@@ -17,3 +17,29 @@ test('native shutdown forwards the HELLO reset epoch for authenticated disconnec
  input.end(encodePacket({requestId:'hello',message:{type:'HELLO',protocolVersion:1}}));await packets.next();await running;
  assert.deepEqual(sent.at(-1).message,{type:'DISCONNECT',sessionId:'session',resetEpoch:3});
 });
+
+test('실행 중 확장 상태 조회는 파일 검사와 복구를 건너뛰고 다음 승인 요청을 처리한다',async()=>{
+ for(const reloadSafe of [false,undefined]){
+  const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output);let inspections=0;
+  const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],service:{request:async(path,method,body)=>path==='/api/bridge/status'?{reloadSafe}: {allowed:body.message.type==='AUTHORIZE_ENTER'}},extensionStatus:async()=>{inspections++;return{buildId:'a'.repeat(64),reloadSafe:false};}});
+  input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));
+  input.end(encodePacket({requestId:'authorize',message:{type:'AUTHORIZE_ENTER',attemptId:'attempt'}}));
+  const status=(await packets.next()).value,authorization=(await packets.next()).value;await running;
+  assert.equal(inspections,0);
+  assert.deepEqual(status.result,{buildId:null,reloadSafe:false,reason:'EXECUTION_BUSY'});
+  assert.equal(authorization.requestId,'authorize');assert.equal(authorization.result.allowed,true);
+ }
+});
+
+test('유휴 확장 파일 복구가 끝나기 전에는 다음 명령과 세션 종료를 실행하지 않는다',async()=>{
+ const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output);let release,started;
+ const began=new Promise(resolve=>{started=resolve;}),sent=[];
+ const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],service:{request:async(path,method,body)=>{if(path==='/api/bridge/status')return{reloadSafe:true};sent.push(body.message.type);return body.message.type==='HELLO'?{instanceId:'instance',sessionId:'session'}:{allowed:true};}},extensionStatus:async()=>{started();return new Promise(resolve=>{release=resolve;});}});
+ input.write(encodePacket({requestId:'hello',message:{type:'HELLO',protocolVersion:1}}));await packets.next();
+ input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+ input.end(encodePacket({requestId:'authorize',message:{type:'AUTHORIZE_ENTER',attemptId:'attempt'}}));
+ await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(sent,['HELLO']);
+ release({buildId:'a'.repeat(64),reloadSafe:true});
+ assert.equal((await packets.next()).value.requestId,'status');assert.equal((await packets.next()).value.requestId,'authorize');await running;
+ assert.deepEqual(sent,['HELLO','AUTHORIZE_ENTER','DISCONNECT']);
+});

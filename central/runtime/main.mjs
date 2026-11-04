@@ -41,12 +41,12 @@ export async function acquireLock(dir) {
  */
 export async function startCentralRuntime({directory=dataDirectory(),port,uiDirectory=resolve(dirname(fileURLToPath(import.meta.url)),'../ui/dist')}={}) {
   await mkdir(directory,{recursive:true,mode:0o700});if(process.platform!=='win32')await chmod(directory,0o700);const unlock=await acquireLock(directory);
-  let manager,server,app,timer,unsubscribe,updates,lanAccess,supportDelivery,closing=false;
+  let manager,server,app,timer,unsubscribe,updates,lanAccess,supportDelivery,notificationRefresh,closing=false;
   try {
     // The updater holds this same OS lock while replacing application trees.
     // Load replaceable modules only after startup owns the lock.
-    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController,captureLegacyRollback},{selectRuntimePort,createSessionStore},{createLanAccess},{createSupportDelivery},{createSupportReport}]=await Promise.all([
-      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs'),import('./lan-access.mjs'),import('./support-delivery.mjs'),import('./support-report.mjs')
+    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController,captureLegacyRollback},{selectRuntimePort,createSessionStore},{createLanAccess},{createSupportDelivery},{createSupportReport},{createCoalescedRefresh}]=await Promise.all([
+      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs'),import('./lan-access.mjs'),import('./support-delivery.mjs'),import('./support-report.mjs'),import('./coalesced-refresh.mjs')
     ]);
     // 구버전 worker가 health 응답 이후 previous를 지우기 전에 검증된 코드만 보관한다.
     await captureLegacyRollback({directory});
@@ -57,8 +57,10 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     try{const connection=await readJSON(fileURLToPath(new URL('../support-connection.json',import.meta.url)))??await readJSON(fileURLToPath(new URL('../support-email-connection.json',import.meta.url)));supportDelivery=createSupportDelivery({dir:resolve(directory,'support'),connection,createReport:options=>createSupportReport({manager,appVersion,...options})});supportDelivery.start();}catch{supportDelivery=undefined;}
     const dispatcher=createNotificationDispatcher({load:()=>readJSON(resolve(directory,'notification-state.json')),save:v=>atomicJSON(resolve(directory,'notification-state.json'),v)});
     const closeRuntime=async({forUpdate=false}={})=>{
-      if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();let shutdownError;
+      if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();const notificationDrain=notificationRefresh?.close();let shutdownError;
       if(!forUpdate)try{manager.execute('service.stopAll',{});}catch(error){shutdownError=error;}
+      // 먼저 새 발송을 차단하고, 기존 알림 쓰기를 정리한 뒤 프로세스 잠금을 해제합니다.
+      await notificationDrain;
       try{await atomicJSON(resolve(directory,'shutdown.json'),{intent:forUpdate?'update':'user',at:Date.now()});}catch(error){shutdownError??=error;}
       try{await supportDelivery?.close();await lanAccess?.close();}catch(error){shutdownError??=error;}
       try{await app.close();}catch(error){shutdownError??=error;}
@@ -92,11 +94,14 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     const descriptor={protocolVersion:1,url,pid:process.pid,bridgeToken};
     await atomicJSON(resolve(directory,'runtime.json'),descriptor);updates.setRuntimeDescriptor(descriptor);
     await unlink(resolve(directory,'shutdown.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
-    const report=()=>void dispatcher.process(manager.snapshot()).catch(()=>{});
+    // 알림 판단에 필요한 전체 상태 읽기도 발송 이벤트의 동기 응답 경로에서 분리합니다.
+    // 알림 저장이 느린 동안에는 중복 처리를 겹치지 않고 마지막 상태를 다시 확인합니다.
+    notificationRefresh=createCoalescedRefresh(()=>dispatcher.process(manager.snapshot()));
+    const report=()=>notificationRefresh.request();
     unsubscribe=manager.subscribe(event=>{report();if(event.type==='incident.opened'&&supportDelivery)void supportDelivery.queue({automatic:true,incidentId:event.incidentId,attemptId:event.attemptId}).catch(()=>{});if(event.type==='settings.reset')void lanAccess.reset().catch(()=>{});});
     timer=setInterval(()=>{void updates.monitor();try{manager.tick();report();}catch{report();}},1000);timer.unref();
     return {url,manager,app,updates,lanAccess,supportDelivery,close:closeRuntime};
-  } catch(error) {clearInterval(timer);unsubscribe?.();await supportDelivery?.close().catch(()=>{});await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
+  } catch(error) {clearInterval(timer);unsubscribe?.();await notificationRefresh?.close();await supportDelivery?.close().catch(()=>{});await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
 }
 function openBrowser(url) {
   const command=process.platform==='darwin'?'/usr/bin/open':process.platform==='win32'?'rundll32.exe':'xdg-open';

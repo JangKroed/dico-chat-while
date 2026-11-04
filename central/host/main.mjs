@@ -24,9 +24,15 @@ export async function runNativeHost({ input, output, origin, ids, service, insta
       let requestId = typeof raw?.requestId === 'string' ? raw.requestId : '';
       try {
         const packet = validatePacket(raw);
-        const result = packet.message.type === 'EXTENSION_STATUS'
-          ? await extensionStatus(installedRoot || '',{...await service.request('/api/bridge/status'),extensionId:new URL(origin).hostname})
-          : packet.message.type === 'OPEN_DASHBOARD'
+        let result;
+        if(packet.message.type==='EXTENSION_STATUS'){
+          const status=await service.request('/api/bridge/status');
+          // 실행 중에는 파일 전체 검사로 뒤의 승인 요청을 지연시키지 않습니다.
+          // 유휴 검사에는 파일 복구도 포함되므로 기존 직렬 순서와 종료 대기를 유지합니다.
+          result=status.reloadSafe===true
+            ? await extensionStatus(installedRoot || '',{...status,extensionId:new URL(origin).hostname})
+            : {buildId:null,reloadSafe:false,reason:'EXECUTION_BUSY'};
+        }else result=packet.message.type === 'OPEN_DASHBOARD'
           ? await service.request('/api/bridge/open', 'POST', {})
           : await service.request('/api/bridge', 'POST', { instanceId: packet.instanceId || instanceId, message: packet.message });
         if (packet.message.type === 'HELLO') {

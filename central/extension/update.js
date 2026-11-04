@@ -16,7 +16,9 @@ export async function ensureManagedContent(chrome,records,buildId) {
     let tab;try{tab=await chrome.tabs.get(tabId);}catch{results.push({tabId,ready:false,reason:'TAB_MISSING'});continue;}
     try {
       const url=new URL(tab.url);
-      if(url.origin!=='https://discord.com'||url.pathname!==`/channels/${record.guildId}/${record.channelId}`)continue;
+      // 채널 연결과 같은 주소 범위를 사용하며, 다른 채널·하위 경로는 교체하지 않습니다.
+      const channelPath=`/channels/${record.guildId}/${record.channelId}`;
+      if(url.origin!=='https://discord.com'||![channelPath,channelPath+'/'].includes(url.pathname))continue;
       let current;try{current=await chrome.tabs.sendMessage(tabId,{type:'DICO_CONTENT_STATUS'});}catch{}
       if(current?.buildId===buildId){results.push({tabId,ready:true});continue;}
       if(current?.busy){results.push({tabId,ready:false,reason:'CONTENT_BUSY'});continue;}

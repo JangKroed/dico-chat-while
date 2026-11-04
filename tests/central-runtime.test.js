@@ -7,6 +7,31 @@ import {join} from 'node:path';
 import {createCentralApplication} from '../central/runtime/http.mjs';
 
 const origin='http://127.0.0.1:43127',bridgeToken='b'.repeat(64);
+test('진단 이벤트 폭주가 발송 처리 안에서 매번 전체 화면을 계산하지 않는다',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let push,reads=0,revision=0,onClose;
+ const chunks=[],m={...manager(),snapshot:()=>{reads++;return{revision};},subscribe:fn=>{push=fn;return()=>{};}};
+ const app=createCentralApplication({manager:m,origin,bridgeToken});t.after(()=>app.close());
+ const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}});
+ const req=Readable.from([]);req.method='GET';req.url='/api/events';req.headers={host:new URL(origin).host,cookie:session.headers['set-cookie'].split(';')[0]};
+ const res={setHeader(){},writeHead(){},write:v=>chunks.push(v),end:()=>onClose?.(),on:(type,fn)=>{if(type==='close')onClose=fn;}};
+ await app.handler(req,res);assert.equal(reads,1);
+ for(let i=1;i<=100;i++){revision=i;push({type:'delivery.trace',eventId:i});}
+ // 이벤트 이력은 모두 전달하지만 비싼 전체 화면 계산은 발송 호출 밖에서 합칩니다.
+ assert.equal(chunks.filter(v=>v.includes('event: event')).length,100);assert.equal(reads,1);
+ t.mock.timers.tick(50);await Promise.resolve();assert.equal(reads,2);
+ assert.ok(chunks.at(-1).includes('"revision":100'));
+ push({type:'delivery.trace',eventId:101});await app.close();t.mock.timers.tick(100);assert.equal(reads,2);
+});
+test('화면 갱신 예약 뒤 세션이 만료되면 최신 상태를 읽거나 전송하지 않는다',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let time=100000,push,reads=0,ended=0,onClose;
+ const m={...manager(),snapshot:()=>{reads++;return{};},subscribe:fn=>{push=fn;return()=>{};}};
+ const app=createCentralApplication({manager:m,origin,bridgeToken,now:()=>time});t.after(()=>app.close());
+ const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}});
+ const req=Readable.from([]);req.method='GET';req.url='/api/events';req.headers={host:new URL(origin).host,cookie:session.headers['set-cookie'].split(';')[0]};
+ await app.handler(req,{setHeader(){},writeHead(){},write(){},end(){ended++;onClose?.();},on(type,fn){if(type==='close')onClose=fn;}});
+ push({type:'delivery.trace',eventId:1});time+=1e12;t.mock.timers.tick(50);await Promise.resolve();
+ assert.equal(reads,1);assert.equal(ended,1);
+});
 function manager() {
   const state={stateVersion:1,messages:[],groups:[],incidents:[]};
   return {snapshot:()=>state,events:()=>[],analytics:()=>({}),subscribe:()=>()=>{},execute:(action,payload)=>({action,payload}),bridge:(m,id)=>({message:m.type,instanceId:id}),commands:()=>[]};

@@ -467,7 +467,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function failPreparation(a,reasonCode){
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
-    const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
+    const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
     const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient&&retryCount<DEFAULT_PREPARE_RETRIES;
     // Only the service can issue a COMMIT permit. No permit means this attempt
     // cannot press Enter, even if its PREPARE response arrives after timeout.

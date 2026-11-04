@@ -1189,7 +1189,7 @@ test('pre-permit preparation timeout safely retries the same turn with bounded b
 });
 
 test('preparation rejection before permit retries only transient errors and repeated ACK is idempotent',()=>{
- for(const [reason,retry]of [['PREPARE_EDITOR_UNSTABLE',true],['DRAFT_MISMATCH',false]]){
+ for(const [reason,retry]of [['PREPARE_EDITOR_UNSTABLE',true],['CONTENT_INSPECTION_TIMEOUT',true],['DRAFT_MISMATCH',false]]){
   const f=fixture(),c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));
   const command=f.manager.commands(c.instanceId).find(x=>x.type==='PREPARE');const ack={type:'ACK',sessionId:c.sessionId,commandId:command.id,status:'rejected',rejectionCode:reason};
   f.manager.bridge(ack,c.instanceId);const before=f.manager.snapshot();f.manager.bridge(ack,c.instanceId);const s=f.manager.snapshot();

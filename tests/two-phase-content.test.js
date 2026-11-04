@@ -11,6 +11,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
+ let messageScanCount=0,messageRowsVisited=0;
  const nodes=[],events=[],traces=[],requests=[];let waitHook=null,authorizationHook=null,retryHook=null,runtimeHook=null,tickHook=null,submitHook=null;let editorPresent=true,replacementEditor=null;
  const form={isConnected:true,querySelector:()=>attachment?{}:null,querySelectorAll:()=>{const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=range.editor||editor;this.focusNode=range.editor||editor;this.isCollapsed=range.collapsed}};
@@ -29,7 +30,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  const ownRoot={getAttribute:()=>null,querySelector:selector=>selector.includes('panelTitleContainer')?{get textContent(){return panelDisplayName;}}:selector.includes('panelSubtextContainer')?{querySelectorAll:()=>panelUsername?[nameNode]:[]}:null,querySelectorAll:selector=>selector==='img'?[{getAttribute:()=>'/embed/avatars/0.png'}]:selector.includes('username')&&panelUsername?[nameNode]:[]};
  const ownPanel={querySelector:()=>ownRoot};
  const identity=()=>({verified:Boolean(loggedUser),accountId:loggedUser,guildId,channelId,username:'hoya',accountName:'호야',identitySource:'own-panel-current-user'});
- const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?nodes:editorPresent?[replacementEditor||editor]:[],querySelector:sel=>sel.includes('panels')?defaultAvatar?ownPanel:{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(editor){this.editor=editor;},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
+ const document={hidden:true,activeElement:null,hasFocus:()=>false,querySelectorAll:sel=>sel.includes('message-content-')?(messageScanCount++,messageRowsVisited+=nodes.length,nodes):editorPresent?[replacementEditor||editor]:[],querySelector:sel=>sel.includes('panels')?defaultAvatar?ownPanel:{querySelectorAll:()=>loggedUser?[{getAttribute:()=>`/avatars/${loggedUser}/a.png`}]:[]}:({}),createRange:()=>({collapsed:false,selectNodeContents(editor){this.editor=editor;},collapse(){this.collapsed=true}}),addEventListener(name,fn){if(name==='compositionstart')composition=fn}};
  const tick=ms=>{if(tickHook){let remaining=ms;while(remaining>0){const step=Math.min(500,remaining);clock+=step;remaining-=step;tickHook();}}else clock+=ms;if(pasteDue!==null&&clock>=pasteDue){editor.innerText=convertAliases?pasteText.replaceAll(emojiName,emojiValue):pasteText;pasteDue=null;selection.isCollapsed=true;
  if(fault==='text_mismatch')editor.innerText='WRONG';
  if(fault==='focus_lost')document.activeElement=null;
@@ -59,7 +60,7 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  ClipboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},KeyboardEvent:class{constructor(type,data){Object.assign(this,{type,defaultPrevented:false},data)}},DataTransfer:class{setData(_,text){this.text=text}},
  MutationObserver:class{constructor(fn){check=fn}observe(){}disconnect(){}},setTimeout:(fn,ms)=>setImmediate(()=>{const delay=nextDelay;if(!repeatDelay)nextDelay=0;tick(ms+delay+pageTimerDelay);if(delay)onDelayed?.();fn()}),clearTimeout:clearImmediate,setInterval:()=>1,clearInterval(){},
  });
- return {onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:({text='',sameForm=true}={})=>{if(replacementEditor)replacementEditor.isConnected=false;replacementEditor={...editor,innerText:text,isConnected:true,closest:()=>sameForm?form:{...form}};editor.isConnected=false;return replacementEditor;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{if(listener(message,{id:'ext'},resolve)===false)resolve(undefined);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},removePosts:()=>{nodes.length=0;check?.();},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false,ageMs=0}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock-ageMs)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
+ return {messageScanStats:()=>({scans:messageScanCount,rows:messageRowsVisited}),onSubmit:fn=>{submitHook=fn},navigate:path=>{pageLocation.pathname=path},removeEditor:()=>{editorPresent=false;editor.isConnected=false;},replaceEditor:({text='',sameForm=true}={})=>{if(replacementEditor)replacementEditor.isConnected=false;replacementEditor={...editor,innerText:text,isConnected:true,closest:()=>sameForm?form:{...form}};editor.isConnected=false;return replacementEditor;},profile:({username=panelUsername,displayName=panelDisplayName}={})=>{panelUsername=username;panelDisplayName=displayName;},onRuntime:fn=>{runtimeHook=fn},onTick:fn=>{tickHook=fn},requestMessage:message=>new Promise(resolve=>{if(listener(message,{id:'ext'},resolve)===false)resolve(undefined);}),delayNext:(ms,callback=null,repeat=false)=>{nextDelay=ms;onDelayed=callback;repeatDelay=repeat},editor,selection,events,traces,requests,onRetry:fn=>{retryHook=fn},removePosts:()=>{nodes.length=0;check?.();},post:({text=message,author='123456789012345678',sending=false,failed=false,clear=false,ageMs=0}={})=>{if(clear)editor.innerText='';nodes.push({id:'message-content-'+((BigInt(clock-ageMs)-1420070400000n)<<22n),innerText:text,closest:()=>({querySelector:sel=>(sending&&sel.includes('isSending')||failed&&sel.includes('isFailed'))?{}:null,matches:()=>false,querySelectorAll:()=>author?[{getAttribute:()=>`/avatars/${author}/a.png`}]:[]})});check?.();},onWait:fn=>{waitHook=fn},onAuthorization:fn=>{authorizationHook=fn},account:value=>{loggedUser=value},delivery,target,tick,compose:()=>composition(),stop:()=>{allowed=false},cooldown:value=>{cooldown=value},now:()=>clock,
  request:type=>new Promise(resolve=>{const pending=listener({type,target,delivery:{...delivery,...(type==='DICO_DELIVER'?{phase:'commit'}:{})}},{id:'ext'},resolve);if(pending===false)resolve(undefined);})};
 }
 test('순환 발송은 로그인 계정이 다르거나 확인할 수 없으면 입력 전 차단한다',async()=>{
@@ -866,4 +867,23 @@ test('다른 시도 중단 신호는 현재 발송을 취소하지 않는다',as
  await r.request('DICO_PREPARE');r.tick(3000);
  r.onAuthorization(()=>{void r.requestMessage({type:'DICO_CANCEL_DELIVERY',delivery:{id:'other',sessionId:r.delivery.sessionId}});});
  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
+
+
+test('중앙 입력창 완료는 빠른 채팅 목록을 다시 순회하지 않고 단독 발송은 게시 근거를 확인한다',async()=>{
+ for(const coordinated of [true,false]){
+  const r=rig({managed:coordinated,loggedUser:'123456789012345678',noPostedMessage:true,ignoreEnter:true});r.target.coordinated=coordinated;
+  await r.request('DICO_PREPARE');r.tick(3000);
+  // 기존 메시지가 많은 채널에서도 완료 순간의 불필요한 전체 목록 순회를 계측합니다.
+  // DOM 콜백 안에서 초안 비움 이후의 조회만 비교하여 타이머 속도에 의존하지 않습니다.
+  for(let i=0;i<200;i++)r.post({text:'기존 채팅 '+i,author:'999999999999999999'});
+  let before,after;
+  r.onTick(()=>{if(before||!r.events.some(e=>e.type==='keydown'))return;
+   before=r.messageScanStats();r.post({clear:true});after=r.messageScanStats();
+  });
+  const result=await r.request('DICO_DELIVER');assert.equal(result.status,'confirmed');
+  assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+  if(coordinated){assert.equal(result.confirmationBasis,'composer_cleared');assert.deepEqual(after,before);}
+  else{assert.equal(result.confirmationBasis,'message_observed');assert.ok(after.scans>before.scans);assert.ok(after.rows-before.rows>=201);}
+ }
 });

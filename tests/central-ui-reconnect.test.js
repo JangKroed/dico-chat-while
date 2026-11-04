@@ -84,3 +84,16 @@ test('hidden or already connecting views do not create parallel reconnect bursts
  target.dispatchEvent(new Event('online'));phase='offline';target.dispatchEvent(new Event('visibilitychange'));assert.equal(calls,0);
  visible=true;target.dispatchEvent(new Event('visibilitychange'));assert.equal(calls,1);dispose();
 });
+
+test('a focused offline view probes again without browser events and cancels on disposal',async()=>{
+ const {createReconnectWake}=await import('../central/ui/src/reconnect.ts');
+ let time=0,phase='offline',visible=true,calls=0,scheduled,delay,cleared;
+ const dispose=createReconnectWake({target:new EventTarget(),phase:()=>phase,visible:()=>visible,now:()=>time,restart:()=>calls++,schedule:(callback,ms)=>{scheduled=callback;delay=ms;return 17},cancel:id=>{cleared=id}});
+ assert.equal(delay,60000);
+ time=60000;scheduled();assert.equal(calls,1);
+ phase='reconnecting';time=120000;scheduled();assert.equal(calls,1);
+ phase='expired';time=180000;scheduled();assert.equal(calls,1);
+ phase='offline';time=240000;scheduled();assert.equal(calls,2);
+ visible=false;time=300000;scheduled();assert.equal(calls,2);
+ dispose();assert.equal(cleared,17);time=360000;scheduled();assert.equal(calls,2);
+});

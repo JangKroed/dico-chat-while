@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "sourceHash": "4d92bb4a54eb1885850cb4aaa319359e2cadf7f986f5f95aad4270d999dfec24",
+  "sourceHash": "67afb90a8429bcbb690f2b47cdebcfa64d29ae3fb1f46da1016514ed619a11d0",
   "assets": {
+    "assets/index-Blg2nIHq.js": "066d13d26c918e5bd624125355e56138a00ad6e60eeb893e061181408f1d4c42",
     "assets/index-CKyhgCcK.css": "080deb65edc1ae53a456322d23b253d7eb589bcf4200821ac19dd17a6177c915",
-    "assets/index-DcTbjHUl.js": "4bf1acde814f191cd27c01797519c5b47777af2dda925ed60c914f7cb629f17a",
     "favicon.svg": "5c0e8e8764a6114114636b55517e0b7b991eca4eebf31a882fce8bd79bdcb0cc",
-    "index.html": "a78461f8ddc10d032673ce80bdf814ba3fe2d9f9b623fd6f78c72adf36e20d60"
+    "index.html": "2ca13b11f36d8325a11fc2ac45af754aab3d8a3e953fba49c6ae95efcef6fb68"
   }
 }
