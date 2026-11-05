@@ -1,3 +1,4 @@
+import {redactSupportText} from '../core/support-redaction.js';
 import {supportRecordBuffer} from '../core/support-budget.js';
 import {randomUUID,createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
@@ -36,7 +37,7 @@ function sanitize(value,{includeBodies=true,includeNames=true}={},depth=0,parent
   if(depth>12)throw fail('보고서 구조가 너무 깊습니다.');
   if(value===null||typeof value==='boolean')return value;
   if(typeof value==='number')return Number.isFinite(value)?value:null;
-  if(typeof value==='string'){if(value.length>STRING_LIMIT)throw fail('보고서 문자열이 너무 깁니다.');return value;}
+  if(typeof value==='string'){if(value.length>STRING_LIMIT)throw fail('보고서 문자열이 너무 깁니다.');return redactSupportText(value);}
   if(Array.isArray(value)){if(value.length>RECORD_LIMIT)throw fail('보고서 항목이 너무 많습니다. 기간을 줄여 주세요.',413);return value.map(item=>sanitize(item,{includeBodies,includeNames},depth+1));}
   if(object(value)){
     const result={};for(const [key,item] of Object.entries(value)){
@@ -126,7 +127,7 @@ export function inspectSupportReport(input){
   if(input.userDescription!==undefined&&(typeof input.userDescription!=='string'||input.userDescription.length>4000))throw fail('문제 설명은 4000자 이내로 입력하세요.');
   const privacy={includeBodies:input.privacy.includeBodies,includeNames:input.privacy.includeNames,credentialsExcluded:true},metadata={...privacy,includeBodies:false};
   const report={format:'dico-support-report',schemaVersion:1,reportId:input.reportId,createdAt:input.createdAt,runtime:sanitize(input.runtime,metadata),selection:sanitize(input.selection,metadata),privacy,configuration:sanitize(input.configuration,metadata),attempts:sanitize(input.attempts,privacy),commands:sanitize(input.commands,metadata),events:sanitize(input.events,metadata).sort((a,b)=>a.at-b.at||(a.eventId||0)-(b.eventId||0)),incidents:sanitize(input.incidents,metadata),timeline:sanitize(input.timeline,metadata)};
-  if(input.userDescription!==undefined)report.userDescription=input.userDescription;
+  if(input.userDescription!==undefined)report.userDescription=redactSupportText(input.userDescription);
   report.configuration.service??={};report.summary=summary(report);report.checks=checksFor(report);
   return bounded({report,summary:report.summary,findings:[{code:'IMPORTED_REPORT_UNVERIFIED',severity:'info',message:'가져온 파일의 기록을 분석한 결과입니다. 실제 실행 환경이나 게시 여부를 별도로 검증한 것은 아닙니다.'},...report.checks]});
 }
