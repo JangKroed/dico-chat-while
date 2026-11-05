@@ -201,9 +201,11 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
     return receiptJSON(response);
    })(),aborted]);
    if(receipt?.ok===false){
-    const reasons={UNAUTHORIZED:'이메일 중계 연결 키가 일치하지 않습니다. 관리자 수신 연결 설정을 확인하세요.',QUOTA:'이메일 중계의 오늘 전송 한도에 도달했습니다. 대기열을 보존하고 다시 시도합니다.',DELIVERY_UNCERTAIN:'이메일 중계가 발송 결과를 확정하지 못했습니다. 관리자 확인이 필요하며 중계는 중복 메일을 보내지 않습니다.',BUSY:'이메일 중계가 다른 제보를 처리 중입니다. 자동으로 다시 시도합니다.',INVALID:'이메일 중계가 보고서 형식 또는 크기를 거절했습니다.'};
+    const reasons={UNAUTHORIZED:'이메일 중계 연결 키가 일치하지 않습니다. 관리자 수신 연결 설정을 확인하세요.',QUOTA:'이메일 중계의 오늘 전송 한도에 도달했습니다. 대기열을 보존하고 다시 시도합니다.',DELIVERY_UNCERTAIN:'이메일 중계가 발송 결과를 확정하지 못했습니다. 관리자 확인이 필요하며 중계는 중복 메일을 보내지 않습니다.',BUSY:'이메일 중계가 다른 제보를 처리 중입니다. 자동으로 다시 시도합니다.',INVALID:'이메일 중계가 보고서 형식 또는 크기를 거절했습니다.',CONFLICT:'동일 보고서 ID의 내용이 기존 접수와 다릅니다. 중복 발송을 차단했습니다.',STORAGE:'이메일 중계의 접수 기록 저장 공간이 부족합니다.',CONFIG:'이메일 중계의 관리자 설정을 확인해야 합니다.'};
     const code=Object.hasOwn(reasons,receipt.code)?receipt.code:'UNKNOWN';
-    throw fail(`[${code}] ${reasons[code]||'수신 서버가 제보를 거절했습니다.'}`,502,'SUPPORT_RECEIVER_REJECTED');
+    // 중계의 일일 한도 대기는 짧은 지수 재시도로 소진하지 않는다. 외부 값은 하루 이내로 제한한다.
+    const retryAfterMs=code==='QUOTA'?Math.min(DAY,Math.max(60000,Number.isSafeInteger(receipt.retryAfterMs)?receipt.retryAfterMs:DAY)):undefined;
+    throw Object.assign(fail(`[${code}] ${reasons[code]||'수신 서버가 제보를 거절했습니다.'}`,502,'SUPPORT_RECEIVER_REJECTED'),{retryAfterMs});
    }
    if(receipt.reportId!==item.reportId||!safeId(receipt.receiptId)||!Number.isSafeInteger(receipt.receivedAt)||receipt.receivedAt<0)throw fail('수신 서버의 접수 확인을 검증하지 못했습니다.',502);
    item.status='sent';item.sentAt=now();item.receiptId=receipt.receiptId;item.nextAttemptAt=null;item.lastError=null;
@@ -211,7 +213,7 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
    item.status='failed';item.lastError=error.code==='SUPPORT_RECEIVER_REJECTED'?error.message:'전송하지 못했습니다. 수신 주소·연결 키·네트워크를 확인하세요. 자동으로 다시 시도합니다.';
    // 무한 재시도는 오프라인 로그와 중계 요청만 누적한다. 한도 이후에도 원본은
    // 보존하되 nextAttemptAt=null을 명시적 종료 상태로 저장하여 재시작에도 유지한다.
-   item.nextAttemptAt=item.attempts>=maxAttempts?null:now()+Math.min(3600000,retryBaseMs*2**Math.min(10,item.attempts-1));
+   item.nextAttemptAt=item.attempts>=maxAttempts?null:now()+(error.retryAfterMs??Math.min(3600000,retryBaseMs*2**Math.min(10,item.attempts-1)));
    if(item.nextAttemptAt===null)item.lastError=`${maxAttempts}회 전송 시도 후 자동 재시도를 종료했습니다. 보고서는 로컬 전송함에 보존됩니다.`;
   }finally{clearTimeout(timeout);activeController.signal.removeEventListener('abort',rejectAbort);controller=null;activeAutomatic=false;save();}
  }

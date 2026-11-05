@@ -3,20 +3,14 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {runInNewContext} from 'node:vm';
+import {relay as createRelay} from './helpers/email-relay.js';
 import {createSupportDelivery} from '../central/runtime/support-delivery.mjs';
 import {createSupportReport} from '../central/runtime/support-report.mjs';
 
 const url='https://script.google.com/macros/s/test-deployment/exec',key='a'.repeat(40);
 const sample=()=>({serverNow:1800000000000,retainedFrom:0,service:{status:'ready'},settings:{},instances:[],accounts:[],targets:[],channels:[],groups:[],locks:[],attempts:[],commands:[],events:[],incidents:[],intervals:[]});
-function relay(){
- const props={REPORT_KEY:key},sent=[];
- const properties={getProperty:k=>props[k],setProperty:(k,v)=>{props[k]=v;},getProperties:()=>({...props}),deleteProperty:k=>{delete props[k];}};
- let reject=false;
- const context={ContentService:{MimeType:{JSON:'json'},createTextOutput:text=>({setMimeType:()=>JSON.parse(text)})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock:()=>{}})},PropertiesService:{getScriptProperties:()=>properties},Utilities:{getUuid:()=>crypto.randomUUID(),newBlob:(text,type,name)=>({text,type,name})},MailApp:{getRemainingDailyQuota:()=>100,sendEmail:options=>{if(reject)throw Error('ambiguous provider failure');sent.push(options);}}};
- const post=runInNewContext(readFileSync(new URL('../mail-relay/Central.gs',import.meta.url),'utf8')+'\ndoPost',context);
- return {sent,props,post:body=>post({postData:{contents:JSON.stringify(body)}}),reject:()=>{reject=true;}};
-}
+const relay=()=>createRelay({key});
+
 function sender(t,fetchImpl,options={}){
  const dir=mkdtempSync(join(tmpdir(),'dico-email-'));
  const delivery=createSupportDelivery({dir,fetchImpl,createReport:opts=>createSupportReport({manager:{supportData:sample},appVersion:'test',...opts}),...options});
@@ -74,4 +68,13 @@ test('email relay rejection codes are surfaced instead of a generic network erro
   const delivery=sender(t,async()=>Response.json({ok:false,code}));await delivery.queue();await delivery.flush();
   const item=delivery.status().outbox[0];assert.equal(item.status,'failed');assert.match(item.lastError,new RegExp(code));assert.notEqual(item.receiptId,undefined);
  }
+});
+
+test('quota retry waits for relay recovery instead of exhausting attempts in a short burst',async t=>{
+ let clock=Date.now(),calls=0;
+ const delivery=sender(t,async()=>{calls++;return Response.json({ok:false,code:'QUOTA',retryAfterMs:86400000});},{now:()=>clock});
+ await delivery.queue({automatic:true});await delivery.flush();
+ assert.equal(delivery.status().outbox[0].nextAttemptAt,clock+86400000);
+ clock+=3600000;await delivery.flush();assert.equal(calls,1);
+ clock+=23*3600000;await delivery.flush();assert.equal(calls,2);
 });
