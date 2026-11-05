@@ -926,3 +926,28 @@ test('패널 재생성 뒤 실제 다른 계정으로 바뀌면 완료나 추가
  r.onRetry(()=>{r.remountPanel();r.account('999999999999999999');});
  const result=await r.request('DICO_DELIVER');assert.notEqual(result.status,'confirmed');assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
 });
+
+test('같은 초안이 반복해서 남을 때만 재시도 간격을 늘리고 초안은 다시 입력하지 않는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678',noPostedMessage:true,ignoreFirstEnters:5});r.target.coordinated=true;
+ await r.request('DICO_PREPARE');r.tick(3000);
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');
+ const waits=r.traces.filter(x=>x.stage==='retry-wait').map(x=>x.data.retryBackoffMs);
+ assert.deepEqual(waits,[0,0,500,500,500]);
+ const dispatched=r.traces.filter(x=>x.stage==='enter-dispatched');
+ assert.equal(dispatched.length,6);
+ assert.equal(dispatched[0].data.enterPrevented,false);
+ assert.equal(dispatched[0].data.cooldownKnown,true);
+ assert.equal(r.events.filter(x=>x.type==='paste').length,1);
+ assert.equal(r.traces.find(x=>x.stage==='finished').data.result,'confirmed');
+
+ Object.assign(r.delivery,{id:'next-attempt',startedAt:r.now(),scheduledAt:r.now()+3000});
+ await r.request('DICO_PREPARE');r.tick(3000);
+ const next=await r.request('DICO_DELIVER');
+ assert.equal(next.status,'confirmed');
+ assert.equal(next.deliveryEvidence.retryCount,0);
+ const prediction=r.traces.find(x=>x.id==='next-attempt'&&x.stage==='before-enter');
+ assert.equal(prediction.data.retryRisk,true);
+ assert.equal(prediction.data.priorRetryCount,5);
+ assert.equal(r.traces.some(x=>x.id==='next-attempt'&&x.stage==='retry-wait'),false);
+});
