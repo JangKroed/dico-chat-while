@@ -474,7 +474,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(outcome==='confirmed')ensure(a.permitId||a.permitIssued,'PERMIT_REQUIRED','No commit permit was issued for this attempt.',409);
     if(a.detached===true&&a.executionBlocked===true){a.status=outcome;a.finalizedAt=now();a.manual=manual;if(messageId)a.messageId=text(messageId,'messageId',200);event(`delivery.${outcome}`,{attemptId:a.id,detached:true,manual});return a;}
     if(TERMINAL.has(a.status)){ensure(a.status===outcome,'RESULT_CONFLICT','This attempt already has a different final result.',409);return a;}
-    const automaticallyReconciled=state.commands.some(cmd=>cmd.type==='RECONCILE'&&cmd.payload.attemptId===a.id&&['queued','received'].includes(cmd.status)&&cmd.sessionId===state.instances.find(i=>i.id===a.instanceId)?.sessionId);
     a.status=outcome;a.finalizedAt=now();a.manual=manual;if(messageId)a.messageId=text(messageId,'messageId',200);if(outcome==='confirmed')a.confirmationBasis=confirmationBasis||'message_observed';
     if(Number.isFinite(confirmationMs)&&confirmationMs>=0)a.confirmationMs=Math.min(confirmationMs,86_400_000);
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
@@ -487,7 +486,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     resolveIncidents(a.id);
     if(c.pendingPlaylist){applyPlaylist(c,latestPlaylist(c.pendingPlaylist),{preserveIndex:c.pendingPlaylistPreserveIndex===true});delete c.pendingPlaylist;delete c.pendingPlaylistPreserveIndex;}else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
     if(g.controlIntent)controlComplete(g);else if(g.status==='needs_review'){
-      const resume=automaticallyReconciled&&!manual&&g.enabled!==false&&g.reconcileResumeRunId===g.runId;
+      // 완료 근거는 bridge에서 검증합니다. 조회 명령의 발급/ACK 순서는
+      // 사용자의 실행 의도가 아니므로 자동 재개의 추가 조건으로 삼지 않습니다.
+      const resume=outcome==='confirmed'&&!manual&&g.enabled!==false&&a.runId===g.runId&&g.reconcileResumeRunId===g.runId;
       delete g.reconcileResumeRunId;g.status=resume?'running':'paused';g.waitReason=null;
       if(resume)event('group.reconciled_resumed',{groupId:g.id});else release(g);
     }
@@ -497,7 +498,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function failPreparation(a,reasonCode){
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
-    const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
+    const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','DRAFT_INSPECTION_UNAVAILABLE','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
     const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient;
     // Only the service can issue a COMMIT permit. No permit means this attempt
     // cannot press Enter, even if its PREPARE response arrives after timeout.
@@ -1186,15 +1187,18 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
     /**
-     * 실행 종료가 확인된 미확인 시도만 읽기 전용으로 자동 대조합니다.
-     * 같은 세션/탭/설정 연결이 유지된 경우에 한해 5~30초 간격으로 횟수 제한 없이 조회합니다.
-     * 발송 실행 중인 시도나 교체된 탭을 건드리지 않고 PREPARE/Enter도 재발급하지 않습니다.
+     * 미확인 시도의 조회는 입력 권한과 별개입니다. 실행 차단 증명을 먼저
+     * 요구하면 완료 보고 유실과 조회가 서로 기다리게 됩니다. 실행기는 같은
+     * binding의 기존 작업 뒤에서 영수증/게시 이력만 읽으며 Enter를 재발급하지 않습니다.
+     * 완료 확정은 기존 세션·영수증·차단 증명 검증을 통과해야 하고 분리 이력은 제외합니다.
      */
-    for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true)){
+    for(const a of state.attempts.filter(a=>a.status==='unknown'&&activeAttempt(a))){
       const owner=state.instances.find(i=>i.id===a.instanceId),channel=state.channels.find(c=>c.id===a.bindingId);
       if(!owner?.connected||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||!Number.isInteger(channel.tabId)||channel.sessionId!==owner.sessionId||channel.accountId!==a.accountId||channel.guildId!==a.guildId||channel.channelId!==a.channelId)continue;
-      // 읽기 전용 조회의 응답이 유실되어도 대기열에 영구히 묶이지 않습니다.
-      for(const cmd of state.commands.filter(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)&&now()-c.createdAt>=30000))cmd.status='superseded';
+      // 앞선 발송 뒤에서 기다리는 queued 조회는 같은 ID로 재전달합니다.
+      // 이를 만료시키면 실행기 대기열에 새 조회가 계속 쌓입니다. 실제 수신한
+      // 조회만 수신 시점부터 응답 유실을 판단하고, 세션 교체는 HELLO가 처리합니다.
+      for(const cmd of state.commands.filter(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&c.status==='received'&&now()-(c.receivedAt??c.createdAt)>=30000))cmd.status='superseded';
       if(now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;
       a.recoveryCount=(a.recoveryCount||0)+1;a.recoveryAfter=now()+Math.min(30000,5000*2**Math.min(3,Math.floor(a.recoveryCount/3)));
       command('RECONCILE',a.instanceId,{...attemptPayload(a),recoveryTabId:channel.tabId});

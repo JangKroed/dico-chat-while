@@ -216,8 +216,9 @@ test('increased observed slowmode extends account wait after a confirmed post', 
   f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);assert.equal(f.manager.snapshot().groups[0].waitReason,'account_interval');f.manager.close();
 });
 
-test('reconciled uncertain result leaves no permit or lock owned by the paused group', () => {
-  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a,'unknown');f.result(c,a);
+test('manually resolved uncertain result leaves no permit or lock owned by the paused group', () => {
+  const f=fixture(),c=f.connect();f.apply(c,[f.message()]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);f.result(c,a,'unknown');f.manager.execute('attempt.resolve',{id:a.id,outcome:'confirmed',messageId:'post-'+a.id});
+  assert.equal(f.manager.snapshot().groups[0].status,'paused');
   const second=f.group([c]);assert.doesNotThrow(()=>f.manager.execute('group.start',{id:second.id}));f.manager.close();
 });
 

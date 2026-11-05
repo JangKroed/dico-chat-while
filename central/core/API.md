@@ -85,6 +85,14 @@ Commands have `{id,type,instanceId,sessionId,status,createdAt,payload}`. Deliver
 
 `CONFIG_SYNC` payload contains binding, account/guild/channel/tab, `configVersion`, `intervalMs`, and `items:[{messageId,revisionId,name,body}]`. `PREPARE` includes the same target identifiers plus `attemptId`, `groupId`, `body`, and `revisionId`. `COMMIT_PERMIT` adds `permitId`. `RECONCILE` refers to the original attempt and never authorizes Enter. `CONTROL` contains `{action:'stop'|'pause',groupId,runId,controlGeneration,attemptId}`. Each explicit start/resume creates a fresh `runId`; attempts and all attempt command payloads retain it. The executor must preserve stopped-run tombstones so delayed commands from a stopped run cannot clear its execution gate.
 
+### 읽기 전용 자동 복구와 완료 후 재개
+
+활성 unknown의 RECONCILE 발급에는 executionBlocked를 먼저 요구하지 않는다. 조회는 같은 binding의 기존 작업 뒤에서 영수증/게시 이력만 읽는다. 확정 완료를 저장한 실행기는 입력 게이트가 닫혔음을 executionBlocked로 보고한다. unknown의 composer_cleared 확정에는 여전히 현재 조회 명령 ID, 동일 세션과 검증된 제출 영수증이 모두 필요하다. 근거 없는 unknown과 detached 이력은 성공으로 변경하지 않는다.
+
+queued 조회는 동일 ID로 재전달한다. received 조회만 receivedAt(구기록은 createdAt)부터 30초 후 응답 유실로 교체한다. 자동 confirmed 결과 이후 재개는 대기열의 명령 존재 여부가 아니라 같은 run의 보존된 실행 의도에 따른다. 사용자 stop/pause, 비활성, 수동 확정, 재시작 시 취소된 의도는 자동으로 되살리지 않는다.
+
+승인·입력·완료 상태와 유지/단순화 판단은 [실행 경로 분석](../../docs/central-management/CORE-EXECUTION-AUDIT-2026-11-05.md)에 정리했다.
+
 ## Bulk controls and configuration reset
 
 - `service.startAll {}` starts all non-running groups in one durable transaction. Existing running groups retain their run and active attempt. A stopped service may be resumed by this explicit action. Any failed eligibility/resource/control/attempt check rolls back the entire request. Returns `{started,alreadyRunning}`; an empty group list is rejected.

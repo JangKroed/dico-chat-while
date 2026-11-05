@@ -98,7 +98,10 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const canSend=async(message,tabId)=>(await authorizeInput(message,tabId)).allowed;
   async function report(a) {
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
-    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',...(a.result?.recoveryCommandId?{recoveryCommandId:a.result.recoveryCommandId}:{}),messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
+    // 확정 완료는 반환된 작업/검증된 영수증을 저장한 상태이며 입력 게이트도 닫혔습니다.
+    // 이 근거를 보고해야 중앙이 unknown으로 바뀐 뒤의 현재 조회도 완료할 수 있습니다.
+    const executionBlocked=a.result?.executionBlocked===true||a.phase==='confirmed'&&a.result?.outcome==='confirmed';
+    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',...(a.result?.recoveryCommandId?{recoveryCommandId:a.result.recoveryCommandId}:{}),messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
     const samples=pendingCooldownSamples.get(a.attemptId)||[];pendingCooldownSamples.delete(a.attemptId);
     if(a.phase==='confirmed')for(const sample of samples)await cooldownSample({deliveryId:a.attemptId,sample},a.tabId);
