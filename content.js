@@ -831,9 +831,10 @@
     const failureCounts={};let lastFailedChecks=[];
     let lastSample=began,deadline=began+5000,delayRecovered=false;
     let maxSampleGapMs=0,sampleCount=0;
-    const fail=async()=>{
-      let timer;
-      try { await Promise.race([report('stability-failed',{failedChecks:lastFailedChecks,failureCounts,maxStableMs,stableRequiredMs:duration,stableWaitMs:Date.now()-began,maxSampleGapMs,sampleCount}),new Promise(resolve=>{timer=setTimeout(resolve,1500);})]); } finally { clearTimeout(timer); }
+    const fail=()=>{
+      // 진단 응답은 입력 차단·실패 반환의 선행 조건이 아닙니다. Native 제보가
+      // 느려도 1.5초를 더 기다리지 않고 실행기가 즉시 복구/중지를 처리합니다.
+      void report('stability-failed',{failedChecks:lastFailedChecks,failureCounts,maxStableMs,stableRequiredMs:duration,stableWaitMs:Date.now()-began,maxSampleGapMs,sampleCount});
       return false;
     };
     while (true) {

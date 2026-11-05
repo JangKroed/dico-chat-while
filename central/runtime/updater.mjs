@@ -214,9 +214,10 @@ export async function verifyRollbackCompatibility({directory,target,node=process
 }
 export function supportedUpdateNode(version){const [major,minor,patch]=String(version).split('.').map(Number);return Number.isInteger(major)&&Number.isInteger(minor)&&Number.isInteger(patch)&&(major>24||major===24&&minor>=13);}
 /**
- * 그룹이 멈췄다는 표시만으로 충분하지 않습니다. 진행 중·미확인 시도와 제어 의도도 검사합니다.
+ * 그룹 중지와 실제 입력 차단을 함께 확인합니다. 과거 결과가 unknown이어도
+ * 현재 실행 차단이 입증되면 이력을 그대로 보존하며 교체할 수 있습니다.
  */
-export function safeToUpdate(snapshot){return Boolean(snapshot&&['ready','stopped','resume_required'].includes(snapshot.service?.status)&&Array.isArray(snapshot.groups)&&snapshot.groups.every(g=>['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent)&&Array.isArray(snapshot.attempts)&&!snapshot.attempts.some(a=>activeAttempts.has(a.status)&&!(a.detached===true&&a.executionBlocked===true&&a.status==='unknown')));}
+export function safeToUpdate(snapshot){return safeToReloadExtension(snapshot)&&snapshot.groups.every(g=>['stopped','paused'].includes(g.status));}
 /**
  * 확장 코드 교체는 관리 프로그램 전체 교체와 구분한다. 이미 입력 차단이 확인된
  * 미확인 결과는 기록·그룹 잠금을 그대로 보존한 채 확장만 교체할 수 있다.

@@ -44,12 +44,24 @@ test('a faster measured unlock never falls below nominal Enter-to-Enter floor',(
  }finally{f.close()}
 });
 
-test('custom interval adds only its nominal excess after adaptive correction',()=>{
+test('직접 주기와 보정 최소는 max로 적용하고 실제 남는 추가 시간만 표시한다',()=>{
  const f=setup({customIntervalMs:70000});try{
   f.confirm();f.advance(1000);assert.equal(f.sample().ok,true);
-  const c=f.manager.snapshot().channels[0];assert.equal(c.intervalMs,70000);assert.equal(c.customExtraMs,7000);assert.equal(c.correctedBaseIntervalMs,67000);assert.equal(c.effectiveIntervalMs,74000);
-  assert.equal(c.nextEligibleAt,1_800_000_000_000+74000);
+  const c=f.manager.snapshot().channels[0];assert.equal(c.intervalMs,70000);assert.equal(c.customExtraMs,3000);assert.equal(c.correctedBaseIntervalMs,67000);assert.equal(c.effectiveIntervalMs,70000);
+  assert.equal(c.nextEligibleAt,1_800_000_000_000+70000);
  }finally{f.close()}
+});
+
+test('직접 주기70초와 실측 최소67초는 긴70초를 적용하며 보정4초를 중복 가산하지 않는다',()=>{
+ const f=setup({customIntervalMs:70000});try{
+  f.confirm();f.advance(1000);assert.equal(f.sample().ok,true);
+  const due=1_800_000_000_000+70000;
+  while(f.clock.now()<due-1){f.advance(Math.min(1000,due-1-f.clock.now()));f.observe();f.manager.tick();}
+  assert.equal(f.manager.snapshot().attempts.length,1,'직접 설정한70초 전에 준비/허가하지 않습니다.');
+  f.advance(1);f.observe();f.manager.tick();const s=f.manager.snapshot();assert.equal(s.channels[0].effectiveIntervalMs,70000);assert.equal(s.attempts.length,2,'74초까지 불필요하게 미루지 않습니다.');
+  const a=s.attempts[1];f.manager.bridge({type:'PREPARED',sessionId:f.session.sessionId,attemptId:a.id,accountId:a.accountId,channelId:a.channelId,configVersion:a.configVersion,draftClear:true},f.session.instanceId);
+  assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:f.session.sessionId,attemptId:a.id,runId:a.runId,configVersion:a.configVersion,retryCount:0},f.session.instanceId).allowed,true);
+ }finally{f.close();}
 });
 
 test('automatic mode ignores a stale custom interval preserved in an old backup',()=>{
@@ -106,6 +118,8 @@ test('calibration survives restart and reconstructs the same Enter-based deadlin
   const next=restarted.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId,name:'Calibration'});
   restarted.bridge({type:'OBSERVATION',sessionId:next.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'33333333333333333',guildId:'11111111111111111',channelId:'22222222222222222',tabId:7,verified:true,slowmodeMs:60000}]},next.instanceId);
   for(const cmd of restarted.commands(next.instanceId).filter(x=>x.type==='CONFIG_SYNC'))restarted.bridge({type:'ACK',sessionId:next.sessionId,commandId:cmd.id,status:'applied'},next.instanceId);
+  // 재시작 복구는 현재 세션의 입력 차단 ACK 이후에만 수동/자동 재개합니다.
+  for(const cmd of restarted.commands(next.instanceId).filter(x=>x.type==='CONTROL'))restarted.bridge({type:'ACK',sessionId:next.sessionId,commandId:cmd.id,status:'applied'},next.instanceId);
   restarted.execute('group.resume',{id:f.group.id});
   assert.equal(restarted.snapshot().channels[0].nextEligibleAt,1_800_000_000_000+67000);
  }finally{f.close();rmSync(dir,{recursive:true,force:true})}

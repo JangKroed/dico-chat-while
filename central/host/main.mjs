@@ -19,8 +19,7 @@ export async function runNativeHost({ input, output, origin, ids, service, insta
     } catch { /* The next poll may reconnect; no secret-bearing error goes to the extension. */ }
     finally { busy = false; }
   }, pollMs);
-  try {
-    for await (const raw of readPackets(input)) {
+  async function handlePacket(raw) {
       let requestId = typeof raw?.requestId === 'string' ? raw.requestId : '';
       try {
         const packet = validatePacket(raw);
@@ -45,8 +44,31 @@ export async function runNativeHost({ input, output, origin, ids, service, insta
           for (const command of result.commands) send({ type: 'COMMAND', command });
         }
       } catch(error) { send({ type: 'RESPONSE', requestId, ok: false, code:/^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code||'')?error.code:'SERVICE_UNAVAILABLE',error: 'Invalid message or local service unavailable' }); }
+  }
+  const queue=[];
+  let ended=false,wake,space;
+  // Native 요청은 한 번에 하나만 실행합니다. 대기 중인 trace만 뒤로 보내고
+  // 상태 변경 요청끼리의 순서와 HELLO/파일 복구 경계는 그대로 유지합니다.
+  // 이미 진행 중인 I/O를 취소하거나 유휴 파일 교체와 Enter를 겹치지 않습니다.
+  const processing=(async()=>{
+    while(!ended||queue.length){
+      if(!queue.length){await new Promise(resolve=>{wake=resolve;});continue;}
+      const barrier=queue.findIndex(raw=>['HELLO','DISCONNECT','EXTENSION_STATUS'].includes(raw?.message?.type));
+      const boundary=barrier<0?queue.length:barrier;
+      let index=queue.slice(0,boundary).findIndex(raw=>raw?.message?.type!=='DELIVERY_TRACE');
+      if(index<0)index=0;
+      const raw=queue.splice(index,1)[0];space?.();space=null;
+      await handlePacket(raw);
+    }
+  })();
+  try {
+    for await (const raw of readPackets(input)) {
+      queue.push(raw);wake?.();wake=null;
+      // 매우 큰 trace 묶음도 무제한 메모리 대기열로 만들지 않습니다.
+      if(queue.length>=256)await new Promise(resolve=>{space=resolve;});
     }
   } finally {
+    ended=true;wake?.();await processing;
     clearInterval(poll);
     if (instanceId && sessionId) {
       try { await service.request('/api/bridge', 'POST', { instanceId, message: { type: 'DISCONNECT', sessionId,...(resetEpoch===undefined?{}:{resetEpoch}) } }); }

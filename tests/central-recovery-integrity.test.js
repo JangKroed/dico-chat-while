@@ -89,3 +89,13 @@ test('heartbeat checks update while stopped and before failing observation',asyn
   await run();assert.equal(events[0],'update');if(!stopped)assert.ok(events.includes('observe'));
  }
 });
+
+test('느린 업데이트 조회 중에도 heartbeat와 중지 명령 수신을 진행한다',async()=>{
+ let release;const gate=new Promise(resolve=>{release=resolve;});let heartbeats=0,commands=0;
+ const state={sessionId:'s',emergencyStopped:true,attempts:{}};
+ const executor={state,request:async()=>{heartbeats++;return{commands:[{type:'CONTROL'}]};},save:async()=>{},handleCommand:()=>commands++};
+ const run=backgroundFunction('runHeartbeat','connect',{executor,transport:{connected:true},updater:{check:()=>gate}});
+ const running=run();await new Promise(resolve=>setImmediate(resolve));
+ const observed={heartbeats,commands};release();await running;
+ assert.deepEqual(observed,{heartbeats:1,commands:1});
+});

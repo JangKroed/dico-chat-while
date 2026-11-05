@@ -14,6 +14,52 @@ function fixture(t,options={}){
  t.after(async()=>{await delivery.close();rmSync(dir,{recursive:true,force:true});});
  return {delivery,dir};
 }
+test('자동 제보 수집 실패도 재시작 후 같은 사건을 자동 수집·전송한다',async t=>{
+ const {delivery,dir}=fixture(t,{createReport:async()=>{throw Error('temporary read failure');}});
+ delivery.configure({enabled:true,autoSend:true,receiverUrl:'https://receiver.example/report',reporterToken:'x'.repeat(32)});
+ await delivery.queue({automatic:true,incidentId:'collection-failed'}).catch(()=>{});await delivery.close();
+ let sent=0;
+ const restarted=createSupportDelivery({dir,createReport:async()=>report(),now:()=>at+60000,fetchImpl:async(url,options)=>{
+  sent++;const payload=JSON.parse(options.body);return Response.json({reportId:payload.reportId,receiptId:'collection-recovered',receivedAt:at+60000});
+ }});t.after(()=>restarted.close());
+ await restarted.flush();assert.equal(sent,1);assert.equal(restarted.status().counts.sent,1);
+ assert.equal(restarted.status().outbox[0].incidentId,'collection-failed');
+});
+
+test('먼저 시작한 수집이 느려도 뒤의 자동 사건 의도는 즉시 디스크에 남는다',async t=>{
+ let release,entered;const started=new Promise(resolve=>{entered=resolve;});let calls=0;
+ const {delivery,dir}=fixture(t,{createReport:async()=>{calls++;if(calls===1){entered();await new Promise(resolve=>{release=resolve;});}return report();}});
+ delivery.configure({enabled:true,autoSend:true});
+ const first=delivery.queue({automatic:true,incidentId:'first'});await started;
+ const second=delivery.queue({automatic:true,incidentId:'second'});
+ const saved=JSON.parse(readFileSync(join(dir,'state.json'),'utf8'));
+ // 실패한 구현에서도 정리 훅이 멈추지 않도록 대기 작업을 먼저 풀어 줍니다.
+ release();await Promise.all([first,second]);
+ assert.deepEqual(saved.collections.map(c=>c.incidentId),['first','second']);
+});
+
+test('기본 자동 제보는 오프라인 8회 이후에도 동일 보고서로 복구한다',async t=>{
+ let calls=0;const ids=[];
+ const {delivery}=fixture(t,{fetchImpl:async(url,options)=>{
+  const payload=JSON.parse(options.body);ids.push(payload.reportId);calls++;
+  if(calls<=8)throw Error('offline');return Response.json({reportId:payload.reportId,receiptId:'online-again',receivedAt:at});
+ }});
+ delivery.configure({enabled:true,autoSend:true,receiverUrl:'https://receiver.example/report',reporterToken:'x'.repeat(32)});
+ await delivery.queue({automatic:true,incidentId:'long-offline'});
+ for(let n=0;n<9;n++)await delivery.flush({force:true});
+ assert.equal(calls,9);assert.equal(delivery.status().counts.sent,1);assert.equal(new Set(ids).size,1);
+});
+
+test('구형 8회 소진 제보는 현재 동의가 유지된 재시작에서 다시 전송한다',async t=>{
+ const {delivery,dir}=fixture(t,{maxAttempts:8,fetchImpl:async()=>{throw Error('offline');}});
+ delivery.configure({enabled:true,autoSend:true,receiverUrl:'https://receiver.example/report',reporterToken:'x'.repeat(32)});
+ const item=await delivery.queue({automatic:true,incidentId:'old-budget'});
+ for(let n=0;n<8;n++)await delivery.flush({force:true});assert.equal(delivery.status().outbox[0].nextAttemptAt,null);await delivery.close();
+ const restarted=createSupportDelivery({dir,createReport:async()=>report(),now:()=>at+60000,fetchImpl:async(url,options)=>{
+  const r=JSON.parse(options.body);assert.equal(r.reportId,item.reportId);return Response.json({reportId:r.reportId,receiptId:'migrated',receivedAt:at+60000});
+ }});t.after(()=>restarted.close());
+ await restarted.flush();assert.equal(restarted.status().counts.sent,1);assert.equal(restarted.status().outbox[0].attempts,9);
+});
 test('automatic reports exclude bodies, names and arbitrary error text even when manual sharing is enabled',async t=>{
  const {delivery,dir}=fixture(t);
  delivery.configure({enabled:true,autoSend:true,includeBodies:true,includeNames:true});

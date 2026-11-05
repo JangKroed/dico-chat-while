@@ -98,7 +98,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
   const canSend=async(message,tabId)=>(await authorizeInput(message,tabId)).allowed;
   async function report(a) {
     const evidence=deliveryEvidence(a.result?.deliveryEvidence);
-    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',...(a.result?.recoveryCommandId?{recoveryCommandId:a.result.recoveryCommandId}:{}),messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
+    await retryRequest({type:'DELIVERY_RESULT',attemptId:a.attemptId,outcome:a.result?.outcome || 'unknown',...(a.result?.recoveryCommandId?{recoveryCommandId:a.result.recoveryCommandId}:{}),...(a.result?.receiptOriginSessionId?{receiptOriginSessionId:a.result.receiptOriginSessionId}:{}),messageId:a.result?.messageId,confirmationBasis:a.result?.confirmationBasis,confirmationMs:a.result?.confirmationMs,executionBlocked:a.result?.executionBlocked===true,reasonCode:safeReason(a.result?.reasonCode) || 'executor_result',...(evidence?{deliveryEvidence:evidence}:{})});
     a.reported=true;await save();
     const samples=pendingCooldownSamples.get(a.attemptId)||[];pendingCooldownSamples.delete(a.attemptId);
     if(a.phase==='confirmed')for(const sample of samples)await cooldownSample({deliveryId:a.attemptId,sample},a.tabId);
@@ -175,14 +175,25 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(a.phase!=='confirmed'||!a.reported){const queued=pendingCooldownSamples.get(a.attemptId)||[];if(queued.length>=4)return false;queued.push(sample);pendingCooldownSamples.set(a.attemptId,queued);return true;}
     try{return(await request({type:'COOLDOWN_SAMPLE',attemptId:a.attemptId,runId:a.runId,configVersion:a.configVersion,sample}))?.ok===true;}catch{return false;}
   }
-  async function inspectBeforePrepare(a,message) {
-    let timer,cancel;
+  async function queryPage(a,message,{tabId=a.tabId,allowStopped=false}={}) {
+    let timer,cancel,cancelled;
+    const readOnlyRecovery=['DICO_DELIVERY_RECEIPT','DICO_RECONCILE'].includes(message.type);
     try {
+      const cancellation=new Promise((_,reject)=>{
+        cancel=(code='EXECUTION_STOPPED')=>{cancelled=Object.assign(Error('Discord 탭 읽기 조회를 취소했습니다.'),{code,retryable:readOnlyRecovery});reject(cancelled);};
+        inspectionCancels.set(a,cancel);
+        if(!allowStopped&&(volatileStops.has(a.groupId)||volatileStoppedRuns.has(a.runId)))cancel();
+      });
       return await Promise.race([
-        chrome.tabs.sendMessage(a.tabId,message),
-        new Promise((_,reject)=>{cancel=()=>reject(Object.assign(Error('중지 요청으로 Discord 탭 상태 조회를 취소했습니다.'),{code:'EXECUTION_STOPPED'}));inspectionCancels.set(a,cancel);if(volatileStops.has(a.groupId)||volatileStoppedRuns.has(a.runId))cancel();}),
-        new Promise((_,reject)=>{timer=setTimeout(()=>reject(Object.assign(Error('Discord 탭 상태 확인 응답이 지연됩니다. 초안을 보존하고 준비를 중단합니다.'),{code:'CONTENT_INSPECTION_TIMEOUT'})),20000);})
+        Promise.resolve().then(()=>{if(cancelled)throw cancelled;return chrome.tabs.sendMessage(tabId,message);}),
+        cancellation,
+        new Promise((_,reject)=>{timer=setTimeout(()=>reject(Object.assign(Error('Discord 탭 상태 조회 응답이 지연됩니다.'),{code:'CONTENT_INSPECTION_TIMEOUT',retryable:readOnlyRecovery})),20000);})
       ]);
+    } finally {clearTimeout(timer);if(inspectionCancels.get(a)===cancel)inspectionCancels.delete(a);}
+  }
+  async function inspectBeforePrepare(a,message) {
+    try {
+      return await queryPage(a,message);
     } catch(error) {
       // 읽기 전용 조회가 멈춰도 중지 명령이 같은 대기열에서 영구 대기하지 않게 합니다.
       // Enter를 요청하지 않은 현재 준비만 종료하며, 늦은 조회 응답은 사용하지 않습니다.
@@ -190,7 +201,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true};await save();
       }
       throw error;
-    } finally {clearTimeout(timer);if(inspectionCancels.get(a)===cancel)inspectionCancels.delete(a);}
+    }
   }
   async function awaitPrepared(a) {
     const started=now(),monoStarted=monotonicNow();
@@ -327,15 +338,18 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
           // A response port can close after content already observed completion.
           // Query that exact operation's cached result once; never resend Enter
           // or reconstruct completion from today's empty editor/history.
-          let receipt;try{receipt=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVERY_RECEIPT',target:target(a),delivery:delivery(a)});}catch{}
+          let receipt;try{receipt=await queryPage(a,{type:'DICO_DELIVERY_RECEIPT',target:target(a),delivery:delivery(a)});}catch{}
           if(transport.connected&&a.phase==='executing'&&a.sessionId===state.sessionId&&receipt?.status==='confirmed'&&receipt.confirmationBasis==='composer_cleared'&&composerClearedEvidence(receipt.deliveryEvidence))result=receipt;
         }
         if(result?.status==='confirmed' && (result.confirmationBasis==='composer_cleared'?composerClearedEvidence(result.deliveryEvidence):(!result.confirmationBasis||result.confirmationBasis==='message_observed')&&/^\d{17,20}$/.test(result.messageId || ''))) {
           a.phase='confirmed';a.result={outcome:'confirmed',...(result.messageId?{messageId:result.messageId}:{}),confirmationBasis:result.confirmationBasis||'message_observed',confirmationMs:result.timing?.confirmationMs,...diagnostic(result)};
-        } else if(result?.status==='blocked' || result?.status==='deferred') {
+        } else if((result?.status==='blocked' || result?.status==='deferred')&&result?.deliveryEvidence?.enterAttempted!==true) {
           a.phase='not_sent';a.result={outcome:'not_sent',executionBlocked:true,...diagnostic(result)};
         } else {
-          a.phase='unknown';a.result={outcome:'unknown',...(finalUnknownResponse(result)?{executionBlocked:true}:{}),...diagnostic(result)};
+          // Enter 이후의 다음 승인 거절은 과거 미발송을 증명하지 않습니다.
+          // 응답이 반환되어 로컬 호출이 끝난 사실과 게시 여부를 별도로 보존합니다.
+          const drained=finalUnknownResponse(result)||['blocked','deferred'].includes(result?.status)&&result?.deliveryEvidence?.enterAttempted===true;
+          a.phase='unknown';a.result={outcome:'unknown',...(drained?{executionBlocked:true}:{}),...diagnostic(result)};
           // A final observation drains the content operation; the persisted phase
           // also revokes any delayed AUTHORIZE_ENTER response. Lost responses
           // and busy/duplicate guards provide no such evidence.
@@ -353,10 +367,14 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       if(a && !a.enterRequested){a.phase='cancelled';await save();}
     } else if(c.type==='RECONCILE') {
       const prior=state.attempts[p.attemptId];
-      if(prior?.result?.outcome==='confirmed'&&(prior.result.confirmationBasis!=='composer_cleared'||prior.sessionId===state.sessionId&&composerClearedEvidence(prior.result.deliveryEvidence))){
+      // 과거 결과 조회는 새 발송이 아닙니다. 원래 실행·설정·본문·탭을 바꾸지
+      // 않고, 현재 조회 명령에 실제 제출의 원래 세션을 명시적으로 연결합니다.
+      const historical=prior&&prior.sessionId!==state.sessionId;
+      if(prior&&(!matches(prior,p)||prior.runId!==p.runId||prior.groupId!==p.groupId||historical&&p.originSessionId!==prior.sessionId))throw Object.assign(Error('복구 명령과 원래 발송 범위가 다릅니다.'),{code:'STALE_ATTEMPT'});
+      if(prior?.result?.outcome==='confirmed'&&(prior.result.confirmationBasis!=='composer_cleared'||composerClearedEvidence(prior.result.deliveryEvidence))){
         // 완료를 저장한 뒤 보고만 유실된 경우에도 이번 조회 ID로 재보고합니다.
         // 과거 조회 ID는 이미 끝났을 수 있으므로 현재 명령의 ID로 갱신합니다.
-        if(prior.result.confirmationBasis==='composer_cleared')prior.result.recoveryCommandId=c.id;
+        if(prior.result.confirmationBasis==='composer_cleared'){prior.result.recoveryCommandId=c.id;prior.result.receiptOriginSessionId=prior.sessionId;}
         await report(prior);await ack(c,'applied');
       }
       else {
@@ -365,18 +383,20 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         // 먼저 조회하고, 없을 때만 기존 게시 기록 대조로 넘어갑니다.
         // 현재 빈 입력창으로 성공을 추측하지 않으며 content가 시도/세션/초안을 검증합니다.
         let result;
-        if(prior&&a.sessionId===state.sessionId){
-          try{result=await chrome.tabs.sendMessage(a.tabId,{type:'DICO_DELIVERY_RECEIPT',target:target(a),delivery:delivery(a)});}catch{}
-          // 조회 중 재연결/초기화가 일어났다면 과거 세션 영수증을 현재 결과로 저장하지 않습니다.
-          if(!transport.connected||c.sessionId!==state.sessionId||a.sessionId!==state.sessionId||state.attempts[p.attemptId]!==a)return;
+        const originSessionId=a.sessionId;
+        if(prior){
+          try{result=await queryPage(a,{type:'DICO_DELIVERY_RECEIPT',target:target(a),delivery:delivery(a)},{allowStopped:true});}catch(error){if(error?.retryable)throw error;}
+          // 조회 도중 통신 세션이 다시 바뀌거나 기록이 초기화되면 저장하지 않습니다.
+          if(!transport.connected||c.sessionId!==state.sessionId||a.sessionId!==originSessionId||state.attempts[p.attemptId]!==a)return;
           if(result?.status==='confirmed'&&result.confirmationBasis==='composer_cleared'&&composerClearedEvidence(result.deliveryEvidence)){
-            a.phase='confirmed';a.result={outcome:'confirmed',confirmationBasis:'composer_cleared',recoveryCommandId:c.id,...diagnostic(result)};
+            a.phase='confirmed';a.result={outcome:'confirmed',confirmationBasis:'composer_cleared',recoveryCommandId:c.id,receiptOriginSessionId:originSessionId,...diagnostic(result)};
             await save();await report(a);await ack(c,'applied');state.processed[c.id]=true;await save();return;
           }
         }
         // 게시 이력 대조만 현재 검증 탭에서 수행합니다. 이전 입력·세션·영수증은 바꾸지 않습니다.
         const recoveryTabId=Number.isInteger(p.recoveryTabId)?p.recoveryTabId:a.tabId;
-        try{result=await chrome.tabs.sendMessage(recoveryTabId,{type:'DICO_RECONCILE',target:{...target(a),tabId:recoveryTabId},delivery:delivery(a)});}catch{}
+        try{result=await queryPage(a,{type:'DICO_RECONCILE',target:{...target(a),tabId:recoveryTabId},delivery:delivery(a)},{tabId:recoveryTabId,allowStopped:true});}catch(error){if(error?.retryable)throw error;}
+        if(!transport.connected||c.sessionId!==state.sessionId||prior&&state.attempts[p.attemptId]!==prior)return;
         if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationBasis:'message_observed'};state.attempts[p.attemptId]=a;await save();await report(a);}
         else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});
@@ -402,6 +422,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     const interrupt=()=>{
       if(c?.type!=='CONTROL'||c.sessionId!==state?.sessionId||c.instanceId!==state?.instanceId||state.processed[c.id])return;
       volatileStops.add(c.payload?.groupId);if(c.payload?.runId)volatileStoppedRuns.add(c.payload.runId);
+      // 과거 제출 세션의 unknown 조회도 현재 중지 명령의 대기열을 붙잡지
+      // 않습니다. 조회 취소는 과거 결과를 미발송으로 바꾸지 않습니다.
+      for(const [a,cancel] of inspectionCancels)if(a.groupId===c.payload?.groupId&&(!c.payload?.runId||a.runId===c.payload.runId))cancel();
       for(const a of Object.values(state.attempts)){
         if(a.groupId!==c.payload?.groupId||(c.payload?.runId&&a.runId!==c.payload.runId)||a.sessionId!==state.sessionId||!['preparing','prepared','executing'].includes(a.phase))continue;
         // 읽기 전용 조회는 응답을 기다릴 필요 없이 대기열을 즉시 해제합니다.
@@ -411,7 +434,11 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     };
     if(state)interrupt();
     const job=(async()=>{
-      inFlight++;try {await load();interrupt();const key=c.type==='CLOSE_CHANNEL'?'config':c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
+      inFlight++;try {await load();interrupt();
+      // 페이지 실행이 끝나 로컬 결과를 저장한 뒤에는 느린 중앙 보고만 남을 수
+      // 있습니다. 이때 중지는 보고 lane과 분리하며 실행 중인 입력은 여전히 drain합니다.
+      const controlIdle=c.type==='CONTROL'&&Object.values(state.attempts).filter(a=>a.groupId===c.payload?.groupId&&(!c.payload?.runId||a.runId===c.payload.runId)).every(a=>['confirmed','not_sent','cancelled'].includes(a.phase)||a.phase==='unknown'&&a.result?.executionBlocked===true);
+      const key=controlIdle?`control:${c.payload?.groupId}`:c.type==='CLOSE_CHANNEL'?'config':c.payload?.bindingId || (c.payload?.attemptId && state.attempts[c.payload.attemptId]?.bindingId) || c.payload?.groupId || 'config';
       const lane=(lanes.get(key) || Promise.resolve()).then(()=>perform(c)).catch(async error=>{
         state.lastError=String(error.message || error).slice(0,250);
         const attempt=state.attempts[c.payload?.attemptId];
@@ -437,6 +464,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       await load();const resetEpoch=s.resetEpoch??0;
       if(!Number.isSafeInteger(resetEpoch)||resetEpoch<0)throw Error('초기화 세대가 올바르지 않습니다.');
       const reset=state.resetPending===true||s.resetRequired===true||resetEpoch!==state.resetEpoch;
+      if(reset||state.sessionId!==s.sessionId||state.instanceId!==s.instanceId)for(const cancel of inspectionCancels.values())cancel('STALE_SESSION');
       if(reset){
         // Remove automation assignments, never Discord tabs or composer text.
         // Central reset only succeeds after active delivery results are resolved.
@@ -449,5 +477,5 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         const task=writes.then(()=>chrome.storage.local.set({dicoCentral:snapshot,dicoCentralTabs:[],dicoCentralAccount:null,dicoCentralWindowId:null}));writes=task.catch(()=>{});await task;state.resetPending=false;
       }else await save();
       return{reset};
-    },async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
+    },async declareLegacy(value){await load();if(!['fresh','legacy-stopped'].includes(value))throw Error('기존 실행기 상태를 선택하세요.');state.legacyDeclaration=value;await save();},get state(){return state;},disconnect(){for(const cancel of inspectionCancels.values())cancel('NATIVE_DISCONNECTED');for(const a of Object.values(state?.attempts || {}))volatileStops.add(a.groupId);}};
 }

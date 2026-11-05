@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {intervalSettings,customIntervalError,intervalPayload,intervalDraftChanged} from '../central/ui/src/interval.ts';
 
+test('직접 주기와 감지·보정 주기 중 긴 값만 계산하며 같은 대기를 더하지 않는다',()=>{
+ for(const [custom,effective,extra] of [[64000,67,0],[70000,70,3],[90000,90,23]]){
+  const info=intervalSettings({intervalMode:'custom',intervalMs:custom,customIntervalMs:custom,slowmodeMs:60000,correctedBaseIntervalMs:67000});
+  assert.equal(info.effectiveSeconds,effective);assert.equal(info.extraSeconds,extra);
+ }
+});
+
 test('auto interval is detected slowmode plus three seconds, including a detected zero',()=>{
   for(const [slowmodeMs,seconds] of [[60000,63],[120000,123],[0,3]]){
     const info=intervalSettings({intervalMode:'auto',intervalMs:60000,slowmodeMs,slowmodeObservedAt:1});

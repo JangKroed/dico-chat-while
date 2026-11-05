@@ -17,6 +17,9 @@ const ACTIVE = new Set(['preparing','permitted','unknown']);
 // 입력 차단 후 연결에서 분리한 미확인 기록은 이력으로만 남기며 재실행하지 않습니다.
 const activeAttempt=a=>ACTIVE.has(a.status)&&!(a.detached===true&&a.status==='unknown'&&a.executionBlocked===true);
 const MAX_PRE_ENTER_WAIT_MS=21_630_000;
+// 입력 준비나 명시적으로 Enter 전임이 입증된 응답에서만 사용하는 복구 사유입니다.
+// 발송 결과가 불명확한 시도에 이 목록을 적용해 새 Enter를 만들지 않습니다.
+const transientPreparationCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE','ACCOUNT_UNVERIFIED','ACCOUNT_UNREADABLE','DRAFT_INSPECTION_UNAVAILABLE','COOLDOWN_UNVERIFIED','AUTHORIZATION_EXPIRED','AUTHORIZATION_UNAVAILABLE','NATIVE_REQUEST_TIMEOUT','NATIVE_DISCONNECTED','NATIVE_SEND_FAILED','SERVICE_UNAVAILABLE','CONTENT_EXCEPTION_BEFORE_ENTER']);
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
@@ -35,15 +38,20 @@ function deliveryEvidence(value){
 const minimumInterval = c => (c.slowmodeMs||0)+3000;
 const cooldownCorrection = c => Number.isSafeInteger(c.cooldownCorrectionMs)&&c.cooldownCorrectionMs>=0?c.cooldownCorrectionMs:0;
 const correctedBaseInterval = c => minimumInterval(c)+cooldownCorrection(c);
-const customExtraInterval = c => c.intervalMode==='custom'?Math.max(0,(c.customIntervalMs??c.intervalMs)-minimumInterval(c)):0;
-const effectiveInterval = c => correctedBaseInterval(c)+customExtraInterval(c);
+// 직접 설정 주기와 감지·보정한 최소 주기는 같은 계정의 대기 조건입니다.
+// 이미 직접 주기에 포함된 여유를 보정값으로 다시 더하지 않습니다.
+const effectiveInterval = c => Math.max(correctedBaseInterval(c),c.intervalMode==='custom'?(c.customIntervalMs??c.intervalMs):0);
+const customExtraInterval = c => c.intervalMode==='custom'?Math.max(0,effectiveInterval(c)-correctedBaseInterval(c)):0;
 const confirmationOffset = c => Number.isFinite(c.lastConfirmationMs)&&c.lastConfirmationMs>=0&&c.lastConfirmationMs<=30000?c.lastConfirmationMs:0;
 const initial = at => ({schemaVersion:1,stateVersion:0,lastEventId:0,resetEpoch:0,service:{status:'ready',startedAt:at},settings:{notificationsEnabled:false,notificationTypes:['delivery_unknown','connection_lost','account_mismatch','command_rejected','storage_failure'],retentionDays:90,hideNotificationNames:true,onboardingStep:0,cooldownMs:300000,notifyRecovery:false,quietHours:{enabled:false,start:'22:00',end:'08:00'}},messages:[],instances:[],accounts:[],targets:[],channels:[],groups:[],attempts:[],commands:[],incidents:[],locks:[],intervals:[]});
 
-export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now()}={}) {
-  const store = new CentralStore(databasePath), listeners=new Set();
+export function createCentralManager({databasePath=':memory:',now=Date.now,monotonicNow=()=>performance.now(),readOnly=false}={}) {
+  const store = new CentralStore(databasePath,{readOnly}), listeners=new Set();
   let state=store.read(), closed=false, storageFailure=null, lastWall=now(), lastMono=monotonicNow();
-  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;state.intervals??=[];state.accounts??=[];state.targets??=[];state.removals??={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};for(const c of state.channels)initializeChannelInterval(c);
+  const loaded=!!state;state??=initial(now());state.resetEpoch??=store.events({type:'settings.reset',limit:1}).length?1:0;state.intervals??=[];state.accounts??=[];state.targets??=[];state.removals??={targets:[],accounts:[],bindings:[],instances:[],closeRequests:[]};
+  // 보고서에서는 저장된 버전·적용 상태·간격을 그대로 읽습니다. 설정 이행은
+  // 실제 작성 코어가 시작할 때만 수행하여 관측하지 않은 새 설정을 만들지 않습니다.
+  if(!readOnly)for(const c of state.channels)initializeChannelInterval(c);
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
   let pending=[];
@@ -53,6 +61,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
    * 구독자 알림은 저장 성공 후에 보내며, 구독자의 오류로 이미 저장한 작업을 취소하지 않습니다.
    */
   function transact(fn){
+    ensure(!readOnly,'READ_ONLY','Read-only inspection cannot execute commands.',403);
     ensure(!closed,'CLOSED','Central manager is closed.',503);ensure(!storageFailure,'STORAGE_FAILURE','Storage failed. New commands are blocked.',503);
     const before=state;state=clone(state);state.stateVersion++;pending=[];
     let result;
@@ -136,8 +145,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     const instance=state.instances.find(i=>i.id===instanceId);if(!instance?.connected)return;
     for(const request of state.removals.closeRequests.filter(r=>r.instanceId===instanceId)){
       const prior=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.instanceId===instanceId&&c.sessionId===instance.sessionId&&c.payload.removalId===request.removalId);
-      if(prior&&(['queued','received','applied'].includes(prior.status)||now()-(prior.rejectedAt||prior.createdAt)<30000))continue;
-      if(prior?.status==='rejected'&&(request.retries||0)>=3)continue;
+      const elapsed=prior?now()-(prior.rejectedAt||prior.createdAt):Infinity;
+      const delay=Math.min(60000,30000*2**Math.min(1,request.retries||0));
+      // 삭제 이력은 이미 확정돼 있습니다. 탭 정리의 일시 실패는 재연결이나
+      // 사용자 재삭제를 기다리지 않고 계속 복구하되 30~60초 간격을 지킵니다.
+      if(prior&&(['queued','received','applied'].includes(prior.status)||elapsed>=0&&elapsed<delay))continue;
       if(!prior)request.retries=0;else if(prior.status==='rejected')request.retries=(request.retries||0)+1;
       const {instanceId:owner,...payload}=request;command('CLOSE_CHANNEL',owner,payload);
     }
@@ -497,15 +509,12 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function failPreparation(a,reasonCode){
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
-    const transient=['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE'].includes(reasonCode);
-    const retryCount=g.prepareRetryCount||0,canRetry=wasRunning&&transient;
+    const canRetry=wasRunning&&transientPreparationCodes.has(reasonCode);
     // Only the service can issue a COMMIT permit. No permit means this attempt
     // cannot press Enter, even if its PREPARE response arrives after timeout.
     a.reasonCode=reasonCode;a.executionBlocked=true;finish(a,'not_sent');
     if(canRetry){
-      g.prepareRetryCount=retryCount+1;g.prepareRetryAfterMono=monotonicNow()+5000;
-      g.waitReason='preparation_retry';g.nextEligibleAt=now()+5000;
-      event('delivery.prepare_retry',{attemptId:a.id,groupId:g.id,reasonCode,retryCount:g.prepareRetryCount},'warning');
+      schedulePreparationRetry(g,a,reasonCode);
     }else if(wasRunning){
       g.status='paused';g.waitReason='preparation_failed';g.nextEligibleAt=null;release(g);
       const cmd=state.commands.find(c=>c.type==='PREPARE'&&c.payload.attemptId===a.id);
@@ -514,6 +523,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       incident('command_rejected',{instanceId:a.instanceId,commandId:cmd?.id,commandType:'PREPARE',groupId:g.id,attemptId:a.id,rejectionCode:reasonCode});
     }
     return true;
+  }
+  function schedulePreparationRetry(g,a,reasonCode){
+    g.prepareRetryCount=(g.prepareRetryCount||0)+1;g.prepareRetryAfterMono=monotonicNow()+5000;
+    g.waitReason='preparation_retry';g.nextEligibleAt=now()+5000;
+    event('delivery.prepare_retry',{attemptId:a.id,groupId:g.id,reasonCode,retryCount:g.prepareRetryCount},'warning');
   }
   function restoreConfirmedDeadlines(){
     const wall=now(),mono=monotonicNow();
@@ -783,7 +797,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
   }
   function importBackup(backup){return transact(()=>restore(backup));}
-  function attemptPayload(a){return{attemptId:a.id,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:normalizeSendRetries(a.maxSendRetries)};}
+  function attemptPayload(a){return{attemptId:a.id,originSessionId:a.sessionId,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:normalizeSendRetries(a.maxSendRetries)};}
   /**
    * 확장 프로토콜의 입구입니다. 세션과 시도 식별자를 확인한 뒤 응답에 맞춰 상태를 전이합니다.
    * 연결 응답, 명령 수신 확인, 실제 발송 결과는 서로 다른 근거이므로 같은 성공으로 취급하지 않습니다.
@@ -833,9 +847,13 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         const a=get('attempts',message.attemptId);ensure(a.instanceId===i.id&&a.sessionId===i.sessionId,'STALE_ATTEMPT','Trace belongs to another execution session.',409);
         ensure(validTraceStage(message.stage)&&Number.isSafeInteger(message.sequence)&&message.sequence>0&&Number.isSafeInteger(message.observedAt)&&message.observedAt>=0,'VALIDATION','Invalid delivery trace.');
         if(message.sequence<=(a.lastTraceSequence||0))return{ok:true,recorded:false};a.lastTraceSequence=message.sequence;
+        const data=traceData(message.data);
+        // 실제 페이지가 보고한 코드만 관측값으로 보존합니다. 설치 manifest나
+        // 연결 확장 버전으로 페이지 코드를 추정하지 않으며 기존 trace를 재사용합니다.
+        if(data.contentVersion||data.contentBuildId)a.codeObservation={...(data.contentVersion?{version:data.contentVersion}:{}),...(data.contentBuildId?{buildId:data.contentBuildId}:{}),observedAt:message.observedAt};
         if(!a.traceWindowAt||now()-a.traceWindowAt>=60000){a.traceWindowAt=now();a.traceWindowCount=0;}
         if(a.traceWindowCount>=120&&!['finished','exception'].includes(message.stage))return{ok:true,recorded:false};a.traceWindowCount++;
-        event('delivery.trace',{attemptId:a.id,groupId:a.groupId,instanceId:i.id,stage:message.stage,observedAt:message.observedAt,sequence:message.sequence,data:traceData(message.data)});return{ok:true,recorded:true};
+        event('delivery.trace',{attemptId:a.id,groupId:a.groupId,instanceId:i.id,stage:message.stage,observedAt:message.observedAt,sequence:message.sequence,data});return{ok:true,recorded:true};
       }
       if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&activeAttempt(a)&&!(a.status==='unknown'&&a.executionBlocked===true))};
       if(message.type==='CONNECTION_PROGRESS'){
@@ -1016,6 +1034,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(message.executionBlocked===true&&message.attemptId&&message.attemptId===c.payload.attemptId){const a=get('attempts',message.attemptId);ensure(a.instanceId===i.id,'INSTANCE_MISMATCH','Attempt belongs to another instance.');a.executionBlocked=true;
             if(a.status==='preparing')finish(a,'cancelled');
             else if(a.status==='unknown'&&!a.permitId&&!a.permitIssued)finish(a,'not_sent');
+            else if(a.status==='permitted')markUnknown(a,'EXECUTION_STOPPED');
           }
           controlComplete(get('groups',c.payload.groupId));
         }
@@ -1062,28 +1081,41 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(TERMINAL.has(a.status)){ensure(a.status===message.outcome,'RESULT_CONFLICT','Final outcome cannot be overwritten.',409);return{ok:true,attempt:publicAttempt(a)};}
         if(a.detached===true&&a.executionBlocked===true){event('delivery.detached_report',{attemptId:a.id,outcome:message.outcome});return{ok:true,attempt:publicAttempt(a)};}
         if(message.executionBlocked===true)a.executionBlocked=true;
-        if(!a.deliveryEvidence){const evidence=deliveryEvidence(message.deliveryEvidence);if(evidence)a.deliveryEvidence=evidence;}
+        const reportedEvidence=deliveryEvidence(message.deliveryEvidence);
+        if(!a.deliveryEvidence&&reportedEvidence)a.deliveryEvidence=reportedEvidence;
         if(message.outcome==='unknown'){
           const allowedReasons=new Set(['EXECUTION_STOPPED','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','draft-retained','uncertain','no_response','content_unavailable','reconcile_inconclusive','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED']);
           const reasonCode=allowedReasons.has(message.reasonCode)?message.reasonCode:'result_unknown';
           if(a.status!=='unknown')markUnknown(a,reasonCode);return{ok:true};
         }
+        const group=state.groups.find(g=>g.id===a.groupId);
+        const beforeEnter=reportedEvidence?.phase==='commit'&&['inspect','authorize','stable'].includes(reportedEvidence.stage)&&reportedEvidence.enterAttempted===false&&reportedEvidence.expectedDraftSubmitted!==true&&reportedEvidence.composerCleared!==true&&(reportedEvidence.retryCount||0)===0&&!(a.sendRetryCount>0);
+        const retryUnsent=message.outcome==='not_sent'&&a.status==='permitted'&&a.sessionId===i.sessionId&&a.executionBlocked===true&&beforeEnter&&transientPreparationCodes.has(message.reasonCode)&&group?.status==='running'&&!group.controlIntent&&group.runId===a.runId&&group.activeAttemptId===a.id;
         if(message.outcome==='confirmed'){
           ensure(message.confirmationBasis===undefined||['message_observed','composer_cleared'].includes(message.confirmationBasis),'VALIDATION','Invalid delivery confirmation basis.');
           if(message.confirmationBasis==='composer_cleared'){
             // unknown 복구는 중앙이 발급한 현재 조회 명령에 대한 영수증만 받습니다.
             // 예전 미확인 시도에 새 입력창의 상태를 소급 적용하지 않습니다.
             const recovery=state.commands.find(c=>c.id===message.recoveryCommandId&&c.type==='RECONCILE'&&c.instanceId===i.id&&c.sessionId===i.sessionId&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status));
-            ensure((a.status==='permitted'||a.status==='unknown'&&a.executionBlocked===true&&recovery)&&a.sessionId===i.sessionId&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
+            // 현재 통신 세션과 실제 제출의 원래 세션은 별개입니다. 재연결로
+            // 제출 세션을 바꾸지 않고 현재 조회 명령에 묶인 원본 영수증만 복구합니다.
+            const originalSession=typeof a.sessionId==='string'&&a.sessionId.length>0&&message.receiptOriginSessionId===a.sessionId&&recovery?.payload.originSessionId===a.sessionId;
+            const sessionMatches=a.sessionId===i.sessionId||a.status==='unknown'&&a.executionBlocked===true&&recovery&&originalSession;
+            ensure((a.status==='permitted'||a.status==='unknown'&&a.executionBlocked===true&&recovery)&&sessionMatches&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
           }else ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
         }
         else {
           ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must confirm the old attempt is blocked.',409);
+          // 새 입력 차단은 과거 Enter의 미발송 증거가 아닙니다. 모순된 결과는
+          // 순서 진행/자동 재준비에 사용하지 않고 기존 시도를 보존합니다.
+          ensure(reportedEvidence?.enterAttempted!==true,'EXECUTION_UNCERTAIN','An attempted submission cannot be declared unsent from execution blocking alone.',409);
           if(['deferred','blocked','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED'].includes(message.reasonCode))a.reasonCode=message.reasonCode;
-          if(['deferred','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent){g.status='needs_review';g.waitReason='discord_cooldown';}}
+          if(!retryUnsent&&['deferred','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT'].includes(message.reasonCode)){const g=get('groups',a.groupId);if(!g.controlIntent&&!['stopped','paused'].includes(g.status)){g.status='needs_review';g.waitReason='discord_cooldown';}}
         }
         if(message.outcome==='confirmed'&&message.confirmationBasis==='composer_cleared')a.deliveryEvidence=deliveryEvidence(message.deliveryEvidence);
-        return{ok:true,attempt:publicAttempt(finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs,confirmationBasis:message.confirmationBasis}))};
+        const finished=finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs,confirmationBasis:message.confirmationBasis});
+        if(retryUnsent)schedulePreparationRetry(group,a,message.reasonCode);
+        return{ok:true,attempt:publicAttempt(finished)};
       }
       if(message.type==='EMERGENCY_STOP'){
         for(const g of state.groups.filter(g=>g.members.some(m=>get('channels',m).instanceId===i.id)&&g.status!=='stopped'))control(g,'stop');event('instance.emergency_stop',{instanceId:i.id},'warning');return{ok:true};
@@ -1225,7 +1257,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   function publicInstance(i){const{sessionId,lastSeenMono,stableSinceMono,...dto}=i;return clone(dto);}
   function deadlineClock(){
     const wall=now(),mono=monotonicNow(),elapsed=mono-lastMono;
-    return{wall,mono,safe:Number.isFinite(wall)&&Number.isFinite(mono)&&elapsed>=0&&elapsed<=15000&&Math.abs((wall-lastWall)-elapsed)<=2000};
+    return{wall,mono,safe:!readOnly&&Number.isFinite(wall)&&Number.isFinite(mono)&&elapsed>=0&&elapsed<=15000&&Math.abs((wall-lastWall)-elapsed)<=2000};
   }
   function channelNextEligibleAt(c,clock){
     if(!clock.safe||storageFailure||state.service.status!=='ready'||state.groups.some(g=>g.controlIntent&&g.members.includes(c.id))||state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a)))return null;
@@ -1234,7 +1266,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(clock.wall<instance.lastSeenAt||c.nextMono!==undefined&&!Number.isFinite(c.nextMono))return null;
     return clock.wall+Math.max(0,(c.nextMono??clock.mono)-clock.mono);
   }
-  function publicChannel(c,clock=deadlineClock()){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),minimumIntervalMs:minimumInterval(c),correctedBaseIntervalMs:correctedBaseInterval(c),cooldownCorrectionMs:cooldownCorrection(c),customExtraMs:customExtraInterval(c),effectiveIntervalMs:effectiveInterval(c),nextEligibleAt:channelNextEligibleAt(c,clock)};}
+  function pageCode(c){
+    const owner=state.instances.find(i=>i.id===c.instanceId);
+    const a=owner?.connected&&c.sessionId===owner.sessionId&&state.attempts.findLast(a=>a.bindingId===c.id&&a.sessionId===c.sessionId&&a.tabId===c.tabId&&a.codeObservation);
+    if(!a)return{state:'unknown'};
+    const elapsed=now()-a.codeObservation.observedAt;
+    return{state:elapsed>=0&&elapsed<=30000?'observed':'stale',...clone(a.codeObservation)};
+  }
+  function publicChannel(c,clock=deadlineClock()){const{sessionId,nextMono,lastConfirmedMono,intervalSyncBaseMs,...dto}=c;return {...clone(dto),pageCode:pageCode(c),minimumIntervalMs:minimumInterval(c),correctedBaseIntervalMs:correctedBaseInterval(c),cooldownCorrectionMs:cooldownCorrection(c),customExtraMs:customExtraInterval(c),effectiveIntervalMs:effectiveInterval(c),nextEligibleAt:channelNextEligibleAt(c,clock)};}
   function publicGroup(g,clock=deadlineClock()){
     const{nextMono,...dto}=g;let nextEligibleAt=null,nextPreparationAt=null;
     if(g.status==='running'&&!g.activeAttemptId&&!g.controlIntent){
@@ -1250,7 +1289,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return{...clone(dto),nextEligibleAt,nextPreparationAt};
   }
   function publicAttempt(a){const{sessionId,readyMono,preparedObservedAt,preEnterWaitObservedAt,permitId,...dto}=a;return {...clone(dto),bodyAvailable:typeof a.body==='string'};}
-  function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}
+  function publicCommand(c){const{sessionId,payload,...dto}=c;const{body,items,permitId,originSessionId,...safe}=payload;return{...clone(dto),payload:clone(safe)};}
   function analytics({from=0,to=Number.MAX_SAFE_INTEGER,groupId,instanceId,accountId,channelId}={}){
     const matches=a=>!a.pruned&&(!groupId||a.groupId===groupId)&&(!instanceId||a.instanceId===instanceId)&&(!accountId||a.accountId===accountId)&&(!channelId||a.channelId===channelId);
     const attempts=state.attempts.filter(a=>a.createdAt>=from&&a.createdAt<=to&&matches(a)),confirmed=state.attempts.filter(a=>a.status==='confirmed'&&a.finalizedAt>=from&&a.finalizedAt<=to&&matches(a));
@@ -1297,7 +1336,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   }
   function configurationToken(){return createHash('sha256').update(JSON.stringify({settings:state.settings,...Object.fromEntries(['messages','channels','groups','instances','accounts','targets'].map(key=>[key,state[key].map(x=>({id:x.id,version:x.version,configVersion:x.configVersion}))]))})).digest('hex');}
   function snapshot(){const clock=deadlineClock();return{serverNow:clock.wall,configurationToken:configurationToken(),schemaVersion:state.schemaVersion,stateVersion:state.stateVersion,lastEventId:state.lastEventId,service:{...clone(state.service),...(storageFailure?{status:'storage_failure'}:{})},settings:clone(state.settings),messages:clone(state.messages),instances:state.instances.map(publicInstance),accounts:state.accounts.map(publicAccount),targets:clone(state.targets),channels:state.channels.map(c=>publicChannel(c,clock)),groups:state.groups.map(g=>publicGroup(g,clock)),attempts:state.attempts.filter((a,index)=>!a.pruned&&(activeAttempt(a)||index>=state.attempts.length-200)).map(publicAttempt),commands:state.commands.slice(-200).map(publicCommand),pendingTabCloses:state.removals.closeRequests.map(r=>{const instance=state.instances.find(i=>i.id===r.instanceId),cmd=state.commands.findLast(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===r.removalId);const{tabId,bindingId,retries,...dto}=r;return{...clone(dto),status:instance?.connected?(cmd?.status||'queued'):'offline',...(cmd?.rejectionCode?{rejectionCode:cmd.rejectionCode}:{})};}),incidents:clone(state.incidents),events:store.recent(100),analytics:analytics()};}
-  if(loaded)transact(()=>{
+  if(loaded&&!readOnly)transact(()=>{
     // 과거 사용자별 횟수 제한은 폐기하되, 활성 시도의 누적 횟수·결과·
     // 잠금은 보존합니다. 바로 아래 재시작 절차에서 이전 실행을 차단하므로
     // 내부 계속 시도 정책으로의 이행이 과거 미확인 발송을 다시 보내지 않습니다.
@@ -1313,11 +1352,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const span of state.intervals.filter(span=>span.to===null)){const old=span.scope==='instance'?state.instances.find(i=>i.id===span.targetId):null;const end=Math.max(span.from,Math.min(now(),old?.lastSeenAt||now()));span.to=end;if(end<now())state.intervals.push({id:id(),scope:span.scope,targetId:span.targetId,reason:'unobserved',from:end,to:now()});}
     for(const i of state.instances){invalidateAccounts(i.id);i.connected=false;i.sessionId=id();delete i.lastSeenMono;}
     for(const c of state.channels){c.verified=false;c.appliedVersion=0;delete c.tabId;delete c.sessionId;delete c.nextMono;delete c.lastConfirmedMono;}
-    // 프로세스 재시작은 새 실행 지시가 아니므로 저장된 보호 복구 예약도 취소합니다.
-    for(const g of state.groups){delete g.autoResume;delete g.reconcileResumeRunId;delete g.nextMono;if(g.status==='running')g.status='resume_required';}
+    // 재시작은 사용자 중지가 아닙니다. 실행 의도가 있던 그룹만 보호 중단으로
+    // 전환하고, 단조 시계·CONTROL은 새 프로세스/세션에서 다시 확보합니다.
+    // 사용자 stop/pause는 복구 표식을 지우므로 이 경로에서 되살리지 않습니다.
+    const resumeGroups=state.groups.filter(g=>g.enabled!==false&&(g.status==='running'||g.autoResume||!g.controlIntent&&g.reconcileResumeRunId===g.runId&&g.runId));
+    for(const g of state.groups){delete g.autoResume;delete g.reconcileResumeRunId;delete g.nextMono;delete g.prepareRetryAfterMono;}
     for(const c of state.commands.filter(c=>['queued','received'].includes(c.status)))c.status='superseded';
-    for(const a of state.attempts.filter(a=>activeAttempt(a)))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
+    for(const g of resumeGroups)control(g,'pause',{systemReason:'service_restart'});
+    // 이미 미확인인 시도의 원래 사유·사건·실행 차단 근거는 재시작으로
+    // 덮어쓰지 않습니다. 진행 중이던 시도만 새로 미확인으로 전환합니다.
+    for(const a of state.attempts.filter(a=>activeAttempt(a)&&a.status!=='unknown'))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
-  else transact(()=>{state.retryPolicyVersion=3;event('service.started');});
+  else if(!readOnly)transact(()=>{state.retryPolicyVersion=3;event('service.started');});
   return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
 }

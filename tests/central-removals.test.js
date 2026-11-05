@@ -1,4 +1,22 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';import {createCentralManager} from '../central/core/index.js';
+
+test('연결 해제의 일시 실패는 3회 이후에도 새 세션 없이 완료하며 연결을 부활시키지 않는다',()=>{
+ let time=1_800_000_000_000;const f=fixture({now:()=>time});
+ try{
+  remove(f,'channel.delete',f.channels[0]);
+  for(let n=0;n<8;n++){
+   const close=f.manager.commands(f.session.instanceId).find(c=>c.type==='CLOSE_CHANNEL');assert.ok(close,`복구 ${n+1}회`);
+   f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:close.id,status:'rejected',rejectionCode:'CLOSE_CHANNEL_FAILED'},f.session.instanceId);
+   f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);assert.equal(f.manager.commands(f.session.instanceId).filter(c=>c.type==='CLOSE_CHANNEL').length,0);
+   time+=60000;f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);
+  }
+  const close=f.manager.commands(f.session.instanceId).find(c=>c.type==='CLOSE_CHANNEL');assert.ok(close);
+  f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:close.id,status:'applied'},f.session.instanceId);
+  assert.equal(f.manager.snapshot().pendingTabCloses.length,0);
+  f.manager.bridge({type:'OBSERVATION',sessionId:f.session.sessionId,legacyFrozen:true,legacyPending:false,channels:f.records},f.session.instanceId);
+  assert.equal(f.manager.snapshot().channels.length,f.channels.length-1);
+ }finally{f.manager.close();}
+});
 const clock={now:()=>1_800_000_000_000,monotonicNow:()=>1000};
 function fixture(options={}){const manager=createCentralManager({...clock,...options}),session=manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['close-channel-v1']}),records=[1,2,3].map(n=>({accountId:String(110+n),guildId:'222',channelId:'333',name:'공지',tabId:n,verified:true}));const observe=(items=records,owner=session)=>manager.bridge({type:'OBSERVATION',sessionId:owner.sessionId,legacyFrozen:true,legacyPending:false,channels:items},owner.instanceId);observe();const channels=manager.snapshot().channels,group=manager.execute('group.create',{name:'테스트 그룹',members:channels.map(c=>c.id),intervalMs:20000});return{manager,session,records,channels,group,observe};}
 const remove=(f,action,entity)=>f.manager.execute(action,{id:entity.id,expectedVersion:entity.version});
@@ -23,7 +41,22 @@ test('explicit backup restore clears only restored deletion scopes and matching 
 
 test('reset clears old deletion markers and pending closes under the new generation',()=>{const f=fixture();try{remove(f,'instance.delete',f.manager.snapshot().instances[0]);f.manager.execute('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:f.manager.snapshot().configurationToken});const hello=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId,resetEpoch:1});assert.equal(hello.removed,undefined);assert.equal(hello.commands.some(c=>c.type==='CLOSE_CHANNEL'),false);assert.equal(f.manager.snapshot().pendingTabCloses.length,0);f.manager.bridge({type:'OBSERVATION',sessionId:hello.sessionId,resetEpoch:1,legacyFrozen:true,legacyPending:false,channels:f.records},hello.instanceId);assert.equal(f.manager.snapshot().channels.length,3);}finally{f.manager.close();}});
 
-test('failed closes retry with fresh command IDs at bounded intervals and clear only after applied acknowledgment',()=>{let time=1_800_000_000_000;const f=fixture({now:()=>time});try{remove(f,'channel.delete',f.channels[0]);let previous;for(let round=0;round<4;round++){const close=f.manager.commands(f.session.instanceId).find(c=>c.type==='CLOSE_CHANNEL');assert.ok(close);assert.notEqual(close.id,previous);previous=close.id;f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:close.id,status:'rejected',rejectionCode:'CLOSE_CHANNEL_FAILED'},f.session.instanceId);assert.equal(f.manager.snapshot().pendingTabCloses[0].status,'rejected');f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);assert.equal(f.manager.commands(f.session.instanceId).length,0);time+=30000;f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);}assert.equal(f.manager.commands(f.session.instanceId).length,0);const hello=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId});const close=hello.commands.find(c=>c.type==='CLOSE_CHANNEL');assert.ok(close);f.manager.bridge({type:'ACK',sessionId:hello.sessionId,commandId:close.id,status:'applied'},hello.instanceId);assert.equal(f.manager.snapshot().pendingTabCloses.length,0);assert.ok(f.manager.snapshot().incidents.every(i=>i.status==='resolved'));}finally{f.manager.close();}});
+test('탭 정리는 30~60초 경계를 지키고 현재 세션 ACK가 올 때까지 계속한다',()=>{
+ let time=1_800_000_000_000;const f=fixture({now:()=>time});
+ try{
+  remove(f,'channel.delete',f.channels[0]);let previous;
+  for(let round=0;round<6;round++){
+   const close=f.manager.commands(f.session.instanceId).find(c=>c.type==='CLOSE_CHANNEL');assert.ok(close);assert.notEqual(close.id,previous);previous=close.id;
+   f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:close.id,status:'rejected',rejectionCode:'CLOSE_CHANNEL_FAILED'},f.session.instanceId);
+   assert.equal(f.manager.snapshot().pendingTabCloses[0].status,'rejected');
+   const gap=round===0?30000:60000;time+=gap-1;f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);assert.equal(f.manager.commands(f.session.instanceId).length,0);
+   time++;f.manager.bridge({type:'HEARTBEAT',sessionId:f.session.sessionId},f.session.instanceId);
+  }
+  const close=f.manager.commands(f.session.instanceId).find(c=>c.type==='CLOSE_CHANNEL');assert.ok(close);
+  f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:close.id,status:'applied'},f.session.instanceId);
+  assert.equal(f.manager.snapshot().pendingTabCloses.length,0);assert.ok(f.manager.snapshot().incidents.every(i=>i.status==='resolved'));
+ }finally{f.manager.close();}
+});
 
 test('deleting a target while opening it queues a durable exact-scope close without guessing a tab',()=>{const f=fixture();try{const hello=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId,capabilities:['open-channel-v1']});f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:hello.sessionId,accountId:'111',verified:true,legacyFrozen:true,legacyPending:false},hello.instanceId);const target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/444'}),account=f.manager.snapshot().accounts.find(a=>a.accountId==='111');const opened=f.manager.execute('channel.connect',{accountId:account.id,targetId:target.id});remove(f,'target.delete',target);const s=f.manager.snapshot();assert.equal(s.commands.find(c=>c.id===opened.command.id).status,'superseded');const close=s.commands.find(c=>c.type==='CLOSE_CHANNEL');assert.equal(close.payload.channelId,'444');assert.equal(close.payload.accountId,'111');assert.equal(close.payload.tabId,undefined);}finally{f.manager.close();}});
 

@@ -7,6 +7,11 @@ import {join} from 'node:path';
 import {createCentralApplication} from '../central/runtime/http.mjs';
 
 const origin='http://127.0.0.1:43127',bridgeToken='b'.repeat(64);
+test('읽기 전용 Native 상태 응답은 설치 파일과 별개인 실행 중앙 버전을 반환한다',async t=>{
+ const app=createCentralApplication({manager:manager(),origin,bridgeToken,appVersion:'0.4.44'});t.after(()=>app.close());
+ const r=await request(app,'/api/bridge/status',{headers:{authorization:`Bearer ${bridgeToken}`}});
+ assert.equal(JSON.parse(r.body).appVersion,'0.4.44');assert.equal(r.body.includes(bridgeToken),false);
+});
 test('진단 이벤트 폭주가 발송 처리 안에서 매번 전체 화면을 계산하지 않는다',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});let push,reads=0,revision=0,onClose;
  const chunks=[],m={...manager(),snapshot:()=>{reads++;return{revision};},subscribe:fn=>{push=fn;return()=>{};}};
