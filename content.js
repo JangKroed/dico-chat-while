@@ -23,6 +23,7 @@
   const assertOperationActive=()=>{if(activeOperation?.cancelled)throw Object.assign(Error('중단 요청으로 입력을 차단했습니다.'),{code:'EXECUTION_STOPPED'});};
   const seenDeliveries = new Set();
   const completedDeliveries = new Map();
+  let lastManagedRetryProfile = null;
   const RECEIPT_TTL_MS=600000;
   const managedTiming=target=>target?.managed===true&&target?.coordinated===true;
   /**
@@ -937,6 +938,7 @@
     // Never include message text, DOM, URLs or raw exceptions in this object.
     const completed={...result,deliveryEvidence:{...evidence,...result.deliveryEvidence}};
     if(target?.coordinated===true&&delivery?.phase==='commit'&&completed.status==='confirmed'&&completed.confirmationBasis==='composer_cleared'){
+      lastManagedRetryProfile={path:location.pathname,accountId:target.ownUserId,at:Date.now(),retryCount:completed.deliveryEvidence.retryCount};
       // Retain the observed terminal result, never infer a receipt from a later
       // empty editor. This memory disappears with the content script/document.
       completedDeliveries.set(delivery.id,{result:completed,at:Date.now(),text:delivery.text,startedAt:delivery.startedAt,sessionId:delivery.sessionId,accountId:target.ownUserId,guildId:target.guildId,channelId:target.channelId,path:location.pathname,editor:editors()[0]});
@@ -1122,7 +1124,9 @@
           // anchor, so it confirms delivery without calibrating its duration.
           if(createdAt>=enterAt||outcome.confirmationBasis==='composer_cleared'&&retryCount===0)observeCooldown(target,delivery,enterAt,enterMono);
         }
-        trace('finished',{result:outcome.status,messageId:outcome.messageId});return afterEnter(outcome);
+        const result=afterEnter(outcome);
+        trace('finished',{result:result.status,code:result.code,retryCount});
+        return result;
       };
       for(;;){
         if(retryCount>0){
@@ -1131,7 +1135,16 @@
           const permission=await requestDeliveryPermission(target,delivery,{type:'DICO_RETRY_WAIT',id:delivery.id,phase:'commit',retryCount,cooldownMs:initialCooldownMs,elapsedMs:0},retryObservation);
           observed=await retryObservation();if(observed)return finishOutcome(observed);
           if(permission?.allowed!==true)return finishOutcome({status:'uncertain',code:permission?.code||'RETRY_CANCELLED',error:'재시도 권한이 취소되어 남은 초안을 보존합니다.'});
-          trace('retry-wait',{retryCount,maxSendRetries:evidence.maxSendRetries,elapsedMs:Date.now()-retryStarted});
+          // 같은 초안이 세 번 이상 남고 화면 쿨다운이 0이면, 장기 반복 징후로 기록합니다.
+          // 실제 대기가 보이면 그 대기만 사용합니다. 관찰 중에는 새 Enter 권한을 발급받지 않습니다.
+          const retryCooldown=slowmode(editor);
+          const retryBackoffMs=managedTiming(target)&&retryCount>=3&&retryCooldown.cooldownKnown&&retryCooldown.cooldownMs===0?500:0;
+          trace('retry-wait',{retryCount,maxSendRetries:evidence.maxSendRetries,retryBackoffMs,retryPermitMs:Date.now()-retryStarted,code:'DELIVERY_DRAFT_RETAINED'});
+          if(retryBackoffMs>0){
+            await deliveryDelay(target,retryBackoffMs);
+            observed=await retryObservation();
+            if(observed)return finishOutcome(observed);
+          }
           const ready=await prepareCommit(retryCount,initialCooldownMs);if(ready)return finishOutcome(ready);
           observed=await retryObservation();if(observed)return finishOutcome(observed);
         }
@@ -1148,7 +1161,13 @@
         assertOperationActive();
         if(!watcher)watcher = watchMessage(editor, delivery.text, ownUserId(target), enterAt, observation => trace('observation', observation),target.skipConfirmation,evidence.maxSendRetries===null||evidence.maxSendRetries>0,managedTiming(target),target.coordinated&&delivery.phase==='commit'?target:null,()=>requestDeliveryPermission(target,delivery,{type:'DICO_OBSERVE_WAIT',id:delivery.id,phase:'commit',retryCount,elapsedMs:Math.max(0,Date.now()-enterAt)}));
         else if(!watcher.rearm())return finishOutcome(watcher.retryOutcome());
-        trace('before-enter');
+        // 같은 계정·채널의 최근 반복 기록은 다음 발송의 사전 진단에만 사용합니다.
+        // 과거 지연만으로 현재 쿨다운이나 최초 Enter 가능 시각을 바꾸지 않습니다.
+        const profile=lastManagedRetryProfile,profileAge=profile?Date.now()-profile.at:-1;
+        const retryRisk=managedTiming(target)&&retryCount===0&&profile?.path===location.pathname&&
+          profile.accountId===target.ownUserId&&profileAge>=0&&profileAge<=RECEIPT_TTL_MS&&
+          profile.retryCount>=3&&!cooldown.slowmodeDetected;
+        trace('before-enter',{retryCount,retryRisk,...(retryRisk?{priorRetryCount:profile.retryCount}:{})});
         operation.cancel=()=>watcher?.cancel('EXECUTION_STOPPED');
         assertOperationActive();
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
@@ -1164,7 +1183,14 @@
         editor.dispatchEvent(keyup);
         evidence.enterDefaultPrevented=keydown.defaultPrevented===true;
         evidence.keyupDefaultPrevented=keyup.defaultPrevented===true;
-        trace('enter-dispatched', {enterPrevented:keydown.defaultPrevented,keyupPrevented:keyup.defaultPrevented});
+        trace('enter-dispatched', {
+          retryCount,
+          cooldownMs:cooldown.cooldownMs,
+          cooldownKnown:cooldown.cooldownKnown,
+          slowmodeDetected:cooldown.slowmodeDetected,
+          enterPrevented:keydown.defaultPrevented,
+          keyupPrevented:keyup.defaultPrevented,
+        });
         evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;
         const flags=['newMessage','matchingMessage','sendingSeen','failedSeen','authorMismatch','authorUnknown','timeMismatch'];
