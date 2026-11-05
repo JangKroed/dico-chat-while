@@ -235,3 +235,25 @@ test('입력 차단 후 연결에서 분리한 미확인 이력은 보존하면�
  const s=idle();s.attempts=[{id:'archived',status:'unknown',detached:true,executionBlocked:true}];
  assert.equal(safeToUpdate(s),true);s.attempts[0].executionBlocked=false;assert.equal(safeToUpdate(s),false);
 });
+
+for(const incompatible of [false,true])test(`시작 실패 자동 복귀는 현재 설정 호환성을 ${incompatible?'거절해 두 코드와 DB를 보존한다':'검증하고 설정을 보존한다'}`,async t=>{
+ const {runUpdateWorker}=await import('../central/runtime/updater.mjs');
+ const {createCentralManager}=await import('../central/core/index.js');
+ const f=await workerFixture(t);f.job.workerNode=process.execPath;await (await import('../central/runtime/updater.mjs')).writeUpdateJSON(f.jobPath,f.job);
+ await mkdir(join(f.job.app,'central/core'),{recursive:true});
+ await writeFile(join(f.job.app,'central/package.json'),JSON.stringify({name:'dico-manager',type:'module',version:'0.4.1'}));
+ const core=new URL('../central/core/index.js',import.meta.url).href;
+ // 이전 코드의 호환/비호환 시작 동작을 실제 복제 DB에서 실행한다.
+ await writeFile(join(f.job.app,'central/core/index.js'),`import {createCentralManager as create} from ${JSON.stringify(core)};
+ export function createCentralManager(options){const manager=create(options);${incompatible?"const message=manager.snapshot().messages[0];manager.execute('message.update',{id:message.id,expectedVersion:message.version,name:message.name,body:'손실된 문구'});":''}return manager;}`);
+ const manager=createCentralManager({databasePath:join(f.job.directory,'central.sqlite')});
+ manager.execute('message.create',{name:'보존',body:'저장된 문구'});manager.execute('settings.update',{retentionDays:180});manager.close();
+ const before=await readFile(join(f.job.directory,'central.sqlite'));let restarts=0;
+ await runUpdateWorker(f.jobPath,{run:f.run,fetchRequest:async()=>({ok:true}),waitStopped:async()=>{},restart:async()=>{if(++restarts===1)throw Object.assign(Error('candidate exited'),{rollbackSafe:true});}});
+ assert.equal(restarts,incompatible?1:2);
+ assert.deepEqual(await readFile(join(f.job.directory,'central.sqlite')),before);
+ assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),incompatible?'new':'old');
+ const status=await f.readStatus();
+ if(incompatible){assert.equal(status.diagnostic.code,'ROLLBACK_INCOMPATIBLE');assert.equal(await readFile(join(f.job.workDirectory,'previous/central/marker'),'utf8'),'old');}
+ else assert.equal(status.message,'restart_rolled_back');
+});

@@ -13,7 +13,10 @@ async function fixture(t){
  const put=async(path,text)=>{await mkdir(join(path,'..'),{recursive:true});await writeFile(path,text);};
  for(const [directory,version] of [[join(root,'extension'),'0.4.19'],[copy,'0.4.13']]){
   await put(join(directory,'manifest.json'),JSON.stringify({key,version}));await put(join(directory,'background.js'),version);
-  await put(join(directory,'build-info.js'),`export const BUILD_ID = '${await fingerprintExtension(directory)}';\n`);
+  await put(join(directory,'content.js'),`const CONTENT_VERSION = '${version}';\nconst CONTENT_BUILD_ID = 'unmanaged';`);
+  const buildId=await fingerprintExtension(directory);
+  await put(join(directory,'build-info.js'),`export const BUILD_ID = '${buildId}';\n`);
+  await put(join(directory,'content.js'),`const CONTENT_VERSION = '${version}';\nconst CONTENT_BUILD_ID = '${buildId}';`);
  }
  await put(join(copy,'../allowed_extensions.json'),JSON.stringify({extensionIds:[extensionId]}));
  await put(join(copy,'../central/package.json'),JSON.stringify({name:'dico-manager',version:'0.4.13'}));
@@ -78,4 +81,13 @@ test('an unsupported profile does not prevent another verified delivered copy fr
  const result=await installedExtensionStatus(valid.root,{...valid.options,browserRoots:[unsupported.browser,valid.browser]});
  assert.equal(await readFile(join(unsupported.copy,'background.js'),'utf8'),'0.4.13');assert.equal(await readFile(join(valid.copy,'background.js'),'utf8'),'0.4.19');
  assert.equal(result.repairedCopies,1);assert.equal(result.reason,'EXTENSION_SOURCE_MANUAL');assert.equal(result.reloadSafe,true);
+});
+
+test('등록 복사본의 콘텐츠 빌드 표식만 손상되어도 정상 설치본으로 자동 복구한다',async t=>{
+ const r=await fixture(t);await installedExtensionStatus(r.root,r.options);
+ const file=join(r.copy,'content.js');await writeFile(file,(await readFile(file,'utf8')).replace(/const CONTENT_BUILD_ID = '[^']+';/,"const CONTENT_BUILD_ID = '"+'f'.repeat(64)+"';"));
+ const result=await installedExtensionStatus(r.root,r.options);
+ assert.equal(result.repairedCopies,1);assert.equal(result.reloadSafe,true);
+ assert.equal(await readFile(file,'utf8'),await readFile(join(r.root,'extension/content.js'),'utf8'));
+ assert.equal(await readFile(join(r.browser,'Default/Preferences'),'utf8'),r.prefs);
 });
