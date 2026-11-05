@@ -6,6 +6,13 @@ import {join} from 'node:path';
 import {safeToUpdate,assertUpdateSafe,supportedUpdateNode,updateBuildPlan,swapUpdateDirectories,publicUpdateStatus,createUpdateController} from '../central/runtime/updater.mjs';
 
 const idle=()=>({service:{status:'ready'},groups:[{id:'g',status:'paused',activeAttemptId:null}],attempts:[]});
+test('중지 적용과 입력 차단이 확인된 미확인 이력은 연결을 삭제하지 않고 업데이트한다',()=>{
+ const s=idle();s.groups[0].activeAttemptId='a';s.attempts=[{id:'a',groupId:'g',status:'unknown',executionBlocked:true}];
+ assert.equal(safeToUpdate(s),true);
+ s.attempts[0].executionBlocked=false;assert.equal(safeToUpdate(s),false);
+ s.attempts[0].executionBlocked=true;s.attempts[0].groupId='other';assert.equal(safeToUpdate(s),false);
+ s.attempts[0].groupId='g';s.groups[0].controlIntent='stop';assert.equal(safeToUpdate(s),false);
+});
 async function temp(t){const dir=await mkdtemp(join(tmpdir(),'dico-updater-'));t.after(()=>rm(dir,{recursive:true,force:true}));return dir;}
 
 test('updater permits only genuinely idle groups and keeps uncertain delivery blocked',()=>{

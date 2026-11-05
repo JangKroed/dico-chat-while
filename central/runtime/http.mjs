@@ -19,7 +19,7 @@ async function body(req,maxBytes=1024*1024) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,supportDelivery,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
+export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,supportDelivery,collectSupportReport,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
   if(!['local','lan'].includes(mode))throw Error('Invalid access mode');
   if (mode==='local'&&(typeof bridgeToken!=='string' || bridgeToken.length<32))throw Error('Private bridge credential required');
   if(mode==='lan'&&typeof pairingCodes?.consume!=='function')throw Error('LAN pairing provider required');
@@ -67,7 +67,7 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           // 업데이트 상태 조회가 디스크 I/O를 기다리는 동안 새 발송이 시작될 수 있다.
           // 비동기 조회 뒤 최신 실행 상태를 읽어 과거의 유휴 상태로 reload를 승인하지 않는다.
           const updatePhase=(await updates?.status?.())?.phase,snapshot=manager.snapshot();
-          return json(res,200,{ok:true,protocolVersion:1,pid:process.pid,serviceStatus:snapshot.service?.status,reloadSafe:safeToReloadExtension(snapshot)&&!['preparing','ready','applying'].includes(updatePhase),busy:(snapshot.attempts || []).some(a=>['preparing','permitted','unknown'].includes(a.status)) || (snapshot.groups || []).some(g=>['running','stop_pending','pause_pending','needs_review'].includes(g.status))});
+          return json(res,200,{ok:true,protocolVersion:1,pid:process.pid,...(appVersion?{appVersion}:{}),serviceStatus:snapshot.service?.status,reloadSafe:safeToReloadExtension(snapshot)&&!['preparing','ready','applying'].includes(updatePhase),busy:(snapshot.attempts || []).some(a=>['preparing','permitted','unknown'].includes(a.status)) || (snapshot.groups || []).some(g=>['running','stop_pending','pause_pending','needs_review'].includes(g.status))});
         }
         if (path==='/api/bridge/update/apply' && req.method==='POST') {
           if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
@@ -141,7 +141,8 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
         if (path==='/api/support/report' && req.method==='GET'){
           const boolean=key=>{const value=url.searchParams.get(key);if(value!==null&&!['true','false','1','0'].includes(value))throw fail(400,'보고서 포함 옵션을 확인하세요.');return value===null||value==='true'||value==='1';};
           const timestamp=(key,fallback)=>{const raw=url.searchParams.get(key);if(raw===null)return fallback;const value=Number(raw);if(!raw||!Number.isSafeInteger(value)||value<0)throw fail(400,'보고서 조회 기간을 확인하세요.');return value;};
-          const report=await createSupportReport({manager,appVersion,attemptId:url.searchParams.get('attemptId')||undefined,from:timestamp('from',0),to:timestamp('to',now()),includeBodies:boolean('includeBodies'),includeNames:boolean('includeNames'),now});
+          const options={attemptId:url.searchParams.get('attemptId')||undefined,from:timestamp('from',0),to:timestamp('to',now()),includeBodies:boolean('includeBodies'),includeNames:boolean('includeNames')};
+          const report=await (collectSupportReport?collectSupportReport(options):createSupportReport({manager,appVersion,...options,now}));
           if(['true','1'].includes(url.searchParams.get('download')))res.setHeader('Content-Disposition',`attachment; filename="dico-support-${report.reportId}.json"`);
           return json(res,200,report);
         }

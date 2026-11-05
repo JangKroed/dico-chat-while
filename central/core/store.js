@@ -9,8 +9,9 @@ import { dirname } from 'node:path';
 
 /** SQLite commits aggregate state and its event outbox in one durable transaction. */
 export class CentralStore {
-  constructor(path) {
-    if (path !== ':memory:') {
+  constructor(path,{readOnly=false}={}) {
+    this.readOnly=readOnly;
+    if (!readOnly&&path !== ':memory:') {
       // databasePath must be inside the application's dedicated data directory.
       // SQLite derives sidecar permissions from the database at WAL creation.
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -21,8 +22,11 @@ export class CentralStore {
         try { chmodSync(path + suffix, 0o600); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
     }
-    this.db = new DatabaseSync(path);
+    this.db = new DatabaseSync(path,{readOnly});
     try {
+      // 제보 worker는 별도 읽기 스냅샷만 엽니다. WAL 작성자를 막지 않으며
+      // 상태와 이벤트를 한 버전으로 읽고 권한·스키마·실행 상태를 바꾸지 않습니다.
+      if(readOnly){this.db.exec('PRAGMA query_only=ON; BEGIN;');this.db.prepare('SELECT version FROM central_state WHERE singleton=1').get();return;}
       this.db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
       if (version > 1) throw new Error(`Unsupported central database schema ${version}; preserve this database and use a compatible runtime.`);
@@ -45,6 +49,7 @@ export class CentralStore {
    * 이벤트 삽입과 상태 갱신을 하나의 트랜잭션으로 완료하거나 함께 되돌립니다.
    */
   commit(state, events) {
+    if(this.readOnly)throw new Error('Read-only central store');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const current = this.db.prepare('SELECT version FROM central_state WHERE singleton=1').get();

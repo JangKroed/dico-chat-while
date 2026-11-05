@@ -118,7 +118,9 @@ async function runHeartbeat() {
     if(!current())return;
     // 업데이트 확인은 관찰/복구 성공이나 발송 재개에 의존하지 않습니다.
     // 실제 reload 안전성은 updater의 전용 maintenance 게이트가 판단합니다.
-    await updater.check();if(!current())return;
+    // 파일 점검·업데이트 서버 지연이 heartbeat와 중지 명령 수신을 막지 않습니다.
+    // updater 자체 single-flight/maintenance가 중복 점검과 입력을 차단합니다.
+    void updater.check().catch(()=>{});if(!current())return;
     const knownAttemptIds=Object.values(executor.state.attempts).filter(a=>!['confirmed','not_sent','cancelled'].includes(a.phase)).slice(-500).map(a=>a.attemptId);
     const result=await executor.request({type:'HEARTBEAT',knownAttemptIds});
     if(!current())return;

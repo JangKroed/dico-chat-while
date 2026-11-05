@@ -73,10 +73,18 @@ test('시스템 pause 적용 뒤 재연결되어도 새 세션의 CONTROL을 다
  assert.equal(f.manager.snapshot().groups[0].status,'pause_pending');f.ack('CONTROL');f.manager.tick();assert.equal(f.manager.snapshot().groups[0].status,'running');
 });
 
-test('프로세스 재시작은 저장된 시스템 복구 예약도 자동 실행하지 않는다',t=>{
+test('프로세스 재시작은 시스템 복구 의도를 보존하고 현재 세션 차단·설정·관찰 뒤 재개한다',t=>{
  const f=fixture(t,{persistent:true});f.advance(16000);f.manager.tick();f.ack('CONTROL');assert.ok(f.manager.snapshot().groups[0].autoResume);
  f.reopen();f.reconnect();f.advance(3000);f.observe();f.ack('CONFIG_SYNC');f.manager.tick();
- assert.equal(f.manager.snapshot().groups[0].autoResume,undefined);assert.equal(f.manager.snapshot().groups[0].status,'paused');assert.equal(f.manager.snapshot().attempts.length,0);
+ assert.ok(f.manager.snapshot().groups[0].autoResume);assert.notEqual(f.manager.snapshot().groups[0].status,'running');
+ f.ack('CONTROL');f.manager.tick();
+ assert.equal(f.manager.snapshot().groups[0].autoResume,undefined);assert.equal(f.manager.snapshot().groups[0].status,'running');assert.equal(f.manager.events({type:'group.auto_resumed'}).length,1);
+});
+
+test('실행 중 중앙 재시작도 새 CONTROL ACK 전에는 실행하지 않고 그 뒤 자동 복구한다',t=>{
+ const f=fixture(t,{persistent:true});f.reopen();f.reconnect();f.advance(3000);f.observe();f.ack('CONFIG_SYNC');f.manager.tick();
+ assert.notEqual(f.manager.snapshot().groups[0].status,'running');assert.equal(f.manager.snapshot().attempts.length,0);
+ f.ack('CONTROL');f.manager.tick();assert.equal(f.manager.snapshot().groups[0].status,'running');
 });
 
 test('자원 경합은 오류 예산을 소모하지 않고 긴 대기 후 잠금이 해제되면 재개한다',t=>{

@@ -3,10 +3,11 @@ import type { Snapshot, UpdateStatus } from './api'
 export function updateInProgress(phase?:UpdateStatus['phase']) {return phase==='preparing'||phase==='ready'||phase==='applying'}
 export function updateBlockers(s:Snapshot):string[] {
   const reasons:string[]=[]
+  const blocked=new Map(s.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true&&typeof a.id==='string').map(a=>[a.id,a]))
   if(s.groups.some(g=>g.status==='running'))reasons.push('실행 중인 그룹이 있어 업데이트 적용 대기 중입니다.')
   if(s.groups.some(g=>!['stopped','paused','running','stop_pending','pause_pending','needs_review'].includes(g.status)))reasons.push('그룹 중지 상태 확인 대기 중입니다.')
-  if(s.groups.some(g=>g.activeAttemptId)||s.attempts.some(a=>['preparing','prepared','permitted','executing'].includes(a.status||'')))reasons.push('진행 중인 발송 결과를 자동 관찰하고 있습니다.')
-  if(s.attempts.some(a=>a.status==='unknown'&&!(a.detached&&a.executionBlocked))||s.groups.some(g=>g.status==='needs_review'))reasons.push('게시 여부가 미확인인 기록을 보존하고 중복 전송을 차단하고 있습니다.')
+  if(s.groups.some(g=>g.activeAttemptId&&(!blocked.has(g.activeAttemptId)||blocked.get(g.activeAttemptId)?.groupId!==g.id))||s.attempts.some(a=>['preparing','prepared','permitted','executing'].includes(a.status||'')))reasons.push('진행 중인 발송 결과를 자동 관찰하고 있습니다.')
+  if(s.attempts.some(a=>a.status==='unknown'&&!blocked.has(a.id))||s.groups.some(g=>g.status==='needs_review'))reasons.push('게시 여부가 미확인인 기록을 보존하고 중복 전송을 차단하고 있습니다.')
   if(s.groups.some(g=>g.status==='stop_pending'||g.status==='pause_pending')||(s.commands??[]).some(c=>c.type==='CONTROL'&&['queued','received'].includes(String(c.status))))reasons.push('브라우저의 중지·일시정지 확인 응답을 수신하는 중입니다.')
   return reasons
 }

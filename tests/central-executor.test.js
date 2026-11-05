@@ -16,6 +16,15 @@ async function configured(r) {
   await r.client.load();await r.client.setSession({instanceId:'instance',sessionId:'session'});
   await r.client.handleCommand({id:'sync',type:'CONFIG_SYNC',instanceId:'instance',sessionId:'session',payload:{...payload,items:[{messageId:'m',revisionId:'rev',body:'공지'}]}});
 }
+for(const status of ['blocked','deferred'])test(`Enter 이후 ${status}는 과거 미발송으로 확정하지 않는다`,async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async()=>({status,code:'ACCOUNT_UNVERIFIED',deliveryEvidence:{phase:'commit',stage:'authorize',enterAttempted:true}});
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));
+ assert.equal(r.state.attempts.attempt.phase,'unknown');
+ assert.equal(r.reports.find(m=>m.type==='DELIVERY_RESULT').outcome,'unknown');
+ await r.client.handleCommand(cmd('COMMIT_PERMIT','duplicate-permit'));
+ assert.equal(r.state.attempts.attempt.phase,'unknown');
+});
 test('입력 준비만으로 Enter 권한이 생기지 않으며 중앙 허가 후 한 번만 전송한다',async()=>{
   const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
   assert.equal(await r.client.canSend({id:'attempt',phase:'commit'},7),false);
@@ -608,6 +617,18 @@ test('a stop during reporting never prevents delivery-result recovery or causes 
  assert.equal(r.state.attempts.attempt.reported,true);assert.equal(r.state.processed.COMMIT_PERMIT,true);assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);
 });
 
+test('페이지 실행이 끝난 뒤 중앙 결과 보고가 느려도 중지 적용 ACK는 기다리지 않는다',async()=>{
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ let release,started;const began=new Promise(resolve=>{started=resolve;});const request=r.transport.request;
+ r.transport.request=async m=>{if(m.type==='DELIVERY_RESULT'){started();await new Promise(resolve=>{release=resolve;});}return request(m);};
+ const sending=r.client.handleCommand(cmd('COMMIT_PERMIT'));await began;
+ const stopping=r.client.handleCommand({...cmd('CONTROL','stop-report'),payload:{...payload,action:'stop'}});
+ await new Promise(resolve=>setImmediate(resolve));
+ const applied=r.reports.some(m=>m.type==='ACK'&&m.commandId==='stop-report'&&m.status==='applied');
+ release();await Promise.all([sending,stopping]);
+ assert.equal(applied,true);assert.equal(r.state.attempts.attempt.phase,'confirmed');assert.equal(r.state.stoppedGroups.group,true);assert.equal(r.messages.filter(m=>m.type==='DICO_DELIVER').length,1);
+});
+
 test('an exact submitted-and-cleared receipt retains failure indicator as diagnostic only',async()=>{
  const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
  r.chrome.tabs.sendMessage=async()=>({...clearedComposerReceipt(),deliveryEvidence:{...clearedComposerReceipt().deliveryEvidence,failedSeen:true}});
@@ -771,4 +792,29 @@ test('교체 탭에서는 게시 이력만 대조하며 원래 전송 탭의 영
  assert.ok(!calls.some(m=>m.id===999&&m.type==='DICO_DELIVERY_RECEIPT'));
  assert.ok(!calls.some(m=>['DICO_DELIVER','DICO_PREPARE'].includes(m.type)));
  assert.equal(r.state.attempts.attempt.tabId,originalTab);assert.equal(r.state.attempts.attempt.phase,'unknown');
+});
+
+for(const type of ['DICO_DELIVERY_RECEIPT','DICO_RECONCILE'])for(const action of ['stop','timeout','session','disconnect'])test(`과거 세션 ${type} 미응답도 ${action} 시 조회 대기열을 해제하고 늦은 성공을 버린다`,async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const r=rig();await configured(r);await r.client.handleCommand(cmd('PREPARE'));
+ r.chrome.tabs.sendMessage=async()=>({status:'uncertain',deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true}});
+ await r.client.handleCommand(cmd('COMMIT_PERMIT'));await r.client.setSession({instanceId:'instance',sessionId:'new-session'});
+ let release,started,settled=false;const began=new Promise(resolve=>{started=resolve;});
+ r.chrome.tabs.sendMessage=async(id,m)=>{if(m.type===type){started();return new Promise(resolve=>{release=resolve;});}return{status:'uncertain'};};
+ const recovery={...cmd('RECONCILE','historical-query'),sessionId:'new-session',payload:{...payload,originSessionId:'session'}};
+ const job=r.client.handleCommand(recovery).then(()=>{settled=true;});await began;
+ let stopping=Promise.resolve();
+ if(action==='stop')stopping=r.client.handleCommand({...cmd('CONTROL','stop-query'),sessionId:'new-session',payload:{...payload,action:'stop'}});
+ if(action==='timeout')t.mock.timers.tick(20001);
+ if(action==='session')await r.client.setSession({instanceId:'instance',sessionId:'third-session'});
+ if(action==='disconnect')r.client.disconnect();
+ await new Promise(resolve=>setImmediate(resolve));
+ const beforeLate=settled,stopApplied=r.reports.some(m=>m.type==='ACK'&&m.commandId==='stop-query'&&m.status==='applied');
+ // 실패 구현에서도 테스트 정리가 멈추지 않도록 미응답 포트를 먼저 해제합니다.
+ release(clearedComposerReceipt());await Promise.all([job,stopping]);
+ assert.equal(beforeLate,true,'읽기 조회가 lane을 영구 점유하면 안 됩니다.');
+ if(action==='stop')assert.equal(stopApplied,true,'중지 적용 ACK는 늦은 조회 응답을 기다리지 않습니다.');
+ assert.equal(r.state.attempts.attempt.phase,'unknown');assert.equal(r.state.attempts.attempt.sessionId,'session');
+ assert.equal(r.reports.some(m=>m.type==='DELIVERY_RESULT'&&m.outcome==='confirmed'),false);
+ assert.equal(r.client.isMaintenanceIdle,true);
 });

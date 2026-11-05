@@ -36,6 +36,7 @@ for(const [name,mutation,seed] of [
  ['현재 설정 변경',"state.settings.retentionDays=30;db.prepare('UPDATE central_state SET data=? WHERE singleton=1').run(JSON.stringify(state))"],
  ['과거 이벤트 삭제',"db.exec('DELETE FROM events')"],
  ['확정 결과 변경',"state.attempts[0].status='not_sent';db.prepare('UPDATE central_state SET data=? WHERE singleton=1').run(JSON.stringify(state))",{attempts:[{id:'a',status:'confirmed',messageId:'observed-post',finalizedAt:123}]}],
+ ['차단된 미확인 결과 변경',"state.attempts[0].status='not_sent';db.prepare('UPDATE central_state SET data=? WHERE singleton=1').run(JSON.stringify(state))",{groups:[{id:'g',status:'stopped',activeAttemptId:'a'}],attempts:[{id:'a',groupId:'g',status:'unknown',executionBlocked:true}]}],
  ['자원 잠금 삭제',"state.locks=[];db.prepare('UPDATE central_state SET data=? WHERE singleton=1').run(JSON.stringify(state))",{locks:[{key:'account:111',groupId:'g'}]}],
  ['종료된 대기 이력 삭제',"state.intervals=[];db.prepare('UPDATE central_state SET data=? WHERE singleton=1').run(JSON.stringify(state))",{intervals:[{id:'closed',from:10,to:20,scope:'group',targetId:'g',reason:'paused'}]}],
 ])test(`schemaVersion이 같아도 ${name}하는 구버전은 호환 검사에서 거절한다`,async t=>{
@@ -45,12 +46,12 @@ for(const [name,mutation,seed] of [
  assert.deepEqual(await readdir(f.workDirectory),[],'실패한 복제 DB와 sidecar도 정리합니다.');
 });
 
-test('code rollback rejects active and blocked-unknown delivery even when extension reload could be allowed',()=>{
+test('프로그램 교체는 진행 중 실행을 차단하고 입력 차단된 미확인 결과는 그대로 보존한다',()=>{
  const idle={service:{status:'ready'},groups:[{id:'g',status:'stopped'}],attempts:[]};
  assert.equal(safeToUpdate(idle),true);
  for(const status of ['preparing','permitted','unknown']){
   const snapshot={...idle,groups:[{id:'g',status:'stopped',activeAttemptId:'a'}],attempts:[{id:'a',groupId:'g',status,executionBlocked:true}]};
-  assert.equal(safeToUpdate(snapshot),false);
+  assert.equal(safeToUpdate(snapshot),status==='unknown');
  }
  assert.equal(safeToUpdate({...idle,groups:[{id:'g',status:'stopped',controlIntent:'stop'}]}),false);
 });
@@ -64,6 +65,15 @@ test('real current core startup metadata and queued-command fencing remain compa
  const channel=manager.snapshot().channels[0],message=manager.snapshot().messages[0];
  manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:message.id}]});
  manager.execute('group.create',{name:'보존할 중지 그룹',members:[channel.id],intervalMs:3000});manager.close();
+ const before=await readFile(join(f.directory,'central.sqlite'));
+ await verifyRollbackCompatibility(f);
+ assert.deepEqual(await readFile(join(f.directory,'central.sqlite')),before);
+ assert.deepEqual(await readdir(f.workDirectory),[]);
+});
+
+test('실제 코어 교체 검사에서도 차단된 미확인 결과·그룹 연결·잠금을 보존한다',async t=>{
+ const f=await fixture(t,'',{groups:[{id:'g',name:'stopped',version:1,status:'stopped',members:[],cursor:0,activeAttemptId:'a'}],attempts:[{id:'a',groupId:'g',status:'unknown',reasonCode:'COMPOSER_EDITOR_CHANGED',executionBlocked:true,createdAt:Date.now()}],locks:[{key:'channel:g:c',groupId:'g'}]});
+ await writeFile(join(f.target,'central/core/index.js'),`export {createCentralManager} from ${JSON.stringify(new URL('../central/core/index.js',import.meta.url).href)};`);
  const before=await readFile(join(f.directory,'central.sqlite'));
  await verifyRollbackCompatibility(f);
  assert.deepEqual(await readFile(join(f.directory,'central.sqlite')),before);

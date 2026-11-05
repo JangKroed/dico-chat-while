@@ -7,6 +7,13 @@ import {createCentralManager} from '../central/core/index.js';
 import {CentralStore} from '../central/core/store.js';
 
 const clock={now:()=>1_800_000_000_000,monotonicNow:()=>1000};
+test('실제 입력 차단 ACK가 오면 늦은 결과 보고를 미확인으로 보존하며 중지를 완료한다',()=>{
+ const f=fixture();try{
+  assert.equal(f.manager.snapshot().attempts[0].status,'permitted');
+  f.manager.execute('group.stop',{id:f.group.id});f.ack(0);f.ack(1);
+  const s=f.manager.snapshot();assert.equal(s.groups[0].status,'stopped');assert.equal(s.groups[0].controlIntent,null);assert.equal(s.attempts[0].status,'unknown');assert.equal(s.attempts[0].executionBlocked,true);assert.equal(s.channels[0].playlistIndex,0);
+ }finally{f.manager.close();}
+});
 function fixture(options={}){
   const manager=createCentralManager({...clock,...options});
   const message=manager.execute('message.create',{name:'fixture',body:'fixture only'});

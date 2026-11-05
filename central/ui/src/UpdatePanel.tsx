@@ -7,6 +7,22 @@ import { UPDATE_RECONNECT_KEY } from './reconnect'
 const phases:Record<UpdateStatus['phase'],string>={idle:'업데이트 대기',preparing:'새 버전 준비 중',ready:'새 버전 준비 완료',applying:'업데이트 적용 · 재시작 중',completed:'업데이트 완료',failed:'업데이트 실패'}
 const timestamp=(value?:string|number)=>value===undefined?'—':new Date(value).toLocaleString('ko-KR')
 
+// 확장 설치 버전과 페이지에서 실제 관측한 코드를 분리합니다. 오래된 관측은
+// 현재 버전 확인으로 바꾸지 않고, 원본 빌드 지문은 상세 진단 자료에 보존합니다.
+export function PageCodeVersions({s}:{s:Snapshot}){
+ return <div className="update-browsers" aria-label="Discord 페이지 실행 코드"><h3>Discord 페이지 실행 코드</h3>
+  {s.channels.length?s.channels.map(c=>{
+   const code=c.pageCode,owner=s.instances.find(i=>i.id===c.instanceId)
+   const fresh=code?.state==='observed',mismatch=fresh&&((code.buildId&&typeof owner?.extensionBuildId==='string'&&code.buildId!==owner.extensionBuildId)||(code.version&&owner?.extensionVersion&&owner.extensionVersion!=='unknown'&&code.version!==owner.extensionVersion))
+   return <div className="update-browser" key={c.id}><div><strong>{c.name}</strong><small>{owner?.browser||'브라우저'}</small></div>
+    <span>{fresh?`페이지 관측 버전 ${code.version||'미확인'}`:code?.state==='stale'?`과거 관측 버전 ${code.version||'미확인'}`:'페이지 실행 코드 미확인'}</span>
+    <span className={`setup-status ${fresh&&!mismatch?'ok':'warning'}`}>{mismatch?'확장과 다른 실행 코드 · 안전한 전환 대기':fresh&&code.buildId&&owner?.extensionBuildId===code.buildId?'확장 빌드 일치':fresh?'페이지 코드 관측됨':code?.state==='stale'?'새 관측 대기':'실제 코드 관측 대기'}</span>
+    {code?.state!=='unknown'&&code?.observedAt!==undefined&&<small>최근 관측 {timestamp(code.observedAt)}</small>}
+   </div>
+  }):<p className="secondary">등록된 채널의 실제 페이지 코드 관측을 기다립니다.</p>}
+  <p className="secondary">발송 경로에서 페이지가 보고한 값입니다. 관측이 없거나 오래된 경우 설치 버전으로 추정하지 않습니다.</p>
+ </div>
+}
 
 const reportLabels:Record<string,string>={
  disabled:'오류 제보가 꺼져 있어 자동 전송하지 않았습니다. 설정의 오류 제보에서 전송을 허용할 수 있습니다.',
@@ -102,6 +118,7 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
       <RollbackControls s={s} result={result} busy={busy||Boolean(error)||submitting} submitting={submitting&&requestMode==='rollback'} onStart={()=>void start('rollback')}/>
       <details className="update-migration"><summary>0.4.3 이하에서 처음 전환하는 경우</summary><p>0.4.3 이하 관리 프로그램은 주소와 연결 세션을 재시작 후 유지하는 기능이 없어, 처음 0.4.4로 옮길 때는 관리 화면을 한 번 다시 열어 인증해야 할 수 있습니다. 0.4.4부터 시작하는 이후 업데이트는 현재 주소와 탭을 유지합니다.</p><p>업데이트 버튼이 없는 0.4.0·0.4.1은 업데이트 기능이 포함된 관리 프로그램과 확장으로 최초 설치를 한 번 옮겨야 합니다. 브라우저 확장도 관리 경로에서 설치되어 있는지 확인하세요.</p></details>
       <div className="update-browsers"><div className="subheading"><h3>브라우저별 확장 확인</h3><button className="text-action" onClick={()=>go('connections')}>계정·브라우저 →</button></div>{s.instances.length?s.instances.map(i=>{const versionState=extensionVersionState(appVersion,i.extensionVersion,browserOnline(i));return <div className="update-browser" key={i.id}><div><strong>{i.browser||'브라우저'}</strong><small>{i.name||'등록된 연결'}</small></div><span>확장 보고 버전 {i.extensionVersion||'확인 필요'}</span><span className={`setup-status ${versionState==='current'?'ok':'warning'}`}>{versionState==='current'?'동일 버전 확인됨':versionState==='mismatch'?`확장 업데이트 필요 · 관리 프로그램 ${appVersion}`:versionState==='offline'?'브라우저 연결 대기':'버전 확인 필요'}</span>{versionState==='mismatch'&&<p className="secondary">관리 프로그램과 확장의 보고 버전이 다릅니다. 발송이 안전하게 멈추면 확장 파일과 실행 버전을 자동으로 확인하고 갱신합니다. 현재 발송 결과와 설정은 보존됩니다.</p>}</div>}):<p className="secondary">연결된 브라우저가 없습니다. 업데이트 후 사용할 브라우저의 확장을 연결하고 보고된 버전을 확인하세요.</p>}<p className="secondary">표시된 버전은 각 확장이 마지막으로 보고한 값입니다. 연결 응답만으로 채널 검증과 메시지 적용까지 완료된 것은 아닙니다.</p></div>
+      <PageCodeVersions s={s}/>
     </div>
   </section>
 }

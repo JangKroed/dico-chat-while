@@ -1256,6 +1256,59 @@ test('HELLO persists the exact validated extension build in the public instance 
 });
 
 const clearedComposerEvidence=()=>({phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true,failedSeen:false,composerRetained:false});
+for(const reasonCode of ['ACCOUNT_UNVERIFIED','COOLDOWN_UNVERIFIED','DRAFT_INSPECTION_UNAVAILABLE'])test(`허가 전 일시 ${reasonCode}는 같은 차례로 상한 없이 준비를 복구한다`,()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message('one'),f.message('two')]);const g=f.group([c]);f.start(g);
+  for(let n=0;n<6;n++){
+   const a=f.manager.snapshot().attempts.at(-1),cmd=f.manager.commands(c.instanceId).find(cmd=>cmd.type==='PREPARE'&&cmd.payload.attemptId===a.id);assert.ok(cmd);
+   f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:reasonCode},c.instanceId);
+   assert.equal(f.manager.snapshot().groups[0].status,'running');assert.equal(f.manager.snapshot().channels[0].playlistIndex,0);
+   f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();
+  }
+  const a=f.manager.snapshot().attempts.at(-1);f.prepared(c,a);f.result(c,a);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);
+ }finally{f.manager.close();}
+});
+
+for(const userStop of [false,true])test(`Enter 전임이 입증된 일시 쿨다운 오류는 차례를 유지하고 복구한다 (중지 ${userStop})`,()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message('one'),f.message('two')]);const g=f.group([c]);f.start(g);const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  if(userStop)f.manager.execute('group.stop',{id:g.id});
+  f.result(c,a,'not_sent',{executionBlocked:true,reasonCode:'COOLDOWN_UNVERIFIED',deliveryEvidence:{phase:'commit',stage:'stable',enterAttempted:false}});
+  assert.equal(f.manager.snapshot().groups[0].status,userStop?'stop_pending':'running');assert.equal(f.manager.snapshot().channels[0].playlistIndex,0);
+  f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();
+  assert.equal(f.manager.snapshot().attempts.length,userStop?1:2);
+  if(!userStop){const next=f.manager.snapshot().attempts.at(-1);assert.equal(next.messageIdRef,a.messageIdRef);f.prepared(c,next);f.result(c,next);assert.equal(f.manager.snapshot().channels[0].playlistIndex,1);}
+ }finally{f.manager.close();}
+});
+
+test('Enter를 시도한 결과는 실행 차단 응답만으로 미발송 처리하지 않는다',()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  assert.throws(()=>f.result(c,a,'not_sent',{executionBlocked:true,deliveryEvidence:{phase:'commit',stage:'observe',enterAttempted:true}}),{code:'EXECUTION_UNCERTAIN'});
+  assert.equal(f.manager.snapshot().attempts[0].status,'permitted');assert.equal(f.manager.snapshot().channels[0].playlistIndex,0);
+ }finally{f.manager.close();}
+});
+
+for(const patch of [{stage:'invalid'},{stage:'observe'},{expectedDraftSubmitted:true},{retryCount:1}])test(`모순되거나 불완전한 Enter 전 근거는 자동 재준비하지 않는다 ${JSON.stringify(patch)}`,()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);
+  f.result(c,a,'not_sent',{executionBlocked:true,reasonCode:'COOLDOWN_UNVERIFIED',deliveryEvidence:{phase:'commit',stage:'stable',enterAttempted:false,...patch}});
+  f.advance(5000);f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();
+  assert.equal(f.manager.snapshot().attempts.length,1);assert.notEqual(f.manager.snapshot().groups[0].status,'running');
+ }finally{f.manager.close();}
+});
+test('탭 실행 코드 관측은 설치 버전과 분리하고 오래된 관측·새 세션을 미확인으로 표시한다',()=>{
+ const f=fixture();try{
+  const c=f.connect();f.apply(c,[f.message()]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];
+  const observedAt=f.manager.snapshot().serverNow;
+  f.manager.bridge({type:'DELIVERY_TRACE',sessionId:c.sessionId,attemptId:a.id,sequence:1,observedAt,stage:'received',data:{contentVersion:'0.4.12',contentBuildId:'a'.repeat(64)}},c.instanceId);
+  let code=f.manager.snapshot().channels[0].pageCode;
+  assert.deepEqual(code,{state:'observed',version:'0.4.12',buildId:'a'.repeat(64),observedAt});
+  f.advance(30001);code=f.manager.snapshot().channels[0].pageCode;assert.equal(code.state,'stale');assert.equal(code.version,'0.4.12');
+  f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:c.instanceId});
+  assert.deepEqual(f.manager.snapshot().channels[0].pageCode,{state:'unknown'});
+ }finally{f.manager.close();}
+});
 test('입력창 비움 증명은 메시지 ID 없이 한 번만 다음 문구로 진행하고 근거를 보존한다',()=>{
  const f=fixture();try{
   const c=f.connect();f.apply(c,[f.message('A'),f.message('B')]);f.start(f.group([c]));const a=f.manager.snapshot().attempts[0];f.prepared(c,a);

@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import {extensionVersionState,updateBlockers,updateInProgress,updatePollingDecision} from '../central/ui/src/update.ts';
 
 const snapshot=()=>({groups:[],attempts:[],commands:[]});
+test('입력 차단된 미확인 이력을 보존하는 업데이트 조건이 화면과 서버에서 일치한다',async()=>{
+ const {safeToUpdate}=await import('../central/runtime/updater.mjs');
+ const s={service:{status:'ready'},groups:[{id:'g',status:'stopped',activeAttemptId:'a'}],attempts:[{id:'a',groupId:'g',status:'unknown',executionBlocked:true}],commands:[]};
+ assert.equal(safeToUpdate(s),true);assert.deepEqual(updateBlockers(s),[]);
+ s.attempts[0].executionBlocked=false;assert.equal(safeToUpdate(s),false);assert.ok(updateBlockers(s).length);
+});
 test('update is available only after running groups, unresolved attempts and control requests are settled',()=>{
   const s=snapshot();assert.deepEqual(updateBlockers(s),[]);
   s.groups=[{status:'running'}];assert.ok(updateBlockers(s).some(reason=>reason.includes('실행 중')));

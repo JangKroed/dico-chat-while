@@ -43,3 +43,22 @@ test('유휴 확장 파일 복구가 끝나기 전에는 다음 명령과 세션
  assert.equal((await packets.next()).value.requestId,'status');assert.equal((await packets.next()).value.requestId,'authorize');await running;
  assert.deepEqual(sent,['HELLO','AUTHORIZE_ENTER','DISCONNECT']);
 });
+
+test('누적 trace 대기열보다 발송 승인·결과를 우선하되 세션과 파일 복구 경계는 지킨다',async()=>{
+ const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output),sent=[];
+ let release,started;const began=new Promise(resolve=>{started=resolve;});
+ const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+  const m=body.message;sent.push(m.type+(m.sequence||''));
+  if(m.type==='HELLO')return{instanceId:'i',sessionId:'s'};
+  if(m.type==='DELIVERY_TRACE'&&m.sequence===1){started();await new Promise(resolve=>{release=resolve;});}
+  return{allowed:true};
+ }}});
+ input.write(encodePacket({requestId:'hello',message:{type:'HELLO',protocolVersion:1}}));await packets.next();
+ input.write(encodePacket({requestId:'trace1',message:{type:'DELIVERY_TRACE',attemptId:'a',sequence:1}}));await began;
+ for(let n=2;n<=15;n++)input.write(encodePacket({requestId:'trace'+n,message:{type:'DELIVERY_TRACE',attemptId:'a',sequence:n}}));
+ input.end(encodePacket({requestId:'authorize',message:{type:'AUTHORIZE_ENTER',attemptId:'a'}}));
+ await new Promise(resolve=>setImmediate(resolve));release();await running;output.end();
+ assert.equal(sent[2],'AUTHORIZE_ENTER');
+ assert.deepEqual(sent.filter(s=>s.startsWith('DELIVERY_TRACE')),Array.from({length:15},(_,n)=>'DELIVERY_TRACE'+(n+1)));
+ assert.equal(sent.at(-1),'DISCONNECT');
+});
