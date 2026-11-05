@@ -23,6 +23,19 @@ export async function fingerprintExtension(directory) {
   }
   await visit();return hash.digest('hex');
 }
+/** 해시 계산에서 제외한 생성 표식도 별도로 검증해 콘텐츠 구버전 잔류를 막는다. */
+export async function verifiedExtensionBuild(directory,expectedVersion){
+  const info=await readFile(join(directory,'build-info.js'),'utf8');
+  const buildId=/^export const BUILD_ID = '([a-f0-9]{64})';\s*$/.exec(info)?.[1];
+  const manifest=await boundedJSON(join(directory,'manifest.json'));
+  const content=await readFile(join(directory,'content.js'),'utf8');
+  if(!buildId||buildId!==await fingerprintExtension(directory)||
+    !/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(manifest.version||'')||
+    expectedVersion!==undefined&&manifest.version!==expectedVersion||
+    /const CONTENT_VERSION = '([^']+)';/.exec(content)?.[1]!==manifest.version||
+    /const CONTENT_BUILD_ID = '([a-f0-9]{64})';/.exec(content)?.[1]!==buildId)throw Error('Extension build/version mismatch');
+  return buildId;
+}
 export function extensionBrowserRoots({platform=process.platform,home=homedir(),env=process.env}={}){
   if(platform==='darwin')return ['Google/Chrome','BraveSoftware/Brave-Browser'].map(browser=>join(home,'Library/Application Support',browser));
   if(platform==='win32'){const local=env.LOCALAPPDATA||win32.join(home,'AppData/Local');return ['Google/Chrome/User Data','BraveSoftware/Brave-Browser/User Data'].map(browser=>win32.join(local,browser));}
@@ -69,7 +82,7 @@ async function replacePackagedSource(source,destination,buildId,move=rename,copy
   await mkdir(lock);let oldMoved=false,installed=false;
   try{
     await copy(source,staging,{recursive:true,errorOnExist:true,force:false});
-    if(await fingerprintExtension(staging)!==buildId)throw Error('Staged build changed');
+    if(await verifiedExtensionBuild(staging)!==buildId)throw Error('Staged build changed');
     await move(destination,backup);oldMoved=true;
     try{await move(staging,destination);installed=true;}catch(error){await move(backup,destination);oldMoved=false;throw error;}
     await rm(backup,{recursive:true,force:true});oldMoved=false;
@@ -83,9 +96,8 @@ export async function installedExtensionStatus(root,options={}) {
   const {reloadSafe=false,extensionId,move,copy}=options;
   let directory,buildId;
   try {
-    directory=join(root,'extension');const info=await readFile(join(directory,'build-info.js'),'utf8');
-    buildId=/^export const BUILD_ID = '([a-f0-9]{64})';\s*$/.exec(info)?.[1];
-    if(!buildId||buildId!==await fingerprintExtension(directory))return{buildId:null,reloadSafe:false,reason:'BUILD_INCOMPLETE'};
+    directory=join(root,'extension');
+    try{buildId=await verifiedExtensionBuild(directory);}catch{return{buildId:null,reloadSafe:false,reason:'BUILD_INCOMPLETE'};}
   }catch{return{buildId:null,reloadSafe:false,reason:'INSTALLATION_REQUIRED'};}
   const status={buildId,reloadSafe:reloadSafe===true};
   if(!/^[a-p]{32}$/.test(extensionId||''))return status;
@@ -100,7 +112,8 @@ export async function installedExtensionStatus(root,options={}) {
     for(const candidate of paths){
       if(candidate===resolve(directory)){knownUpdated=true;continue;}
       let valid=false;
-      try{if(await fingerprintExtension(candidate)===buildId){knownUpdated=true;continue;}valid=await packagedSource(candidate,manifest.key,extensionId);}catch{}
+      try{if(await verifiedExtensionBuild(candidate)===buildId){knownUpdated=true;continue;}}catch{}
+      try{valid=await packagedSource(candidate,manifest.key,extensionId);}catch{}
       if(!valid){manual=true;continue;}
       try{await replacePackagedSource(directory,candidate,buildId,move,copy);diagnostic.repairedCopies++;knownUpdated=true;}
       catch{repairFailed=true;}

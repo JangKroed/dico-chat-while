@@ -1,3 +1,4 @@
+import {verifiedExtensionBuild} from '../central/host/extension-update.mjs';
 import {readdir,readFile,access} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -10,6 +11,7 @@ const folder=join(root,'central','extension'),manifest=JSON.parse(await readFile
 // 빌드 단계를 건너뛴 배포에서도 관리 프로그램과 확장 버전 불일치를 차단한다.
 const appMetadata=JSON.parse(await readFile(join(root,'central','package.json'),'utf8'));
 if(manifest.version!==appMetadata.version)throw Error('Central manager/extension version mismatch: rebuild the central extension.');
+await verifiedExtensionBuild(folder,appMetadata.version);
 for(const file of [manifest.background.service_worker,(manifest.side_panel?.default_path||manifest.action?.default_popup),...manifest.content_scripts.flatMap(x=>x.js)])await access(join(folder,file));
 const popup=await readFile(join(folder,'popup.html'),'utf8');
 if(/<script\b(?![^>]*\bsrc=)[^>]*>/i.test(popup)||/\son\w+\s*=/i.test(popup))throw Error('Central popup violates extension CSP');

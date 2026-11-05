@@ -9,7 +9,7 @@ import {currentRegistration} from './registration-state.js';
 import {managedPageDelay} from './managed-delay.js';
 import {recoverConnections} from './connection-recovery.js';
 import {BUILD_ID} from './build-info.js';
-import {createExtensionUpdater,ensureManagedContent} from './update.js';
+import {createExtensionUpdater,ensureManagedContent,rememberExtensionRepair} from './update.js';
 import {identityFailureMessage,accountIdentityMetadata} from './identity-observation.js';
 import {readAccountIdentity,authorizeAccountInput} from './account-identity.js';
 import {detectConnectedBrowser} from './browser-identity.js';
@@ -49,7 +49,7 @@ chrome.runtime.onInstalled?.addListener(()=>void configurePanelAction().catch(()
  */
 async function refreshManagedContent(){
   if(!executor.isMaintenanceIdle)return;
-  let status;try{status=await transport.request({type:'EXTENSION_STATUS'});}catch{return;}
+  let status;try{status=await transport.request({type:'EXTENSION_STATUS'});await rememberExtensionRepair(chrome,status,BUILD_ID);}catch{return;}
   if(!status.reloadSafe||status.buildId!==BUILD_ID||!executor.beginMaintenance({allowBlocked:true}))return;
   try{
     const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;

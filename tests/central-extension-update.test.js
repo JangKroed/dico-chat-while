@@ -16,7 +16,10 @@ test('extension identity includes code changes but excludes generated build iden
 test('native status verifies disk content instead of trusting build-info',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'dico-update-proof-'));
  try{await mkdir(join(dir,'extension'));await writeFile(join(dir,'extension/background.js'),'one');
- const id=await fingerprintExtension(join(dir,'extension'));await writeFile(join(dir,'extension/build-info.js'),`export const BUILD_ID = '${id}';\n`);
+ await writeFile(join(dir,'extension/manifest.json'),JSON.stringify({version:'0.4.42'}));
+ await writeFile(join(dir,'extension/content.js'),"const CONTENT_VERSION = '0.4.42';\nconst CONTENT_BUILD_ID = 'unmanaged';");
+ const id=await fingerprintExtension(join(dir,'extension'));
+ await writeFile(join(dir,'extension/content.js'),`const CONTENT_VERSION = '0.4.42';\nconst CONTENT_BUILD_ID = '${id}';`);await writeFile(join(dir,'extension/build-info.js'),`export const BUILD_ID = '${id}';\n`);
  assert.deepEqual(await installedExtensionStatus(dir,{reloadSafe:true}),{buildId:id,reloadSafe:true});
  await writeFile(join(dir,'extension/background.js'),'changed');assert.deepEqual(await installedExtensionStatus(dir,{reloadSafe:true}),{buildId:null,reloadSafe:false,reason:'BUILD_INCOMPLETE'});
  }finally{await rm(dir,{recursive:true,force:true});}

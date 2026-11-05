@@ -14,7 +14,7 @@ import {DatabaseSync,backup as backupSQLite} from 'node:sqlite';
 const executeFile=promisify(execFile);
 const modulePath=fileURLToPath(import.meta.url);
 const activeAttempts=new Set(['preparing','prepared','permitted','executing','unknown']);
-const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트 준비 정보를 확인하고 있습니다.',build:'검증된 화면 파일과 확장 프로그램을 준비하고 있습니다.',retrying:'일시적인 연결 오류를 감지했습니다. 프로그램이 자동으로 다시 시도하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 자동 진단 결과와 제보 상태를 확인하고 있습니다.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'업데이트 파일을 받지 못했습니다. 자동 재시도 결과와 진단 정보를 기록했습니다.',dependencies_failed:'업데이트 준비 정보를 처리하지 못했습니다. 실패 진단을 기록했습니다.',build_failed:'업데이트 파일 준비를 완료하지 못했습니다. 현재 설치를 유지하고 진단 정보를 기록했습니다.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
+const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트 준비 정보를 확인하고 있습니다.',build:'검증된 화면 파일과 확장 프로그램을 준비하고 있습니다.',retrying:'일시적인 연결 오류를 감지했습니다. 프로그램이 자동으로 다시 시도하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 자동 진단 결과와 제보 상태를 확인하고 있습니다.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'업데이트 파일을 받지 못했습니다. 자동 재시도 결과와 진단 정보를 기록했습니다.',dependencies_failed:'업데이트 준비 정보를 처리하지 못했습니다. 실패 진단을 기록했습니다.',build_failed:'업데이트 파일 준비를 완료하지 못했습니다. 현재 설치를 유지하고 진단 정보를 기록했습니다.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_incompatible:'이전 버전이 현재 데이터를 보존할 수 없어 자동 복귀를 보류했습니다. 설정·기록과 두 버전 파일은 보존했습니다.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
 
 const failureMessages={
  NETWORK:'업데이트 서버와의 연결이 끊겼습니다.',
@@ -543,9 +543,19 @@ export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,wa
     // Roll back a failed launch only after proving the new process exited; never swap a possibly live runtime.
     if(shutdownApproved&&stage==='restart'&&e.rollbackSafe===true){
       try{
-        await withUpdateManagerLock(job.directory,()=>swapUpdateDirectories({app:job.app,prepared:join(job.workDirectory,'previous'),backup:join(job.workDirectory,'failed-version')}));
+        await withUpdateManagerLock(job.directory,async()=>{
+          // 새 앱이 종료 전 데이터를 변경했을 수 있다. 수동 롤백과 동일하게
+          // 복제 DB에서 이전 코드의 호환성을 확인하고 실제 데이터는 되돌리지 않는다.
+          await verifyRollbackCompatibility({directory:job.directory,target:join(job.workDirectory,'previous'),node:job.workerNode||job.node,workDirectory:job.workDirectory});
+          await swapUpdateDirectories({app:job.app,prepared:join(job.workDirectory,'previous'),backup:join(job.workDirectory,'failed-version')});
+        });
         version=previousVersion;message='restart_rolled_back';await restart(job);
-      }catch(rollbackError){message=rollbackError.code==='UPDATE_RUNTIME_ACTIVE'?'restart_failed':'rollback_failed';}
+      }catch(rollbackError){
+        if(rollbackError.code==='ROLLBACK_INCOMPATIBLE'){
+          rollbackReason='ROLLBACK_INCOMPATIBLE';diagnostic=classifyUpdateFailure(rollbackError,'restart');message='rollback_incompatible';
+          await writeUpdateJSON(join(job.workDirectory,'diagnostic.json'),{diagnostic,retryCount,at:Date.now()}).catch(()=>{});
+        }else message=rollbackError.code==='UPDATE_RUNTIME_ACTIVE'?'restart_failed':'rollback_failed';
+      }
     }else if(shutdownApproved&&stage==='apply'&&!['UPDATE_ROLLBACK_FAILED','UPDATE_RUNTIME_ACTIVE'].includes(e.code)){
       // The selective swap already restored the old JavaScript trees.
       await restart(job).catch(()=>{message='restart_failed';});
