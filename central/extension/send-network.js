@@ -35,7 +35,8 @@ export function observeDiscordSendRequests(webRequest,executor,trace) {
   pending.delete(details.requestId);
   const state=executor.state,duration=details.timeStamp-entry.startedAt;
   if(!state||entry.attempt.sessionId!==state.sessionId||state.attempts[entry.attempt.attemptId]!==entry.attempt||
-    details.tabId!==entry.tabId||!Number.isFinite(duration)||duration<0||duration>lifetimeMs)return;
+    details.tabId!==entry.tabId||details.method!=='POST'||endpoint.exec(details.url)?.[1]!==entry.attempt.channelId||
+    !Number.isFinite(duration)||duration<0||duration>lifetimeMs)return;
   if(!failed&&(!Number.isInteger(details.statusCode)||details.statusCode<100||details.statusCode>599))return;
   emit(entry,'network-result',{eventAt:Math.round(details.timeStamp),networkDurationMs:Math.round(duration),
     ...(failed?{networkError:true}:{httpStatus:details.statusCode})});

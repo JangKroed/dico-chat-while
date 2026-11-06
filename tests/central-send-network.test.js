@@ -46,3 +46,10 @@ test('관측 한도 이후 요청을 보관하지 않고 네트워크 실패 원
  assert.deepEqual(traces.at(-1).message.data,{eventAt:1010,retryCount:4,networkOrdinal:12,networkDurationMs:10,networkError:true});
  assert.doesNotMatch(JSON.stringify(traces),/private|discord\.com/);
 });
+
+test('다른 경로로 리디렉션된 최종 응답을 메시지 POST 결과로 기록하지 않는다',()=>{
+ const {hooks,traces,post}=setup();
+ hooks.onBeforeRequest(post);
+ hooks.onCompleted({...post,method:'GET',url:post.url+'/456',timeStamp:1040,statusCode:200});
+ assert.deepEqual(traces.map(x=>x.message.stage),['network-start']);
+});
