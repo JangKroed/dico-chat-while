@@ -28,6 +28,18 @@ function deliveryEvidence(value) {
 }
 const diagnostic=result=>({reasonCode:safeReason(result?.code)||safeReason(result?.status)||'no_response',...(deliveryEvidence(result?.deliveryEvidence)?{deliveryEvidence:deliveryEvidence(result.deliveryEvidence)}:{})});
 const finalUnknownResponse=result=>['uncertain','draft-retained'].includes(result?.status)&&result?.deliveryEvidence?.phase==='commit'&&result.deliveryEvidence.stage==='observe'&&result.deliveryEvidence.enterAttempted===true;
+// 주기 하트비트와 명령 직전 조회가 같은 종료 상태를 적용합니다.
+export function applyTerminalAttempt(local,item){
+  if(!local||!['preparing','prepared','executing','unknown'].includes(local.phase)||!['confirmed','not_sent','cancelled','skipped_unknown'].includes(item?.status))return false;
+  if(item.status==='confirmed'&&!/^\d{17,20}$/.test(item.messageId||'')&&!(item.confirmationBasis==='composer_cleared'&&composerClearedEvidence(item.deliveryEvidence)))return false;
+  const skipped=item.status==='skipped_unknown';
+  local.phase=skipped?'cancelled':item.status;
+  local.reported=true;
+  local.result={outcome:skipped?'unknown':item.status==='confirmed'?'confirmed':'not_sent',
+    ...(item.messageId?{messageId:item.messageId}:{}),confirmationBasis:item.confirmationBasis,
+    ...(item.deliveryEvidence?{deliveryEvidence:item.deliveryEvidence}:{}),executionBlocked:true};
+  return true;
+}
 export function createCentralExecutor({chrome,transport,openChannel,manageChannelWindow,lookupChannelName,now=Date.now,monotonicNow=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   const inspectionCancels=new Map();
   let state,loading,writes=Promise.resolve(),inFlight=0,maintenance=false;const lanes=new Map(),commandJobs=new Map(),volatileStops=new Set(),volatileStoppedRuns=new Set(),pendingCooldownSamples=new Map();
@@ -115,11 +127,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(response?.ok!==true||!Array.isArray(response.terminalAttempts)||sessionId!==state.sessionId||instanceId!==state.instanceId)return;
     const requested=new Set(knownAttemptIds);let changed=false;
     for(const item of response.terminalAttempts){
-      const local=state.attempts[item?.attemptId];
-      if(!requested.has(item?.attemptId)||!local||!['preparing','prepared','executing','unknown'].includes(local.phase)||!['confirmed','not_sent','cancelled'].includes(item.status))continue;
-      if(item.status==='confirmed'&&!/^\d{17,20}$/.test(item.messageId||'')&&!(item.confirmationBasis==='composer_cleared'&&composerClearedEvidence(item.deliveryEvidence)))continue;
-      local.phase=item.status;local.reported=true;
-      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',...(item.messageId?{messageId:item.messageId}:{}),confirmationBasis:item.confirmationBasis,...(item.deliveryEvidence?{deliveryEvidence:item.deliveryEvidence}:{}),executionBlocked:true};changed=true;
+      if(requested.has(item?.attemptId)&&applyTerminalAttempt(state.attempts[item.attemptId],item))changed=true;
     }
     if(changed)await save();
   }

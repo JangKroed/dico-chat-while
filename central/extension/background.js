@@ -16,7 +16,7 @@ import {readAccountIdentity,authorizeAccountInput} from './account-identity.js';
 import {detectConnectedBrowser} from './browser-identity.js';
 import {observeChannelLimit} from './channel-limit.js';
 import {createNativeTransport} from './transport.js';
-import {createCentralExecutor} from './executor.js';
+import {applyTerminalAttempt,createCentralExecutor} from './executor.js';
 import {channelTabContext} from './panel-context.js';
 import {createManagedWindow,createManagedWindowController,ensureConsolidatedManagedWindow} from './managed-windows.js';
 import {createObservationQueue,createSingleFlight,observeManagedChannel,observeRegisteredAccount} from './observation-queue.js';
@@ -127,10 +127,9 @@ async function runHeartbeat() {
     const result=await executor.request({type:'HEARTBEAT',knownAttemptIds});
     if(!current())return;
     if(result.resetRequired){if(result.resetEpoch!==executor.state.resetEpoch)await connect();return;}
-    for(const item of result.terminalAttempts || []) {
-      const local=executor.state.attempts[item.attemptId];if(!local)continue;
-      local.phase=item.status;local.reported=true;
-      local.result={outcome:item.status==='confirmed'?'confirmed':'not_sent',messageId:item.messageId,confirmationBasis:item.confirmationBasis,deliveryEvidence:item.deliveryEvidence,executionBlocked:true};
+    const requested=new Set(knownAttemptIds);
+    for(const item of result.terminalAttempts||[]){
+      if(requested.has(item?.attemptId))applyTerminalAttempt(executor.state.attempts[item.attemptId],item);
     }
     await executor.save();
     if(!current())return;
@@ -149,7 +148,7 @@ async function connect({explicit=false}={}) {
       // Same-ID developer upgrades must never reactivate an older scheduler.
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
       const browser=await detectConnectedBrowser(chrome,navigator);
-      const response=await transport.request({type:'HELLO',protocolVersion:1,explicitReconnect:explicit,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1','close-channel-v1']});
+      const response=await transport.request({type:'HELLO',protocolVersion:1,explicitReconnect:explicit,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1','close-channel-v1','skip-unknown-v1']});
       if(executor.state.emergencyStopped)return;
       if(response.removed){
         // A deleted browser may reconnect only through an explicit user action.

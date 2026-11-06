@@ -9,14 +9,14 @@ function fixture(t,{persistent=false}={}){
  let wall=1_800_000_000_000,mono=1000;
  const dir=persistent?mkdtempSync(join(tmpdir(),'dico-resume-')):null;
  const options={now:()=>wall,monotonicNow:()=>mono,...(dir?{databasePath:join(dir,'state.sqlite')}:{})};
- let manager=createCentralManager(options),session=manager.bridge({type:'HELLO',protocolVersion:1});
+ let manager=createCentralManager(options),session=manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['skip-unknown-v1']});
  const observe=()=>manager.bridge({type:'OBSERVATION',sessionId:session.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'111',guildId:'222',channelId:'333',tabId:1,verified:true}]},session.instanceId);
  observe();const channel=manager.snapshot().channels[0],message=manager.execute('message.create',{name:'fixture',body:'fixture'});
  manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:message.id}]});
  const ack=type=>{for(const c of manager.commands(session.instanceId).filter(c=>c.type===type))manager.bridge({type:'ACK',sessionId:session.sessionId,commandId:c.id,status:'applied'},session.instanceId);};
  ack('CONFIG_SYNC');const group=manager.execute('group.create',{name:'자동 복구',members:[channel.id],intervalMs:60000});manager.execute('group.start',{id:group.id});
  t.after(()=>{manager.close();if(dir)rmSync(dir,{recursive:true,force:true});});
- return{get manager(){return manager;},group,observe,ack,advance(ms){wall+=ms;mono+=ms;},reconnect(){session=manager.bridge({type:'HELLO',protocolVersion:1,instanceId:session.instanceId});},disconnect(){manager.bridge({type:'DISCONNECT',sessionId:session.sessionId},session.instanceId);},reopen(){manager.close();manager=createCentralManager(options);},get session(){return session;}};
+ return{get manager(){return manager;},group,observe,ack,advance(ms){wall+=ms;mono+=ms;},reconnect(){session=manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['skip-unknown-v1'],instanceId:session.instanceId});},disconnect(){manager.bridge({type:'DISCONNECT',sessionId:session.sessionId},session.instanceId);},reopen(){manager.close();manager=createCentralManager(options);},get session(){return session;}};
 }
 
 test('loop delay 이후 현재 CONTROL ACK와 새 관찰 및 안정 시계가 모두 확인되어야 자동 재개한다',t=>{
@@ -101,7 +101,7 @@ test('자원 경합은 오류 예산을 소모하지 않고 긴 대기 후 잠�
 
 test('여러 멤버는 모든 브라우저의 현재 ACK와 새 관찰이 필요하다',t=>{
  const f=fixture(t);f.manager.execute('group.stop',{id:f.group.id});f.ack('CONTROL');
- const second=f.manager.bridge({type:'HELLO',protocolVersion:1});
+ const second=f.manager.bridge({type:'HELLO',protocolVersion:1,capabilities:['skip-unknown-v1']});
  const observeSecond=()=>f.manager.bridge({type:'OBSERVATION',sessionId:second.sessionId,legacyFrozen:true,legacyPending:false,channels:[{accountId:'444',guildId:'222',channelId:'333',tabId:2,verified:true}]},second.instanceId);
  observeSecond();let channel=f.manager.snapshot().channels.find(c=>c.instanceId===second.instanceId);
  f.manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:f.manager.snapshot().messages[0].id}]});
@@ -143,4 +143,31 @@ for(const stopAgain of [false,true])test(`모두 실행 예약은 결과가 확�
  assert.equal(f.manager.snapshot().groups[0].status,stopAgain?'stopped':'running');
  assert.equal(f.manager.snapshot().groups[0].autoResume,undefined);
  assert.equal(f.manager.snapshot().attempts.length,1);
+});
+
+test('실행 예약에서 명시적으로 건너뛴 차례를 미확인으로 보존하고 최소 간격 뒤 진행한다',t=>{
+ const f=fixture(t);f.manager.tick();const attempt=f.manager.snapshot().attempts[0];
+ const bridge=m=>f.manager.bridge({...m,sessionId:f.session.sessionId},f.session.instanceId);
+ bridge({type:'PREPARED',attemptId:attempt.id,accountId:'111',channelId:'333',configVersion:attempt.configVersion,draftClear:true});
+ const fence=()=>{for(const c of f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL'))bridge({type:'ACK',commandId:c.id,status:'applied',executionBlocked:true,attemptId:attempt.id});};
+ f.manager.execute('service.stopAll');fence();
+ assert.throws(()=>f.manager.execute('attempt.skipUnknown',{id:attempt.id,confirmation:'SKIP_UNCONFIRMED_TURN'}),{code:'ATTEMPT_UNRESOLVED'});
+ f.manager.execute('service.startAll');fence();
+ assert.throws(()=>f.manager.execute('attempt.skipUnknown',{id:attempt.id}),{code:'CONFIRMATION_REQUIRED'});
+ const choice={id:attempt.id,confirmation:'SKIP_UNCONFIRMED_TURN'};
+ assert.deepEqual(f.manager.execute('attempt.skipUnknown',choice),{skipped:true});
+ assert.deepEqual(f.manager.execute('attempt.skipUnknown',choice),{skipped:true});
+ const previous=f.manager.snapshot().attempts.find(a=>a.id===attempt.id);
+ assert.equal(previous.status,'unknown');assert.equal(previous.detached,true);
+ assert.equal(f.manager.events({type:'delivery.unknown_skipped'}).length,1);
+ assert.deepEqual(bridge({type:'HEARTBEAT',knownAttemptIds:[attempt.id]}).terminalAttempts,[{attemptId:attempt.id,status:'skipped_unknown'}]);
+ f.ack('CONFIG_SYNC');f.advance(3000);f.observe();f.manager.tick();
+ assert.equal(f.manager.snapshot().groups[0].status,'running');
+ assert.equal(f.manager.snapshot().attempts.length,1);
+ assert.equal(f.manager.commands(f.session.instanceId).some(c=>c.type==='RECONCILE'),false);
+ bridge({type:'DELIVERY_RESULT',attemptId:attempt.id,outcome:'confirmed',messageId:'123456789012345678'});
+ assert.equal(f.manager.snapshot().attempts[0].status,'unknown');
+ for(let i=0;i<19;i++){f.advance(3000);f.observe();f.manager.tick();}
+ assert.equal(f.manager.snapshot().attempts.length,2);
+ assert.notEqual(f.manager.snapshot().attempts[1].id,attempt.id);
 });

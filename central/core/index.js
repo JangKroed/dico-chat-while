@@ -534,9 +534,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     // Restarting or explicitly resuming does not constitute a new delivery.
     // A future wall timestamp cannot prove elapsed time, so bound it at zero.
     const elapsed=entity=>Number.isFinite(entity.lastConfirmedAt)?Math.max(0,wall-entity.lastConfirmedAt):null;
-    for(const g of state.groups){const age=elapsed(g);g.nextMono=mono+(age===null?0:Math.max(0,g.intervalMs-age));}
+    const skipRemaining=(entity,interval)=>Number.isFinite(entity.lastSkippedAt)?Math.max(0,interval-Math.max(0,wall-entity.lastSkippedAt)):0;
+    for(const g of state.groups){const age=elapsed(g);g.nextMono=mono+Math.max(age===null?0:g.intervalMs-age,skipRemaining(g,g.intervalMs),0);}
     for(const c of state.channels){
-      const age=elapsed(c);c.nextMono=mono+(age===null?0:Math.max(0,effectiveInterval(c)-age-confirmationOffset(c)));
+      const age=elapsed(c);c.nextMono=mono+Math.max(age===null?0:effectiveInterval(c)-age-confirmationOffset(c),skipRemaining(c,effectiveInterval(c)),0);
       if(age===null)delete c.lastConfirmedMono;else c.lastConfirmedMono=mono-age;
     }
   }
@@ -670,6 +671,30 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
       case 'service.stopAll':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
       case 'service.resume':state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
+      case 'attempt.skipUnknown':{
+        ensure(p.confirmation==='SKIP_UNCONFIRMED_TURN','CONFIRMATION_REQUIRED','미확인 차례를 건너뛰는 선택을 확인해 주세요.',409);
+        const a=get('attempts',p.id);
+        if(a.skippedAt)return {skipped:true};
+        const g=get('groups',a.groupId),c=get('channels',a.bindingId);
+        ensure(a.status==='unknown'&&a.executionBlocked===true&&!a.detached&&g.enabled!==false&&g.status==='paused'&&g.autoResume&&!g.controlIntent&&g.activeAttemptId===a.id&&g.runId===a.runId&&g.members[g.cursor]===c.id,
+          'ATTEMPT_UNRESOLVED','이전 발송의 실행 차단과 현재 실행 예약이 확인된 경우에만 건너뛸 수 있습니다.',409);
+        const owner=get('instances',a.instanceId);
+        ensure(owner.connected&&owner.capabilities?.includes('skip-unknown-v1'),'EXTENSION_UPDATE_REQUIRED','브라우저 확장 업데이트와 연결 확인을 기다리고 있습니다.',409);
+        // 사용자 선택은 결과 확정과 분리합니다. 기록은 unknown 그대로 두고 이 차례만 종료합니다.
+        const at=now(),mono=monotonicNow();
+        a.detached=true;a.detachedAt=at;a.skippedAt=at;
+        g.activeAttemptId=null;g.cursor=(g.cursor+1)%g.members.length;g.waitReason='resume_required';
+        g.lastSkippedAt=at;g.nextMono=Math.max(g.nextMono||0,mono+g.intervalMs);
+        c.lastSkippedAt=at;c.nextMono=Math.max(c.nextMono||0,mono+effectiveInterval(c));
+        if(c.playlist.length)c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;
+        for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)&&['queued','received'].includes(cmd.status)))cmd.status='superseded';
+        for(const problem of state.incidents.filter(i=>i.status==='open'&&i.attemptId===a.id&&i.code==='delivery_unknown'))resolveIncident(problem,{attemptId:a.id,reasonCode:'user_skipped_unknown'});
+        if(c.pendingPlaylist){applyPlaylist(c,latestPlaylist(c.pendingPlaylist),{preserveIndex:c.pendingPlaylistPreserveIndex===true});delete c.pendingPlaylist;delete c.pendingPlaylistPreserveIndex;}
+        else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
+        else if(c.verified&&state.instances.find(i=>i.id===c.instanceId)?.connected)queueConfiguration(c);
+        event('delivery.unknown_skipped',{attemptId:a.id,groupId:g.id},'warning');
+        return {skipped:true};
+      }
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
       case 'attempt.retryNotSent':{
         ensure(p.confirmation==='CONFIRM_NOT_SENT','VALIDATION','Explicitly confirm that this attempt was not sent.');
@@ -921,7 +946,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(message.type==='COOLDOWN_SAMPLE'){
         const a=state.attempts.find(a=>a.id===message.attemptId&&a.instanceId===i.id);
         const c=a&&state.channels.find(c=>c.id===a.bindingId),g=a&&state.groups.find(g=>g.id===a.groupId),sample=message.sample;
-        if(!a||!c||!g||a.status!=='confirmed'||a.manual||c.lastConfirmedAttemptId!==a.id||a.sessionId!==i.sessionId||c.sessionId!==i.sessionId||!i.connected||c.verified!==true||a.runId!==message.runId||g.runId!==a.runId||a.configVersion!==message.configVersion||c.configVersion!==a.configVersion||c.tabId!==a.tabId||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||g.activeAttemptId||state.attempts.some(other=>other.id!==a.id&&other.bindingId===c.id&&activeAttempt(other))||now()-a.finalizedAt<0||now()-a.finalizedAt>17000||!Number.isFinite(c.slowmodeObservedAt)||!Number.isFinite(a.confirmationMs)||a.confirmationMs<0||a.confirmationMs>30000||!sample||typeof sample!=='object'||Array.isArray(sample)||sample.status!=='remaining'||!Number.isFinite(sample.elapsedMs)||sample.elapsedMs<0||sample.elapsedMs>15000||!Number.isFinite(sample.maxGapMs)||sample.maxGapMs<0||sample.maxGapMs>1500||!Number.isSafeInteger(sample.remainingMs)||sample.remainingMs<=0||sample.remainingMs>21600000||sample.slowmodeMs!==undefined&&sample.slowmodeMs!==c.slowmodeMs)return{ok:false};
+        if(!a||!c||!g||a.status!=='confirmed'||a.manual||c.lastSkippedAt>=a.finalizedAt||c.lastConfirmedAttemptId!==a.id||a.sessionId!==i.sessionId||c.sessionId!==i.sessionId||!i.connected||c.verified!==true||a.runId!==message.runId||g.runId!==a.runId||a.configVersion!==message.configVersion||c.configVersion!==a.configVersion||c.tabId!==a.tabId||c.accountId!==a.accountId||c.guildId!==a.guildId||c.channelId!==a.channelId||g.activeAttemptId||state.attempts.some(other=>other.id!==a.id&&other.bindingId===c.id&&activeAttempt(other))||now()-a.finalizedAt<0||now()-a.finalizedAt>17000||!Number.isFinite(c.slowmodeObservedAt)||!Number.isFinite(a.confirmationMs)||a.confirmationMs<0||a.confirmationMs>30000||!sample||typeof sample!=='object'||Array.isArray(sample)||sample.status!=='remaining'||!Number.isFinite(sample.elapsedMs)||sample.elapsedMs<0||sample.elapsedMs>15000||!Number.isFinite(sample.maxGapMs)||sample.maxGapMs<0||sample.maxGapMs>1500||!Number.isSafeInteger(sample.remainingMs)||sample.remainingMs<=0||sample.remainingMs>21600000||sample.slowmodeMs!==undefined&&sample.slowmodeMs!==c.slowmodeMs)return{ok:false};
         // The countdown starts at Enter. Its displayed seconds can omit a
         // fraction, so round the inferred full cycle up to the next second.
         const measuredFullCycle=Math.ceil((sample.elapsedMs+sample.remainingMs)/1000)*1000+3000;
@@ -959,7 +984,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(message.type==='HEARTBEAT'){
         queuePendingCloses(i.id);
         const requested=message.knownAttemptIds??[];ensure(Array.isArray(requested)&&requested.length<=500&&requested.every(value=>typeof value==='string'&&value.length<=100),'VALIDATION','knownAttemptIds must contain at most 500 identifiers.');
-        const ids=new Set(requested),terminalAttempts=state.attempts.filter(a=>a.instanceId===i.id&&ids.has(a.id)&&TERMINAL.has(a.status)).map(a=>({attemptId:a.id,status:a.status,...(a.messageId?{messageId:a.messageId}:{}),...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{}),...(a.confirmationBasis==='composer_cleared'?{deliveryEvidence:a.deliveryEvidence}:{})}));
+        const ids=new Set(requested),terminalAttempts=state.attempts.filter(a=>a.instanceId===i.id&&ids.has(a.id)&&(TERMINAL.has(a.status)||i.capabilities?.includes('skip-unknown-v1')&&a.skippedAt&&a.detached===true&&a.executionBlocked===true)).map(a=>({attemptId:a.id,status:a.skippedAt&&a.status==='unknown'?'skipped_unknown':a.status,...(a.messageId?{messageId:a.messageId}:{}),...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{}),...(a.confirmationBasis==='composer_cleared'?{deliveryEvidence:a.deliveryEvidence}:{})}));
         return{ok:true,commands:commands(i.id),terminalAttempts};
       }
       if(message.type==='DISCONNECT'){
@@ -1251,7 +1276,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
      * 같은 세션/탭/설정 연결이 유지된 경우에 한해 5~30초 간격으로 횟수 제한 없이 조회합니다.
      * 발송 실행 중인 시도나 교체된 탭을 건드리지 않고 PREPARE/Enter도 재발급하지 않습니다.
      */
-    for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true)){
+    for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true&&!a.detached)){
       const owner=state.instances.find(i=>i.id===a.instanceId),channel=state.channels.find(c=>c.id===a.bindingId);
       if(!owner?.connected||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||!Number.isInteger(channel.tabId)||channel.sessionId!==owner.sessionId||channel.accountId!==a.accountId||channel.guildId!==a.guildId||channel.channelId!==a.channelId)continue;
       // 읽기 전용 조회의 응답이 유실되어도 대기열에 영구히 묶이지 않습니다.
