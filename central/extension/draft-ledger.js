@@ -1,3 +1,5 @@
+export const draftPageRejectionCodes=new Set(['TARGET_MISMATCH','ACCOUNT_UNVERIFIED','ACCOUNT_UNREADABLE','EDITOR_LOADING','EDITOR_AMBIGUOUS']);
+export const draftInspectionCodes=new Set([...draftPageRejectionCodes,'TAB_REQUEST_FAILED','DRAFT_RESPONSE_INVALID']);
 import {composerClearedEvidence} from './delivery-receipt.js';
 const terminal=new Set(['confirmed','not_sent','cancelled']);
 const sameTarget=(a,b)=>a.bindingId===b.bindingId||(a.accountId===b.accountId&&a.guildId===b.guildId&&a.channelId===b.channelId);
