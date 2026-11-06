@@ -46,10 +46,12 @@ export function compareSubmitTraces(state,events,{since=0}={}) {
   arm.visibleCooldown+=Number(trace.visibleWait===true||enter.data.slowmodeDetected===true);
   arm.editorRestricted+=Number(enter.data.editorAriaDisabled===true||enter.data.editorAriaReadonly===true);
   arm.submitDisabled+=Number(enter.data.submitControlDisabled===true);
+  const build=enter.data.contentBuildId;
+  if(typeof build!=='string'||!/^[a-f0-9]{64}$/.test(build))continue;
   if(!prior||!a.accountId||!a.guildId||!a.channelId||!a.revisionId||typeof enter.data.pageHidden!=='boolean'||typeof enter.data.documentFocused!=='boolean')continue;
   const age=enter.observedAt-prior;
   if(age<0||age>300000||enter.data.cooldownKnown!==true||!Number.isFinite(enter.data.cooldownMs))continue;
-  const condition=JSON.stringify([accountChannel,a.revisionId,Math.round(age/5000),enter.data.pageHidden,enter.data.documentFocused,enter.data.cooldownMs,enter.data.slowmodeDetected===true]);
+  const condition=JSON.stringify([accountChannel,a.revisionId,build,Math.round(age/5000),enter.data.pageHidden,enter.data.documentFocused,enter.data.cooldownMs,enter.data.slowmodeDetected===true]);
   const strata=matched.get(condition)||{Chrome:[],Brave:[]};
   strata[browser].push(delay);
   matched.set(condition,strata);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {compareSubmitTraces} from '../central/runtime/diagnose-discord-submit.mjs';
 
-function sample({sameAccount=true,braveAge=65000}={}) {
+function sample({sameAccount=true,braveAge=65000,mixedBuild=false}={}) {
  const state={instances:[{id:'chrome',browser:'Chrome'},{id:'brave',browser:'Brave'}],attempts:[]},events=[];
  const last=new Map();
  for(let i=0;i<8;i++){
@@ -13,7 +13,7 @@ function sample({sameAccount=true,braveAge=65000}={}) {
   last.set(accountId,finalizedAt);
   state.attempts.push({id,instanceId,accountId,guildId:'private-guild',channelId:'private-channel',revisionId:'private-revision',status:'confirmed',finalizedAt});
   for(const [stage,observedAt,data] of [
-   ['before-enter',first,{retryCount:0,networkObserverReady:true,pageHidden:true,documentFocused:false,cooldownKnown:true,cooldownMs:0}],
+   ['before-enter',first,{retryCount:0,networkObserverReady:true,contentBuildId:(mixedBuild&&instanceId==='brave'?'b':'a').repeat(64),pageHidden:true,documentFocused:false,cooldownKnown:true,cooldownMs:0}],
    ['network-start',first+delay,{networkOrdinal:1}],
    ['network-result',first+delay+50,{httpStatus:200,networkOrdinal:1}],
   ])events.push({attemptId:id,stage,observedAt,data});
@@ -31,7 +31,7 @@ test('동일 계정의 비교 조건이 맞아야 브라우저별 지연 패턴�
 });
 
 test('계정 또는 직전 발송 간격이 다르면 브라우저 원인을 판정하지 않는다',()=>{
- for(const input of [{sameAccount:false},{braveAge:120000}]){
+ for(const input of [{sameAccount:false},{braveAge:120000},{mixedBuild:true}]){
   const result=sample(input);
   assert.equal(result.observations.Brave.delayed,4);
   assert.equal(result.comparison,'needs_same_account_channel_samples');
