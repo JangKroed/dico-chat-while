@@ -1386,7 +1386,9 @@ test('반복 초안 판독 실패는 초안과 문구 순서를 보존하고 다
    const attempt=f.manager.snapshot().attempts.at(-1);
    assert.equal(attempt.accountId,'A');
    const cmd=f.manager.commands(a.instanceId).find(c=>c.type==='PREPARE'&&c.payload.attemptId===attempt.id);
-   f.manager.bridge({type:'ACK',sessionId:a.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:'DRAFT_INSPECTION_UNAVAILABLE'},a.instanceId);
+   f.manager.bridge({type:'ACK',sessionId:a.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:'DRAFT_INSPECTION_UNAVAILABLE',draftInspectionCode:n===0?'UNAPPROVED_CODE':'EDITOR_LOADING'},a.instanceId);
+   const ack=f.manager.events({type:'command.ack'}).find(e=>e.commandId===cmd.id);
+   assert.equal(ack?.draftInspectionCode,n===0?undefined:'EDITOR_LOADING');
    if(n<2)tick(5000);
   }
   assert.equal(f.manager.snapshot().groups[0].cursor,1);

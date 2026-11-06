@@ -5,7 +5,7 @@
  */
 import {normalizeSendRetries} from './retry-policy.js';
 import {composerClearedEvidence} from './delivery-receipt.js';
-import {planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
+import {draftPageRejectionCodes,planDraftPreparation,recordDraftBackup} from './draft-ledger.js';
 const fresh=()=>({version:1,instanceId:null,sessionId:null,resetEpoch:0,resetPending:false,legacyDeclaration:null,emergencyStopped:false,bindings:{},attempts:{},processed:{},stoppedGroups:{},stoppedRuns:{},draftBackups:[],lastError:null});
 const deliveryCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','RETRY_CANCELLED','RETRY_DELIVERY_AMBIGUOUS','TARGET_MISMATCH','ACCOUNT_UNVERIFIED','EDITOR_LOADING','EDITOR_AMBIGUOUS','DRAFT_MISMATCH','ATTACHMENT_OR_REPLY','HISTORY_LOADING','POSSIBLY_SENT','PREPARE_EDITOR_UNSTABLE','COMMIT_EDITOR_UNSTABLE','DELIVERY_DRAFT_RETAINED','DELIVERY_CONFIRMATION_TIMEOUT','CONTENT_EXCEPTION_BEFORE_ENTER','CONTENT_EXCEPTION_AFTER_ENTER','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','PRE_ENTER_WAIT_CANCELLED','AUTHORIZATION_DENIED','AUTHORIZATION_EXPIRED','AUTHORIZATION_TIMEOUT','AUTHORIZATION_UNAVAILABLE','NATIVE_REQUEST_TIMEOUT','NATIVE_DISCONNECTED','NATIVE_SEND_FAILED','NATIVE_RESPONSE_REJECTED','SERVICE_UNAVAILABLE','SERVICE_REJECTED','ACCOUNT_MISMATCH','SESSION_MISMATCH','EXECUTION_STOPPED','CONFIG_MISMATCH','UPDATE_IN_PROGRESS','RETRY_COUNT_MISMATCH','ATTEMPT_STATE','STALE_ATTEMPT','RETRY_STATE_MISMATCH','RETRY_LIMIT_REACHED','RETRY_OBSERVATION_STALE','CHANNEL_NOT_READY','DISCORD_COOLDOWN','INTERVAL_NOT_ELAPSED','CLOCK_UNSAFE','COOLDOWN_ACTIVE']);
 const deliveryStatuses=new Set(['uncertain','draft-retained','blocked','deferred','confirmed','failed','no_response','reconcile_inconclusive','executor_result']);
@@ -238,7 +238,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
     if(state.processed[c.id]&&state.processed[c.id]?.status!=='report-pending'){
       const previous=state.processed[c.id];
-      if(previous?.status==='rejected')await ack(c,'rejected',{rejectionCode:previous.rejectionCode});
+      if(previous?.status==='rejected')await ack(c,'rejected',{rejectionCode:previous.rejectionCode,...(previous.draftInspectionCode?{draftInspectionCode:previous.draftInspectionCode}:{})});
       else if(previous?.status==='ack-pending'){await ack(c,'applied',previous.extra);state.processed[c.id]=true;state.lastError=null;await save();}
       return;
     }
@@ -302,9 +302,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
       } else if(!matches(a,p) || a.sessionId!==state.sessionId || !['preparing','prepared'].includes(a.phase))throw Error('기존 발송 시도를 다시 준비할 수 없습니다.');
       if(a.phase!=='prepared') {
         let inspection;
-        try{inspection=await inspectBeforePrepare(a,{type:'DICO_DRAFT_INSPECT',target:target(a),delivery:delivery(a)});}catch(error){if(['CONTENT_INSPECTION_TIMEOUT','EXECUTION_STOPPED'].includes(error?.code))throw error;throw Object.assign(Error('기존 입력 내용을 확인하지 못했습니다. 초안을 보존합니다.'),{code:'DRAFT_INSPECTION_UNAVAILABLE'});}
+        try{inspection=await inspectBeforePrepare(a,{type:'DICO_DRAFT_INSPECT',target:target(a),delivery:delivery(a)});}catch(error){if(['CONTENT_INSPECTION_TIMEOUT','EXECUTION_STOPPED'].includes(error?.code))throw error;throw Object.assign(Error('기존 입력 내용을 확인하지 못했습니다. 초안을 보존합니다.'),{code:'DRAFT_INSPECTION_UNAVAILABLE',draftInspectionCode:'TAB_REQUEST_FAILED'});}
         const plan=planDraftPreparation({attempt:a,attempts:state.attempts,inspection});
-        if(plan.action==='blocked')throw Object.assign(Error('기존 초안 또는 이전 발송 결과를 확인해야 합니다.'),{code:plan.reasonCode});
+        if(plan.action==='blocked')throw Object.assign(Error('기존 초안 또는 이전 발송 결과를 확인해야 합니다.'),{code:plan.reasonCode,...(plan.reasonCode==='DRAFT_INSPECTION_UNAVAILABLE'?{draftInspectionCode:draftPageRejectionCodes.has(inspection?.code)?inspection.code:'DRAFT_RESPONSE_INVALID'}:{})});
         if(plan.action==='replace'){recordDraftBackup(state,a,plan.backupText,now());await save();}
         if(!transport.connected||state.emergencyStopped||a.sessionId!==state.sessionId||volatileStops.has(a.groupId)||state.stoppedGroups[a.groupId]||state.stoppedRuns[a.runId]||volatileStoppedRuns.has(a.runId))throw Object.assign(Error('초안 확인 중 발송 준비가 중지되었습니다.'),{code:'EXECUTION_STOPPED'});
         let result;
@@ -465,8 +465,10 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         // Rejection is terminal too. Persist before ACK so already queued or
         // replayed commands cannot replace the original cause with PREPARE_FAILED.
         const rejectionCode=/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`;
-        state.processed[c.id]={status:'rejected',rejectionCode};await save();
-        if(c.sessionId===state.sessionId)try{await ack(c,'rejected',{rejectionCode});}catch{}
+        // 원문과 초안은 저장하거나 전달하지 않고 제한된 진단 코드만 보냅니다.
+        const rejection={rejectionCode,...(error.draftInspectionCode?{draftInspectionCode:error.draftInspectionCode}:{})};
+        state.processed[c.id]={status:'rejected',...rejection};await save();
+        if(c.sessionId===state.sessionId)try{await ack(c,'rejected',rejection);}catch{}
       });lanes.set(key,lane);await lane;
       }finally{inFlight--;}
     })();

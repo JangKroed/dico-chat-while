@@ -829,3 +829,19 @@ test('건너뛴 미확인 시도의 하트비트 반영은 실행만 닫고 미�
  assert.equal(a.reported,true);
  assert.equal(applyTerminalAttempt(a,{status:'confirmed',messageId:'123456789012345678'}),false);
 });
+
+test('초안 검사 거절·탭 통신 오류·응답 형식 오류를 본문 없이 구분하고 ACK 재전송에도 보존한다',async()=>{
+ for(const [reply,cause] of [
+  [()=>({ok:false,code:'EDITOR_AMBIGUOUS',error:'private draft'}),'EDITOR_AMBIGUOUS'],
+  [()=>{throw Error('private draft');},'TAB_REQUEST_FAILED'],
+  [()=>undefined,'DRAFT_RESPONSE_INVALID'],
+  [()=>({ok:false,code:'PRIVATE_DRAFT'}),'DRAFT_RESPONSE_INVALID']
+ ]){
+  const r=rig();await configured(r);
+  r.chrome.tabs.sendMessage=async()=>reply();
+  await r.client.handleCommand(cmd('PREPARE'));await r.client.handleCommand(cmd('PREPARE'));
+  const rejected=r.reports.filter(x=>x.type==='ACK'&&x.status==='rejected');
+  assert.deepEqual(rejected.map(x=>[x.rejectionCode,x.draftInspectionCode]),Array(2).fill(['DRAFT_INSPECTION_UNAVAILABLE',cause]));
+  assert.equal(JSON.stringify(r.reports).includes('private draft'),false);
+ }
+});

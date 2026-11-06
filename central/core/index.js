@@ -5,6 +5,7 @@
  * group=발송 순서, attempt=한 번의 발송 시도, command=확장에 전달할 명령입니다.
  */
 import {DEFAULT_PREPARE_RETRIES,normalizeSendRetries} from '../extension/retry-policy.js';
+import {draftInspectionCodes} from '../extension/draft-ledger.js';
 import {supportRecordBuffer} from './support-budget.js';
 import {traceData,validTraceStage} from '../extension/delivery-trace.js';
 import {composerClearedEvidence} from '../extension/delivery-receipt.js';
@@ -1086,13 +1087,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(message.status==='rejected'){
           const rejectionCode=typeof message.rejectionCode==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(message.rejectionCode)?message.rejectionCode:undefined;
           if(rejectionCode)c.rejectionCode=rejectionCode;else delete c.rejectionCode;
+          if(c.type==='PREPARE'&&rejectionCode==='DRAFT_INSPECTION_UNAVAILABLE'&&draftInspectionCodes.has(message.draftInspectionCode))c.draftInspectionCode=message.draftInspectionCode;
           const attempt=c.payload.attemptId?get('attempts',c.payload.attemptId):null;
           if(!(c.type==='PREPARE'&&attempt&&failPreparation(attempt,rejectionCode||'PREPARE_REJECTED'))){
             incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
             if(attempt&&activeAttempt(attempt))markUnknown(attempt,rejectionCode||'command_rejected');
           }
         }
-        event('command.ack',{commandId:c.id,instanceId:i.id,status:c.status,...(c.rejectionCode?{rejectionCode:c.rejectionCode}:{})});return{ok:true};
+        event('command.ack',{commandId:c.id,instanceId:i.id,status:c.status,...(c.rejectionCode?{rejectionCode:c.rejectionCode}:{}),...(c.draftInspectionCode?{draftInspectionCode:c.draftInspectionCode}:{})});return{ok:true};
       }
       if(message.type==='PREPARED'){
         const elapsed=monotonicNow()-lastMono;ensure(elapsed>=0&&elapsed<=15000&&Math.abs((now()-lastWall)-elapsed)<=2000,'CLOCK_UNSAFE','Clock continuity is uncertain; manual resume is required.',409);
