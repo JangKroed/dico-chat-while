@@ -4,14 +4,16 @@
  * worker는 자신과 Node를 별도 작업 폴더로 복사하여 실행하므로 교체할 앱 파일에 실행 중 의존하지 않습니다.
  */
 import {randomBytes,timingSafeEqual,createHash} from 'node:crypto';
-import {access,chmod,copyFile,cp,lstat,mkdir,open,readFile,readdir,realpath,rename,rm,writeFile} from 'node:fs/promises';
+import {access,chmod,copyFile,cp,lstat,mkdir,mkdtemp,open,readFile,readdir,realpath,rename,rm,writeFile} from 'node:fs/promises';
 import {dirname,join,resolve,delimiter,isAbsolute} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
+import {tmpdir} from 'node:os';
 import {DatabaseSync,backup as backupSQLite} from 'node:sqlite';
 
 const executeFile=promisify(execFile);
+const updateSource='https://github.com/JangKroed/dico-chat-while.git';
 const modulePath=fileURLToPath(import.meta.url);
 const activeAttempts=new Set(['preparing','prepared','permitted','executing','unknown']);
 const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트 준비 정보를 확인하고 있습니다.',build:'검증된 화면 파일과 확장 프로그램을 준비하고 있습니다.',retrying:'일시적인 연결 오류를 감지했습니다. 프로그램이 자동으로 다시 시도하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 자동 진단 결과와 제보 상태를 확인하고 있습니다.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'업데이트 파일을 받지 못했습니다. 자동 재시도 결과와 진단 정보를 기록했습니다.',dependencies_failed:'업데이트 준비 정보를 처리하지 못했습니다. 실패 진단을 기록했습니다.',build_failed:'업데이트 파일 준비를 완료하지 못했습니다. 현재 설치를 유지하고 진단 정보를 기록했습니다.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',shutdown_recovered:'업데이트 종료 확인에 실패해 이전 관리 프로그램을 다시 열었습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
@@ -271,7 +273,7 @@ export async function inspectUpdateInstallation({directory,applicationRoot=resol
  * 사용자 기기에서 UI를 새로 컴파일하는 방식 대신 배포에 포함된 빌드 결과를 사용합니다.
  */
 export function updateBuildPlan({checkout,workDirectory,node,npmCli,git}){
-  return[{id:'source',command:git,args:['-c','credential.helper=','-c',`core.hooksPath=${join(workDirectory,'no-hooks')}`,'clone','--depth','1','--branch','main','--single-branch','--','https://github.com/JangKroed/dico-chat-while.git',checkout],cwd:workDirectory},
+  return[{id:'source',command:git,args:['-c','credential.helper=','-c',`core.hooksPath=${join(workDirectory,'no-hooks')}`,'clone','--depth','1','--branch','main','--single-branch','--',updateSource,checkout],cwd:workDirectory},
     {id:'dependencies',command:node,args:[npmCli,'--prefix','central/ui','ci'],cwd:checkout},
     {id:'build',command:node,args:[npmCli,'run','central:build'],cwd:checkout},
     {id:'check',command:node,args:[npmCli,'run','central:check'],cwd:checkout}];
@@ -289,6 +291,33 @@ async function workerLaunch(job){
   job.workerNode=privateNode;await writeUpdateJSON(join(job.workDirectory,'job.json'),job);
   const child=spawn(privateNode,[worker,'--job',join(job.workDirectory,'job.json')],{cwd:job.workDirectory,detached:true,stdio:'ignore',windowsHide:true});
   await new Promise((accept,reject)=>{child.once('spawn',accept);child.once('error',reject);});child.unref();return{pid:child.pid};
+}
+// 설치 경로와 같은 Git·저장소를 사용해 버전 파일만 읽습니다.
+export async function readPublishedVersion({git,node}){
+  const workDirectory=await mkdtemp(join(tmpdir(),'dico-version-'));
+  try{
+    const cwd=join(workDirectory,'source');
+    const env=updateEnvironment(node,workDirectory);
+    const options={env,timeout:12000,maxBuffer:16384,windowsHide:true};
+    const isolated=['-c','credential.helper=','-c',`core.hooksPath=${join(workDirectory,'no-hooks')}`];
+    await executeFile(git,[...isolated,'clone','--depth','1','--filter=blob:none','--no-checkout','--branch','main','--single-branch','--',updateSource,cwd],options);
+    const {stdout}=await executeFile(git,[...isolated,'show','HEAD:central/package.json'],{...options,cwd});
+    return JSON.parse(stdout).version;
+  }finally{await rm(workDirectory,{recursive:true,force:true});}
+}
+export async function checkLatestUpdate(currentVersion,{readVersion,now=Date.now}={}){
+  const parse=value=>typeof value==='string'&&/^\d{1,5}\.\d{1,5}\.\d{1,5}$/.test(value)?value.split('.').map(Number):null;
+  const current=parse(currentVersion);
+  if(!current)return {state:'unavailable',checkedAt:now()};
+  try{
+    const version=await readVersion();
+    const latest=parse(version);
+    if(!latest)throw Error('Invalid version');
+    const difference=latest.map((part,index)=>part-current[index]).find(value=>value!==0)||0;
+    return {state:difference>0?'available':difference===0?'current':'ahead',currentVersion,latestVersion:version,checkedAt:now()};
+  }catch{
+    return {state:'unavailable',currentVersion,checkedAt:now()};
+  }
 }
 export function createUpdateController({directory,manager,shutdown,inspect=inspectUpdateInstallation,prepare=workerLaunch,onFailure,supportStatus}={}){
   directory=resolve(directory);const updates=join(directory,'updates'),lock=join(updates,'active'),statusFile=join(updates,'status.json');
@@ -419,7 +448,12 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     setTimeout(()=>void shutdown().catch(()=>{}),50);
     return{accepted:true};
   }
-  return{status,start:()=>launch('update'),rollback:()=>launch('rollback'),apply,monitor,reportFailure,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
+  let versionCheck=null;
+  const latest=currentVersion=>{
+    versionCheck??=checkLatestUpdate(currentVersion,{readVersion:async()=>readPublishedVersion(await inspect({directory}))}).finally(()=>{versionCheck=null;});
+    return versionCheck;
+  };
+  return{status,latest,start:()=>launch('update'),rollback:()=>launch('rollback'),apply,monitor,reportFailure,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
 }
 export async function withUpdateManagerLock(directory,action){
   const lock=new DatabaseSync(join(directory,'manager-lock.sqlite'));

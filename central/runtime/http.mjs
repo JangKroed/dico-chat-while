@@ -145,6 +145,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           if (!setupStatus)throw fail(503,'설치 진단 기능이 준비되지 않았습니다.');
           return json(res,200,await setupStatus());
         }
+        if(path==='/api/updates/latest'&&req.method==='GET'){
+          if(mode!=='local'||!updates?.latest)throw fail(404,'이 접속에서는 버전을 확인할 수 없습니다.');
+          return json(res,200,await updates.latest(appVersion));
+        }
         if (path==='/api/updates' && req.method==='GET') {
           if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
           return json(res,200,await updates.status());

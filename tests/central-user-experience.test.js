@@ -1,14 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readDiagnosticMode,writeDiagnosticMode,visiblePage,operationSummary,recentConfirmed} from '../central/ui/src/user-experience.ts';
+import {visiblePage,operationSummary,recentConfirmed} from '../central/ui/src/user-experience.ts';
 const snapshot=()=>({schemaVersion:1,stateVersion:1,messages:[],instances:[],channels:[],groups:[],attempts:[],incidents:[],events:[],commands:[]});
-test('diagnostic preference is opt-in and safely handles unavailable storage',()=>{
- assert.equal(readDiagnosticMode({getItem:()=>null}),false);
- assert.equal(readDiagnosticMode({getItem:()=>{throw Error('blocked')}}),false);
- assert.equal(readDiagnosticMode({getItem:()=> 'true'}),true);
- assert.doesNotThrow(()=>writeDiagnosticMode(false,{setItem:()=>{throw Error('blocked')}}));
- for(const page of ['history','logs','/logs/'])assert.equal(visiblePage(page,false),'dashboard');
- assert.equal(visiblePage('logs',true),'logs');assert.equal(visiblePage('unknown',true),'dashboard');
+test('운영 화면만 열고 예전 진단 주소는 대시보드로 돌린다',()=>{
+ for(const page of ['history','logs','/logs/','unknown'])assert.equal(visiblePage(page),'dashboard');
+ assert.equal(visiblePage('/settings/'),'settings');
 });
 test('unresolved incidents never imply active recovery or demand login without evidence',()=>{
  const s=snapshot();s.incidents=[{id:'i',code:'account_mismatch'}];s.groups=[{id:'g',status:'needs_review'}];
@@ -30,14 +26,12 @@ test('recent results exclude unknown and order by confirmation time',()=>{
  assert.deepEqual(recentConfirmed(s).map(a=>a.id),['new','old']);
 });
 
-test('App routes, navigation and diagnostic-only pages share the preference boundary',async()=>{
+test('일반 화면에는 진단 모드 설정과 과거 진단 경로가 없다',async()=>{
  const {readFile}=await import('node:fs/promises');const app=await readFile(new URL('../central/ui/src/App.tsx',import.meta.url),'utf8');
- assert.match(app,/visiblePage\(location.pathname,readDiagnosticMode\(\)\)/);
- assert.match(app,/visiblePage\(location.pathname,diagnosticRef.current\)/);
- assert.match(app,/visiblePage\(requested,diagnosticRef.current\)/);
- assert.match(app,/diagnostic&&page==='history'/);assert.match(app,/diagnostic&&page==='logs'/);
- assert.match(app,/aria-label="개발자 진단 모드"/);
- assert.match(app,/<AutomaticSupport diagnostic=\{diagnostic\}/);
+ assert.match(app,/visiblePage\(location.pathname\)/);
+ assert.match(app,/visiblePage\(requested\)/);
+ assert.doesNotMatch(app,/개발자 진단 모드|readDiagnosticMode|diagnosticRef|page==='history'|page==='logs'/);
+ assert.match(app,/<AutomaticSupport diagnostic=\{false\} accessMode=/);
  const dashboard=app.slice(app.indexOf('function UserDashboard('),app.indexOf('function DashboardGroupControls('));
  assert.doesNotMatch(dashboard,/go\('history'\)|go\('logs'\)|RetryNotSentButton|s\.events|incident\.recheck/);
  assert.match(dashboard,/<OperationalDashboard \{...props\}/);

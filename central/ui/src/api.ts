@@ -117,6 +117,8 @@ export async function establishSession(signal?:AbortSignal):Promise<{appVersion?
   }
 }
 export const getSetupStatus = () => request<SetupStatus>('/api/setup-status')
+export type LatestUpdate = {state:'available'|'current'|'ahead'|'unavailable';currentVersion?:string;latestVersion?:string;checkedAt:Timestamp}
+export const getLatestUpdate = (signal?:AbortSignal) => request<LatestUpdate>('/api/updates/latest',{signal})
 export const getUpdateStatus = (signal?:AbortSignal) => request<UpdateStatus>('/api/updates',{signal})
 export const reportUpdateFailure=(signal?:AbortSignal)=>request<UpdateStatus>('/api/updates/report',{method:'POST',body:'{}',signal:signal??AbortSignal.timeout(15000)})
 export const startRollback = (signal?:AbortSignal) => request<UpdateStatus>('/api/updates/rollback',{method:'POST',body:'{}',signal})
