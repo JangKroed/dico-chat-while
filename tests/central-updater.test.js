@@ -242,3 +242,38 @@ test('입력 차단 후 연결에서 분리한 미확인 이력은 보존하면�
  const s=idle();s.attempts=[{id:'archived',status:'unknown',detached:true,executionBlocked:true}];
  assert.equal(safeToUpdate(s),true);s.attempts[0].executionBlocked=false;assert.equal(safeToUpdate(s),false);
 });
+
+test('종료한 관리 프로그램은 PID가 살아 있어도 설명자와 관리 잠금으로 교체를 판단한다',async t=>{
+ const {waitForStopped,withUpdateManagerLock}=await import('../central/runtime/updater.mjs');
+ const directory=await temp(t),job={directory,descriptor:{pid:process.pid}};
+ await withUpdateManagerLock(directory,async()=>{
+  await assert.rejects(waitForStopped(job,{attempts:1,wait:async()=>{}}),{code:'UPDATE_SHUTDOWN_TIMEOUT'});
+ });
+ await waitForStopped(job,{attempts:1,wait:async()=>{}});
+ await writeFile(join(directory,'runtime.json'),JSON.stringify({pid:process.pid}));
+ await assert.rejects(waitForStopped(job,{attempts:1,wait:async()=>{}}),{code:'UPDATE_SHUTDOWN_TIMEOUT'});
+});
+
+test('종료 확인 실패 후 이전 런타임이 내려갔으면 설치 교체 없이 다시 시작한다',async t=>{
+ const {runUpdateWorker}=await import('../central/runtime/updater.mjs'),f=await workerFixture(t);let restarts=0;
+ await writeFile(join(f.job.directory,'shutdown.json'),JSON.stringify({intent:'update'}));
+ await runUpdateWorker(f.jobPath,{
+  run:f.run,fetchRequest:async()=>({ok:true}),
+  waitStopped:async()=>{throw Object.assign(Error('Timeout'),{code:'UPDATE_SHUTDOWN_TIMEOUT'});},
+  restart:async()=>{restarts++;assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),'old');},
+ });
+ assert.equal(restarts,1);
+ assert.equal((await f.readStatus()).message,'shutdown_recovered');
+});
+
+test('사용자 종료 표식이 있으면 업데이트 실패가 런타임을 재시작하지 않는다',async t=>{
+ const {runUpdateWorker}=await import('../central/runtime/updater.mjs'),f=await workerFixture(t);let restarts=0;
+ await writeFile(join(f.job.directory,'shutdown.json'),JSON.stringify({intent:'user'}));
+ await runUpdateWorker(f.jobPath,{
+  run:f.run,fetchRequest:async()=>({ok:true}),
+  waitStopped:async()=>{throw Error('Timeout');},restart:async()=>{restarts++;},
+ });
+ assert.equal(restarts,0);
+ assert.equal((await f.readStatus()).message,'shutdown_failed');
+ assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),'old');
+});

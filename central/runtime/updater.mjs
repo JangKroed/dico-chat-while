@@ -14,7 +14,7 @@ import {DatabaseSync,backup as backupSQLite} from 'node:sqlite';
 const executeFile=promisify(execFile);
 const modulePath=fileURLToPath(import.meta.url);
 const activeAttempts=new Set(['preparing','prepared','permitted','executing','unknown']);
-const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트 준비 정보를 확인하고 있습니다.',build:'검증된 화면 파일과 확장 프로그램을 준비하고 있습니다.',retrying:'일시적인 연결 오류를 감지했습니다. 프로그램이 자동으로 다시 시도하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 자동 진단 결과와 제보 상태를 확인하고 있습니다.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'업데이트 파일을 받지 못했습니다. 자동 재시도 결과와 진단 정보를 기록했습니다.',dependencies_failed:'업데이트 준비 정보를 처리하지 못했습니다. 실패 진단을 기록했습니다.',build_failed:'업데이트 파일 준비를 완료하지 못했습니다. 현재 설치를 유지하고 진단 정보를 기록했습니다.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
+const messages={idle:'업데이트를 실행하면 최신 버전을 준비한 뒤 관리 프로그램을 다시 엽니다.',preparing:'업데이트 작업을 준비하고 있습니다.',source:'공식 저장소의 최신 버전을 별도 폴더에 내려받고 있습니다.',dependencies:'업데이트 준비 정보를 확인하고 있습니다.',build:'검증된 화면 파일과 확장 프로그램을 준비하고 있습니다.',retrying:'일시적인 연결 오류를 감지했습니다. 프로그램이 자동으로 다시 시도하고 있습니다.',check:'새 버전의 구문과 확장 설정을 검사하고 있습니다.',ready:'준비가 끝났습니다. 발송이 중지되어 있는지 다시 확인합니다.',applying:'발송이 중지된 것을 확인했습니다. 관리 프로그램을 업데이트합니다.',completed:'업데이트를 완료했습니다. 새 관리 화면에서 버전을 확인하세요.',failed:'업데이트를 완료하지 못했습니다. 자동 진단 결과와 제보 상태를 확인하고 있습니다.',busy:'준비 중 실행 상태가 바뀌어 업데이트를 중단했습니다. 모든 그룹을 중지한 뒤 다시 시도하세요.',source_failed:'업데이트 파일을 받지 못했습니다. 자동 재시도 결과와 진단 정보를 기록했습니다.',dependencies_failed:'업데이트 준비 정보를 처리하지 못했습니다. 실패 진단을 기록했습니다.',build_failed:'업데이트 파일 준비를 완료하지 못했습니다. 현재 설치를 유지하고 진단 정보를 기록했습니다.',check_failed:'새 버전 검사를 통과하지 못했습니다. 현재 설치를 유지합니다.',apply_failed:'설치 파일을 교체하지 못했습니다. 기존 설치를 유지·복원했습니다. 파일을 사용하는 프로그램을 확인하세요.',authorize_failed:'최종 업데이트 적용을 승인받지 못했습니다. 현재 관리 화면에서 상태를 확인한 뒤 다시 시도하세요.',rollback_failed:'이전 버전 파일 복원을 완료하지 못했습니다. 관리 프로그램을 실행하기 전에 최신 설치 도구로 복구하세요.',restart_rolled_back:'새 버전을 시작하지 못해 이전 버전으로 복원했습니다. 최신 설치 도구를 실행하거나 나중에 다시 시도하세요.',restart_failed:'설치 후 관리 프로그램 시작을 확인하지 못했습니다. 설치된 실행기로 다시 열거나 설치 도구를 실행하세요.',shutdown_failed:'관리 프로그램 종료를 확인하지 못했습니다. 설치 파일은 바꾸지 않았습니다.',shutdown_recovered:'업데이트 종료 확인에 실패해 이전 관리 프로그램을 다시 열었습니다.',runtime_active:'다른 관리 프로그램이 실행되어 파일을 교체하지 않았습니다. 모두 종료한 뒤 다시 시도하세요.',manual:'이 설치에는 수동 설치 도구가 필요합니다. 최신 setup.command 또는 setup.ps1을 실행하세요.'};
 
 const failureMessages={
  NETWORK:'업데이트 서버와의 연결이 끊겼습니다.',
@@ -40,7 +40,7 @@ export function classifyUpdateFailure(error={},stage='unknown'){
  /Prebuilt.*(?:mismatch|missing)|ENOENT.*prebuilt/i.test(text)?'BUNDLE_INVALID':
  error.signal==='SIGKILL'?'PROCESS_BLOCKED':
  /ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|could not resolve host|failed to connect|connection timed out|requested URL returned error: (?:429|50[234])/i.test(text)?'NETWORK':
- error.killed?'TIMEOUT':'UNEXPECTED';
+ error.killed||error.code==='UPDATE_SHUTDOWN_TIMEOUT'?'TIMEOUT':'UNEXPECTED';
  return publicUpdateDiagnostic({code,stage,exitCode:Number.isInteger(error.code)?error.code:undefined,signal:error.signal});
 }
 /**
@@ -414,7 +414,9 @@ export function createUpdateController({directory,manager,shutdown,inspect=inspe
     applying=true;
     try{await writeUpdateJSON(join(directory,'shutdown.json'),{intent:'update',at:Date.now()});await writeUpdateJSON(statusFile,{phase:'applying',mode:activeJob.mode,message:'applying',jobId:activeJob.jobId,startedAt:activeJob.startedAt,updatedAt:Date.now()});}
     catch(e){applying=false;throw e;}
-    setTimeout(()=>void shutdown().catch(async()=>{await writeUpdateJSON(statusFile,{phase:'failed',message:'shutdown_failed',startedAt:activeJob.startedAt,updatedAt:Date.now()}).catch(()=>{});}),50);
+    // 종료 콜백이 뒤늦게 실패해도 교체 worker의 확정 상태를 덮어쓰지 않습니다.
+    // 종료·잠금 확인과 실패 후 복구 상태는 독립 worker가 기록합니다.
+    setTimeout(()=>void shutdown().catch(()=>{}),50);
     return{accepted:true};
   }
   return{status,start:()=>launch('update'),rollback:()=>launch('rollback'),apply,monitor,reportFailure,waitForLaunch:()=>launchPromise,isApplying:()=>applying,setRuntimeDescriptor:value=>{descriptor=value;}};
@@ -452,13 +454,20 @@ async function validateJob(jobPath){
   return job;
 }
 async function runStep(step,env){await executeFile(step.command,step.args,{cwd:step.cwd,env,timeout:20*60*1000,maxBuffer:1024*1024,windowsHide:true});}
-async function waitForStopped(job){
-  for(let count=0;count<120;count++){
-    const descriptor=await readJSON(join(job.directory,'runtime.json')).catch(()=>undefined);
-    if(!descriptor&&!alive(job.descriptor.pid))return;
-    await sleep(250);
+async function runtimeReleased(directory){
+  try{await lstat(join(directory,'runtime.json'));return false;}
+  catch(failure){if(failure.code!=='ENOENT')throw failure;}
+  // 설명자가 제거됐더라도 DB 관리 잠금을 잡고 있으면 아직 교체할 수 없습니다.
+  // 이전 PID는 종료 후 재사용되거나 열린 핸들 때문에 남을 수 있어 판정에 쓰지 않습니다.
+  try{await withUpdateManagerLock(directory,()=>{});return true;}
+  catch(failure){if(failure.code==='UPDATE_RUNTIME_ACTIVE')return false;throw failure;}
+}
+export async function waitForStopped(job,{attempts=120,wait=sleep}={}){
+  for(let count=0;count<attempts;count++){
+    if(await runtimeReleased(job.directory))return;
+    await wait(250);
   }
-  throw Error('Runtime did not stop');
+  throw error('UPDATE_SHUTDOWN_TIMEOUT',messages.shutdown_failed);
 }
 export function restartArguments(job){return[join(job.app,'central/runtime/main.mjs'),'--data-dir',job.directory];}
 async function restartApplication(job){
@@ -547,6 +556,14 @@ export async function runUpdateWorker(jobPath,{run=runStep,fetchRequest=fetch,wa
         await withUpdateManagerLock(job.directory,()=>swapUpdateDirectories({app:job.app,prepared:join(job.workDirectory,'previous'),backup:join(job.workDirectory,'failed-version')}));
         version=previousVersion;message='restart_rolled_back';await restart(job);
       }catch(rollbackError){message=rollbackError.code==='UPDATE_RUNTIME_ACTIVE'?'restart_failed':'rollback_failed';}
+    }else if(shutdownApproved&&stage==='shutdown'){
+      // 업데이트 종료로 서비스가 이미 내려간 경우에만 기존 설치로 화면을 복구합니다.
+      // 사용자가 직접 중지했거나 현재 관리자가 잠금을 보유하면 개입하지 않습니다.
+      const marker=await readJSON(join(job.directory,'shutdown.json')).catch(()=>undefined);
+      if(marker?.intent==='update'&&await runtimeReleased(job.directory).catch(()=>false)){
+        try{await restart(job);message='shutdown_recovered';version=previousVersion;}
+        catch{message='restart_failed';}
+      }
     }else if(shutdownApproved&&stage==='apply'&&!['UPDATE_ROLLBACK_FAILED','UPDATE_RUNTIME_ACTIVE'].includes(e.code)){
       // The selective swap already restored the old JavaScript trees.
       await restart(job).catch(()=>{message='restart_failed';});
