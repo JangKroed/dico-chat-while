@@ -5,6 +5,7 @@ import {createRecoveryScheduler} from './recovery-scheduler.js';
  * 주기 관찰은 상태 확인용이며, 관찰 자체가 메시지를 전송하도록 설계하지 않습니다.
  */
 import {createDeliveryTracer} from './delivery-trace.js';
+import {observeDiscordSendRequests} from './send-network.js';
 import {currentRegistration} from './registration-state.js';
 import {managedPageDelay} from './managed-delay.js';
 import {recoverConnections} from './connection-recovery.js';
@@ -24,6 +25,7 @@ import {lookupExistingChannelName} from './channel-name.js';
 const windowController=createManagedWindowController({chrome});
 const transport=createNativeTransport(chrome),executor=createCentralExecutor({chrome,transport,openChannel:openManagedChannel,manageChannelWindow,lookupChannelName:target=>lookupExistingChannelName(chrome,observe,target)});
 const traceDelivery=createDeliveryTracer({executor});
+const networkObserverReady=observeDiscordSendRequests(chrome.webRequest,executor,traceDelivery);
 const observation=createObservationQueue(collectObservation,publishObservation);
 const heartbeat=createSingleFlight(runHeartbeat);
 const automaticRecovery=createRecoveryScheduler();
@@ -290,7 +292,13 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(message?.type==='DICO_ACCOUNT_IDENTITY'&&sender.tab){void observe(sender.tab.id).then(respond).catch(()=>respond({verified:false,reason:'SCRIPT_UNAVAILABLE'}));return true;}
   if(message?.type==='DICO_CAN_SEND' && sender.tab){authorizeAccountInput({chrome,executor,message,tabId:sender.tab.id}).then(respond).catch(()=>respond({allowed:false}));return true;}
   if(message?.type==='DICO_TIMING_SAMPLE'&&sender.tab){executor.cooldownSample(message,sender.tab.id).then(ok=>respond({ok})).catch(()=>respond({ok:false}));return true;}
-  if(sender.tab){if(message?.type==='DICO_TRACE'){void traceDelivery(message,sender.tab.id).then(recorded=>respond({ok:true,recorded})).catch(()=>respond({ok:false}));return true;}return false;}
+  if(sender.tab){
+    if(message?.type!=='DICO_TRACE'||['network-start','network-result'].includes(message.stage))return false;
+    // 요청 관찰 상태는 페이지가 아니라 실제 리스너를 등록한 실행기가 덧붙입니다.
+    const entry=message.stage==='before-enter'?{...message,data:{...message.data,networkObserverReady}}:message;
+    void traceDelivery(entry,sender.tab.id).then(recorded=>respond({ok:true,recorded})).catch(()=>respond({ok:false}));
+    return true;
+  }
   if(!sender.url?.startsWith(chrome.runtime.getURL('')))return false;
   const action=async()=>{
     await executor.load();
