@@ -818,3 +818,14 @@ for(const type of ['DICO_DELIVERY_RECEIPT','DICO_RECONCILE'])for(const action of
  assert.equal(r.reports.some(m=>m.type==='DELIVERY_RESULT'&&m.outcome==='confirmed'),false);
  assert.equal(r.client.isMaintenanceIdle,true);
 });
+
+test('건너뛴 미확인 시도의 하트비트 반영은 실행만 닫고 미발송으로 바꾸지 않는다',async()=>{
+ const {applyTerminalAttempt}=await import('../central/extension/executor.js');
+ const a={phase:'unknown',result:{outcome:'unknown',executionBlocked:true}};
+ assert.equal(applyTerminalAttempt(a,{status:'skipped_unknown'}),true);
+ assert.equal(a.phase,'cancelled');
+ assert.equal(a.result.outcome,'unknown');
+ assert.equal(a.result.executionBlocked,true);
+ assert.equal(a.reported,true);
+ assert.equal(applyTerminalAttempt(a,{status:'confirmed',messageId:'123456789012345678'}),false);
+});
