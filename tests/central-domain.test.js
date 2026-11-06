@@ -1376,3 +1376,22 @@ test('delivery stage telemetry is scoped, deduplicated, redacted and never advan
  const other=f.connect('333','444');assert.throws(()=>f.manager.bridge({...trace,sessionId:other.sessionId,sequence:2},other.instanceId),{code:'STALE_ATTEMPT'});
  }finally{f.manager.close();}
 });
+
+test('반복 초안 판독 실패는 초안과 문구 순서를 보존하고 다음 계정으로 넘어간다',()=>{
+ const f=fixture();try{
+  const a=f.connect('A'),b=f.connect('B');f.apply(a,[f.message('A1'),f.message('A2')]);f.apply(b,[f.message('B1')]);
+  f.start(f.group([a,b],20000));
+  const tick=ms=>{f.advance(ms);for(const c of [a,b])f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);f.manager.tick();};
+  for(let n=0;n<3;n++){
+   const attempt=f.manager.snapshot().attempts.at(-1);
+   assert.equal(attempt.accountId,'A');
+   const cmd=f.manager.commands(a.instanceId).find(c=>c.type==='PREPARE'&&c.payload.attemptId===attempt.id);
+   f.manager.bridge({type:'ACK',sessionId:a.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:'DRAFT_INSPECTION_UNAVAILABLE'},a.instanceId);
+   if(n<2)tick(5000);
+  }
+  assert.equal(f.manager.snapshot().groups[0].cursor,1);
+  assert.equal(f.manager.snapshot().channels.find(c=>c.id===a.channel.id).playlistIndex,0);
+  tick(10000);tick(9999);assert.equal(f.manager.snapshot().attempts.length,3);
+  tick(1);assert.equal(f.manager.snapshot().attempts.at(-1).accountId,'B');
+ }finally{f.manager.close();}
+});

@@ -491,7 +491,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(Number.isFinite(confirmationMs)&&confirmationMs>=0)a.confirmationMs=Math.min(confirmationMs,86_400_000);
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
     if(outcome==='confirmed'){
-      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;
+      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;
       g.cursor=(g.cursor+1)%g.members.length;g.lastConfirmedAt=now();g.nextMono=monotonicNow()+g.intervalMs;
       c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.lastConfirmedAttemptId=a.id;c.lastConfirmationMs=Number.isFinite(a.confirmationMs)&&a.confirmationMs<=30000?a.confirmationMs:0;c.nextMono=c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c);
     }
@@ -525,6 +525,17 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     return true;
   }
   function schedulePreparationRetry(g,a,reasonCode){
+    const draftInspectionFailed=reasonCode==='DRAFT_INSPECTION_UNAVAILABLE'&&!a.permitId&&!a.permitIssued;
+    g.draftInspectionFailures=draftInspectionFailed?(g.draftInspectionFailures||0)+1:0;
+    if(g.draftInspectionFailures>=3&&g.members.length>1){
+      // 발송 허가 전에 초안 확인만 실패했으므로 문구와 입력창은 보존하고 계정 차례만 넘깁니다.
+      g.cursor=(g.cursor+1)%g.members.length;
+      g.nextMono=Math.max(g.nextMono||0,monotonicNow()+g.intervalMs);
+      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;
+      g.waitReason='group_interval';g.nextEligibleAt=now()+Math.max(0,g.nextMono-monotonicNow());
+      event('delivery.prepare_turn_skipped',{attemptId:a.id,groupId:g.id,reasonCode},'warning');
+      return;
+    }
     g.prepareRetryCount=(g.prepareRetryCount||0)+1;g.prepareRetryAfterMono=monotonicNow()+5000;
     g.waitReason='preparation_retry';g.nextEligibleAt=now()+5000;
     event('delivery.prepare_retry',{attemptId:a.id,groupId:g.id,reasonCode,retryCount:g.prepareRetryCount},'warning');
@@ -551,7 +562,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       restoreConfirmedDeadlines();
     }
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
-    delete g.autoResume;delete g.prepareRetryCount;delete g.prepareRetryAfterMono;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
+    delete g.autoResume;delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
   }
   /**
    * 화면에서 요청한 설정·실행·중지 등 업무 명령의 입구입니다.
