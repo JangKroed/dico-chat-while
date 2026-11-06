@@ -38,7 +38,7 @@ test('early preparation explains scheduled and actual Discord cooldown waits',()
   assert.equal(groupTimingState(group,null),'입력 준비 완료 · 발송 대기');
   assert.equal(accountTimingState({id:'binding'},group,{status:'preparing'},null),'입력 준비 완료 · 발송 대기');
   assert.equal(groupTimingState({...group,waitReason:'discord_cooldown'},null),'Discord 제한 해제 대기');
-  assert.equal(waitReasonText('discord_cooldown'),'Discord 실제 제한 해제 대기');
+  assert.equal(waitReasonText('discord_cooldown'),'Discord 제한 해제 대기');
 });
 
 test('stopped accounts suppress residual cooldowns and missing server deadlines',()=>{
@@ -93,8 +93,8 @@ test('system-paused groups explain automatic recovery without a send countdown',
   const group={status,autoResume,members:['a'],cursor:0};
   assert.equal(groupTimingState(group,12),'자동 복구 중 · 정상 확인 후 재개');
   assert.equal(accountTimingState({id:'a'},group,undefined,12),'자동 복구 중 · 정상 확인 후 재개');
-  assert.equal(groupTimingState({...group,activeAttemptId:'unknown-attempt'},12),'발송 결과 확인 중 · 자동 복구 대기');
-  assert.equal(accountTimingState({id:'a'},{...group,activeAttemptId:'unknown-attempt'},{status:'unknown'},12),'발송 결과 확인 중 · 자동 복구 대기');
+  assert.equal(groupTimingState({...group,activeAttemptId:'unknown-attempt'},12),'이전 실행 차단 확인 중 · 자동 복구 대기');
+  assert.equal(accountTimingState({id:'a'},{...group,activeAttemptId:'unknown-attempt'},{status:'unknown'},12),'이전 실행 차단 확인 중 · 자동 복구 대기');
  }
  assert.equal(groupTimingState({status:'paused'},12),'일시정지됨');
  assert.equal(groupTimingState({status:'stopped'},12),'중지됨');
@@ -115,4 +115,12 @@ test('긴 재시도는 서버 시각에 따른 경과를 표시하며 정상 대
  assert.equal(retryDurationText({...g,waitReason:'account_interval'},a,40000,1000,true),'');
  assert.equal(retryDurationText({...g,status:'stopped'},a,40000,1000,true),'');
  assert.equal(retryDurationText(g,a,40000,21000,true),'');assert.equal(retryDurationText(g,a,40000,1000,false),'');
+});
+
+test('현재 계정과 그룹은 Enter 전 슬로우모드 대기를 같은 문구로 표시한다',()=>{
+ const group={status:'running',members:['a','b'],cursor:0,activeAttemptId:'attempt',waitReason:'discord_cooldown'};
+ assert.equal(groupTimingState(group,null),'Discord 제한 해제 대기');
+ assert.equal(accountTimingState({id:'a'},group,{status:'permitted'},null),'Discord 제한 해제 대기');
+ assert.equal(accountTimingState({id:'b'},group,undefined,null),'차례 대기');
+ assert.equal(accountTimingState({id:'a'},{...group,waitReason:'awaiting_result'},{status:'permitted'},null),'발송 확인 중');
 });
