@@ -45,11 +45,23 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     try {
-      if(closed)throw fail(503,'관리 프로그램을 다시 시작하고 있습니다. 잠시 기다려 주세요.');
       if (req.headers.host!==currentOrigin().host || (req.headers.origin && req.headers.origin!==origin))throw fail(403,'허용되지 않은 요청 출처입니다.');
       const rawPath=(req.url || '/').split('?')[0];
       if (decodeURIComponent(rawPath).split('/').some(s=>s==='..' || s==='.') || rawPath.includes('\\'))throw fail(404,'경로를 찾을 수 없습니다.');
       const url=new URL(req.url,origin),path=url.pathname;
+      if(closed){
+        // 화면 탐색은 재시작 동안 문서를 유지하며 같은 주소의 복귀를 기다립니다.
+        // API는 기존 503 JSON 계약을 유지합니다.
+        if(mode==='local'&&req.method==='GET'&&spaRoutes.has(path)){
+          const nonce=secret();
+          res.setHeader('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`);
+          res.setHeader('Content-Type','text/html; charset=utf-8');
+          res.setHeader('Retry-After','3');
+          res.writeHead(503);
+          return res.end(`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DICO 다시 연결 중</title><h1>관리 프로그램을 다시 연결하고 있습니다</h1><p>연결이 돌아오면 이 화면이 자동으로 열립니다.</p><script nonce="${nonce}">async function reconnect(){try{const result=await fetch('/api/access-mode',{cache:'no-store',signal:AbortSignal.timeout(2000)});if(result.ok){location.reload();return;}}catch{}setTimeout(reconnect,3000);}setTimeout(reconnect,3000);</script></html>`);
+        }
+        throw fail(503,'관리 프로그램을 다시 시작하고 있습니다. 잠시 기다려 주세요.');
+      }
       if(path==='/api/access-mode'&&req.method==='GET')return json(res,200,{mode});
       if(path==='/api/support/receive'&&req.method==='POST'){
         if(!supportDelivery)throw fail(404,'제보 수신 기능이 준비되지 않았습니다.');

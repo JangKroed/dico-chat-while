@@ -124,3 +124,17 @@ test('automatic support controls require UI auth and CSRF; inbound reports use a
  assert.equal((await request(app,'/api/support/receive',{method:'POST',body:{report:{}},headers:{authorization:`Bearer ${bridgeToken}`}})).status,401);
  assert.equal((await request(app,'/api/support/receive',{method:'POST',body:{report:{}},headers:{authorization:'Bearer receiver'}})).status,202);assert.equal(received,1);
 });
+
+test('재시작 중 설정 경로는 복구 화면을 반환하고 API와 외부 Host는 분리한다',async()=>{
+ const app=createCentralApplication({manager:manager(),origin,bridgeToken});
+ await app.close();
+ const page=await request(app,'/settings');
+ assert.equal(page.status,503);
+ assert.match(page.headers['content-type'],/^text\/html/);
+ assert.match(page.headers['content-security-policy'],/script-src 'nonce-[a-f0-9]+'/);
+ assert.match(page.body,/fetch\('\/api\/access-mode'/);
+ const api=await request(app,'/api/access-mode');
+ assert.equal(api.status,503);
+ assert.match(api.headers['content-type'],/^application\/json/);
+ assert.equal((await request(app,'/settings',{headers:{host:'example.com'}})).status,403);
+});
