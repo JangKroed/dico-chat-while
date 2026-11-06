@@ -133,7 +133,12 @@ for(const stopAgain of [false,true])test(`모두 실행 예약은 결과가 확�
   f.manager.execute('service.stopAll');
   for(const c of f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL'))bridge({type:'ACK',commandId:c.id,status:'applied',executionBlocked:true,attemptId:attempt.id});
  }
- bridge({type:'DELIVERY_RESULT',attemptId:attempt.id,outcome:'confirmed',messageId:'123456789012345678'});
+ const recovery=f.manager.commands(f.session.instanceId).find(c=>c.type==='RECONCILE');
+ const window=recovery.payload.recoveryWindow;
+ assert.ok(window);
+ const snowflake=ms=>String(BigInt(ms-1420070400000)<<22n);
+ assert.throws(()=>bridge({type:'DELIVERY_RESULT',attemptId:attempt.id,outcome:'confirmed',messageId:snowflake(window.until+1)}),{code:'EVIDENCE_REQUIRED'});
+ bridge({type:'DELIVERY_RESULT',attemptId:attempt.id,outcome:'confirmed',messageId:snowflake(window.from)});
  f.manager.tick();
  assert.equal(f.manager.snapshot().groups[0].status,stopAgain?'stopped':'running');
  assert.equal(f.manager.snapshot().groups[0].autoResume,undefined);

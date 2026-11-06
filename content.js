@@ -772,17 +772,21 @@
    * 응답 유실 등의 상황에서 현재 화면과 기존 발송 정보를 대조합니다.
    * 채널·초안·작성자가 불명확하면 uncertain을 반환하며 새 Enter를 실행하지 않습니다.
    */
-  function reconcile(target, delivery) {
+  function reconcile(target, delivery, recoveryWindow) {
     const unknown = (reason, messageId) => ({status:'uncertain', reason, ...(messageId ? {messageId} : {})});
     if (!target || !matchesTarget(target)) return unknown('wrong-channel');
     if (!delivery?.id || typeof delivery.text !== 'string' || !Number.isFinite(delivery.startedAt)) return unknown('invalid-delivery');
+    // 중앙이 증명한 조회 구간에서는 게시 이력만 읽으며 초안 상태로 판정을 막지 않습니다.
+    const historyOnly=target.coordinated===true&&Number.isSafeInteger(recoveryWindow?.from)&&
+      Number.isSafeInteger(recoveryWindow.until)&&recoveryWindow.from<=recoveryWindow.until;
+    if(target.coordinated&&!coordinatedAccountMatches(target))return unknown('author-unknown');
     const found = editors();
-    if (found.length !== 1) return unknown('draft-or-editor');
+    if (!historyOnly&&found.length !== 1) return unknown('draft-or-editor');
     const editor = found[0];
-    const draft = normalize(editorText(editor));
-    const nextText = [0,1].includes(delivery.index) ? target.messages?.[1-delivery.index] : undefined;
-    const form = editor.closest?.('form') || editor.parentElement;
-    if (editorContent(editor).unsupported || form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]')) return unknown('draft-or-editor');
+    const draft = historyOnly?'':normalize(editorText(editor));
+    const nextText = !historyOnly&&[0,1].includes(delivery.index) ? target.messages?.[1-delivery.index] : undefined;
+    const form = editor?.closest?.('form') || editor?.parentElement;
+    if (!historyOnly&&(editorContent(editor).unsupported || form?.querySelector('[class*="uploadContainer"], [class*="channelAttachmentArea"] li, [class*="replyBar"]'))) return unknown('draft-or-editor');
     const user = ownUserId(target);
     if (!user) return unknown('author-unknown');
     const candidates = new Set();
@@ -801,7 +805,9 @@
       // Use the acknowledged server ID as an independent high-water mark.
       if (id && /^\d{17,20}$/.test(target.lastConfirmedMessageId || '') && BigInt(id)<=BigInt(target.lastConfirmedMessageId)) continue;
       // No backwards tolerance: an older identical announcement is not proof.
-      if (!id || created < delivery.startedAt || created > Date.now() + 2000 || authorId(row) !== user) continue;
+      const from=historyOnly?recoveryWindow.from:delivery.startedAt;
+      const until=historyOnly?Math.min(recoveryWindow.until,Date.now()+2000):Date.now()+2000;
+      if (!id || created < from || created > until || authorId(row) !== user) continue;
       if (currentMatch) candidates.add(id);
       if (nextMatch && !currentMatch) { nextAlreadyPosted = id; oppositePosts.set(id,created); }
     }
@@ -815,6 +821,7 @@
     }
     if (nextAlreadyPosted) return unknown('next-already-posted',nextAlreadyPosted);
     if (candidates.size !== 1) return unknown(candidates.size ? 'multiple-matches' : 'no-proof');
+    if(historyOnly)return {status:'confirmed',messageId:[...candidates][0]};
     let draftAction = 'empty';
     if (draft) {
       if (typeof nextText === 'string' && composerMatches(editor,nextText)) draftAction = 'reuse-next';
@@ -1235,7 +1242,7 @@
       }).catch(()=>respond({status:'uncertain',code:'DELIVERY_RECEIPT_UNAVAILABLE'}));return true;
     }
     if (message?.type === 'DICO_RECONCILE') {
-      void refreshOwnIdentity(message.target).then(()=>{const result=reconcile(message.target,message.delivery);reportTrace(message.delivery,'reconcile',{result:result.status,draftAction:result.draftAction});respond(result);}).catch(()=>respond({status:'uncertain',code:'ACCOUNT_UNREADABLE'}));return true;
+      void refreshOwnIdentity(message.target).then(()=>{const result=reconcile(message.target,message.delivery,message.recoveryWindow);reportTrace(message.delivery,'reconcile',{result:result.status,draftAction:result.draftAction});respond(result);}).catch(()=>respond({status:'uncertain',code:'ACCOUNT_UNREADABLE'}));return true;
     }
     if (message?.type === 'DICO_CHANNEL_LIMIT') { refreshOwnIdentity(message.target).then(()=>detectSlowmodeSetting(message.target)).then(slowmodeSeconds=>respond({slowmodeSeconds})).catch(()=>respond({slowmodeSeconds:null})); return true; }
     if(message?.type==='DICO_DRAFT_INSPECT'){void refreshOwnIdentity(message.target).then(()=>respond(inspectManagedDraft(message.target,message.delivery))).catch(()=>respond({status:'blocked',code:'ACCOUNT_UNREADABLE'}));return true;}

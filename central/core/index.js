@@ -1042,7 +1042,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(['received','applied','rejected'].includes(message.status),'VALIDATION','Invalid command acknowledgment.');
         if(['completed','superseded'].includes(c.status)||c.status==='rejected'&&message.status==='rejected'||c.status==='applied'&&message.status==='received')return{ok:true};
         ensure(!(c.status==='rejected'&&message.status!=='rejected'),'COMMAND_REJECTED','Rejected command cannot later be applied.',409);
-        c.status=message.status;c[`${message.status}At`]=now();
+        c.status=message.status;c[`${message.status}At`]??=now();
         if(message.status==='applied'&&c.type==='CLOSE_CHANNEL'){state.removals.closeRequests=state.removals.closeRequests.filter(r=>r.removalId!==c.payload.removalId);for(const problem of state.incidents.filter(problem=>problem.status==='open'&&state.commands.some(old=>old.id===problem.commandId&&old.payload.removalId===c.payload.removalId)))resolveIncident(problem,{reasonCode:'managed_tab_closed'});}
         if(message.status==='applied'&&c.type==='LOOKUP_CHANNEL_NAME'){
           const target=state.targets.find(t=>t.id===c.payload.targetId&&t.guildId===c.payload.guildId&&t.channelId===c.payload.channelId);
@@ -1123,7 +1123,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             const originalSession=typeof a.sessionId==='string'&&a.sessionId.length>0&&message.receiptOriginSessionId===a.sessionId&&recovery?.payload.originSessionId===a.sessionId;
             const sessionMatches=a.sessionId===i.sessionId||a.status==='unknown'&&a.executionBlocked===true&&recovery&&originalSession;
             ensure((a.status==='permitted'||a.status==='unknown'&&a.executionBlocked===true&&recovery)&&sessionMatches&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
-          }else ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
+          }else{
+            ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
+            const window=a.status==='unknown'&&state.commands.find(c=>c.type==='RECONCILE'&&c.instanceId===i.id&&c.sessionId===i.sessionId&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status))?.payload.recoveryWindow;
+            if(window){
+              // 구버전 탭이 시간 범위를 무시해도 중앙에서 범위 밖의 게시를 거절합니다.
+              const postedAt=/^\d{17,20}$/.test(message.messageId)?Number((BigInt(message.messageId)>>22n)+1420070400000n):null;
+              ensure(postedAt!==null&&postedAt>=window.from&&postedAt<=window.until,'EVIDENCE_REQUIRED','The observed post falls outside the original delivery window.');
+            }
+          }
         }
         else {
           ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must confirm the old attempt is blocked.',409);
@@ -1250,7 +1258,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       for(const cmd of state.commands.filter(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)&&now()-c.createdAt>=30000))cmd.status='superseded';
       if(now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;
       a.recoveryCount=(a.recoveryCount||0)+1;a.recoveryAfter=now()+Math.min(30000,5000*2**Math.min(3,Math.floor(a.recoveryCount/3)));
-      command('RECONCILE',a.instanceId,{...attemptPayload(a),recoveryTabId:channel.tabId});
+      // 원래 실행 세션의 차단 ACK를 상한으로 삼아 이후 게시를 이전 발송으로 오인하지 않습니다.
+      const fence=state.commands.find(c=>c.type==='CONTROL'&&c.status==='applied'&&c.instanceId===a.instanceId&&c.sessionId===a.sessionId&&c.payload.attemptId===a.id&&Number.isSafeInteger(c.appliedAt)&&c.appliedAt>=a.permittedAt);
+      const recoveryWindow=Number.isSafeInteger(a.permittedAt)&&fence?{from:a.permittedAt,until:fence.appliedAt}:undefined;
+      command('RECONCILE',a.instanceId,{...attemptPayload(a),recoveryTabId:channel.tabId,...(recoveryWindow?{recoveryWindow}:{})});
       event('delivery.recovery_requested',{attemptId:a.id,groupId:a.groupId,retryCount:a.recoveryCount});
     }
     // 자동 재검사도 수동 재검사와 같은 근거 규칙을 사용합니다.
