@@ -19,7 +19,7 @@ const activeAttempt=a=>ACTIVE.has(a.status)&&!(a.detached===true&&a.status==='un
 const MAX_PRE_ENTER_WAIT_MS=21_630_000;
 // 입력 준비나 명시적으로 Enter 전임이 입증된 응답에서만 사용하는 복구 사유입니다.
 // 발송 결과가 불명확한 시도에 이 목록을 적용해 새 Enter를 만들지 않습니다.
-const transientPreparationCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE','ACCOUNT_UNVERIFIED','ACCOUNT_UNREADABLE','DRAFT_INSPECTION_UNAVAILABLE','COOLDOWN_UNVERIFIED','AUTHORIZATION_EXPIRED','AUTHORIZATION_UNAVAILABLE','NATIVE_REQUEST_TIMEOUT','NATIVE_DISCONNECTED','NATIVE_SEND_FAILED','SERVICE_UNAVAILABLE','CONTENT_EXCEPTION_BEFORE_ENTER']);
+const transientPreparationCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE','ACCOUNT_UNVERIFIED','ACCOUNT_UNREADABLE','DRAFT_INSPECTION_UNAVAILABLE','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','AUTHORIZATION_EXPIRED','AUTHORIZATION_UNAVAILABLE','NATIVE_REQUEST_TIMEOUT','NATIVE_DISCONNECTED','NATIVE_SEND_FAILED','SERVICE_UNAVAILABLE','CONTENT_EXCEPTION_BEFORE_ENTER']);
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
@@ -680,19 +680,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           'ATTEMPT_UNRESOLVED','이전 발송의 실행 차단과 현재 실행 예약이 확인된 경우에만 건너뛸 수 있습니다.',409);
         const owner=get('instances',a.instanceId);
         ensure(owner.connected&&owner.capabilities?.includes('skip-unknown-v1'),'EXTENSION_UPDATE_REQUIRED','브라우저 확장 업데이트와 연결 확인을 기다리고 있습니다.',409);
-        // 사용자 선택은 결과 확정과 분리합니다. 기록은 unknown 그대로 두고 이 차례만 종료합니다.
-        const at=now(),mono=monotonicNow();
-        a.detached=true;a.detachedAt=at;a.skippedAt=at;
-        g.activeAttemptId=null;g.cursor=(g.cursor+1)%g.members.length;g.waitReason='resume_required';
-        g.lastSkippedAt=at;g.nextMono=Math.max(g.nextMono||0,mono+g.intervalMs);
-        c.lastSkippedAt=at;c.nextMono=Math.max(c.nextMono||0,mono+effectiveInterval(c));
-        if(c.playlist.length)c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;
-        for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)&&['queued','received'].includes(cmd.status)))cmd.status='superseded';
-        for(const problem of state.incidents.filter(i=>i.status==='open'&&i.attemptId===a.id&&i.code==='delivery_unknown'))resolveIncident(problem,{attemptId:a.id,reasonCode:'user_skipped_unknown'});
-        if(c.pendingPlaylist){applyPlaylist(c,latestPlaylist(c.pendingPlaylist),{preserveIndex:c.pendingPlaylistPreserveIndex===true});delete c.pendingPlaylist;delete c.pendingPlaylistPreserveIndex;}
-        else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
-        else if(c.verified&&state.instances.find(i=>i.id===c.instanceId)?.connected)queueConfiguration(c);
-        event('delivery.unknown_skipped',{attemptId:a.id,groupId:g.id},'warning');
+        skipUnknownTurn(g,a,c,'user_skipped_unknown');
         return {skipped:true};
       }
       case 'attempt.resolve':{const a=get('attempts',p.id);ensure(p.outcome==='confirmed'||p.outcome==='not_sent','VALIDATION','Choose confirmed or not_sent.');if(p.outcome==='confirmed')ensure(p.messageId,'EVIDENCE_REQUIRED','Provide the observed Discord message ID.');else ensure(a.executionBlocked===true,'EXECUTION_UNCERTAIN','The executor must first confirm that the old attempt can no longer execute.',409);return finish(a,p.outcome,{messageId:p.messageId,manual:true});}
@@ -876,7 +864,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const c of state.commands.filter(c=>c.instanceId===i.id&&(!['completed','applied','rejected'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied'||c.type==='CONTROL'&&c.status==='rejected')))c.status='superseded';
         invalidateAccounts(i.id);i.sessionId=id();i.connected=true;i.stableSinceMono=monotonicNow();i.lastSeenAt=now();i.lastSeenMono=monotonicNow();i.legacyFrozen=false;i.legacyPending=true;
         for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='session_changed';c.appliedVersion=0;delete c.tabId;}
-        for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a))){markUnknown(a,'session_changed');command('RECONCILE',i.id,attemptPayload(a));}
+        for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a))){markUnknown(a,'session_changed');if(!i.capabilities.includes('skip-unknown-v1'))command('RECONCILE',i.id,attemptPayload(a));}
         for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
         queuePendingCloses(i.id);event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
       }
@@ -1210,6 +1198,21 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
    * 남으면 대기합니다. 모든 멤버를 현재 세션에서 새로 관찰하고 설정 적용까지
    * 확인한 뒤 기존 start 경로로 잠금·새 runId를 확보합니다. 입력 재발급은 하지 않습니다.
    */
+  function skipUnknownTurn(g,a,c,reasonCode){
+    // 차례 진행은 결과 확정과 분리합니다. 기록은 unknown 그대로 두고 이 차례만 종료합니다.
+    const at=now(),mono=monotonicNow();
+    a.detached=true;a.detachedAt=at;a.skippedAt=at;
+    g.activeAttemptId=null;g.cursor=(g.cursor+1)%g.members.length;g.waitReason='resume_required';
+    g.lastSkippedAt=at;g.nextMono=Math.max(g.nextMono||0,mono+g.intervalMs);
+    c.lastSkippedAt=at;c.nextMono=Math.max(c.nextMono||0,mono+effectiveInterval(c));
+    if(c.playlist.length)c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;
+    for(const cmd of state.commands.filter(cmd=>cmd.payload.attemptId===a.id&&['PREPARE','COMMIT_PERMIT','RECONCILE'].includes(cmd.type)&&['queued','received'].includes(cmd.status)))cmd.status='superseded';
+    for(const problem of state.incidents.filter(i=>i.status==='open'&&i.attemptId===a.id&&i.code==='delivery_unknown'))resolveIncident(problem,{attemptId:a.id,reasonCode});
+    if(c.pendingPlaylist){applyPlaylist(c,latestPlaylist(c.pendingPlaylist),{preserveIndex:c.pendingPlaylistPreserveIndex===true});delete c.pendingPlaylist;delete c.pendingPlaylistPreserveIndex;}
+    else if(c.pendingIntervalSync){c.version++;commitIntervalConfiguration(c);}
+    else if(c.verified&&state.instances.find(i=>i.id===c.instanceId)?.connected)queueConfiguration(c);
+    event('delivery.unknown_skipped',{attemptId:a.id,groupId:g.id},'warning');
+  }
   function autoResumeGroups(){
     const mono=monotonicNow();
     for(const g of state.groups.filter(g=>g.autoResume)){
@@ -1271,14 +1274,27 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(stale&&!failPreparation(a,'PREPARE_TIMEOUT'))markUnknown(a,'result_timeout');
     }
     if(!state.lastPrunedAt||wall-state.lastPrunedAt>=86400000)pruneRecords();
+    // 미확인 발송을 정리하기 전에 현재 실행의 차단을 확인합니다.
+    // 사용자가 중지한 그룹은 제외하고, 기존 보호 일시정지 경로로 차단 ACK를 확보합니다.
+    for(const g of state.groups.filter(g=>g.status==='needs_review'&&!g.controlIntent&&g.enabled!==false&&g.runId&&g.reconcileResumeRunId===g.runId)){
+      const a=state.attempts.find(a=>a.id===g.activeAttemptId);
+      if(a?.status==='unknown'&&(a.executionBlocked!==true||get('instances',a.instanceId).capabilities?.includes('skip-unknown-v1')))control(g,'pause',{systemReason:'delivery_unknown'});
+    }
+    // 실행 예약과 차단 적용이 확인되면 이전 게시물을 찾지 않고 차례를 넘깁니다.
+    for(const g of state.groups.filter(g=>g.enabled!==false&&g.autoResume&&g.status==='paused'&&!g.controlIntent)){
+      const a=state.attempts.find(a=>a.id===g.activeAttemptId);
+      if(a?.status!=='unknown'||!a.executionBlocked||a.detached||a.runId!==g.runId||g.members[g.cursor]!==a.bindingId)continue;
+      const owner=get('instances',a.instanceId);
+      if(owner.connected&&owner.capabilities?.includes('skip-unknown-v1'))skipUnknownTurn(g,a,get('channels',a.bindingId),'auto_skipped_unknown');
+    }
     /**
-     * 실행 종료가 확인된 미확인 시도만 읽기 전용으로 자동 대조합니다.
+     * 새 차례 종료 표식을 이해하지 못하는 구버전 확장만 기존 방식으로 대조합니다.
      * 같은 세션/탭/설정 연결이 유지된 경우에 한해 5~30초 간격으로 횟수 제한 없이 조회합니다.
      * 발송 실행 중인 시도나 교체된 탭을 건드리지 않고 PREPARE/Enter도 재발급하지 않습니다.
      */
     for(const a of state.attempts.filter(a=>a.status==='unknown'&&a.executionBlocked===true&&!a.detached)){
       const owner=state.instances.find(i=>i.id===a.instanceId),channel=state.channels.find(c=>c.id===a.bindingId);
-      if(!owner?.connected||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||!Number.isInteger(channel.tabId)||channel.sessionId!==owner.sessionId||channel.accountId!==a.accountId||channel.guildId!==a.guildId||channel.channelId!==a.channelId)continue;
+      if(!owner?.connected||owner.capabilities?.includes('skip-unknown-v1')||now()-owner.lastSeenAt<0||now()-owner.lastSeenAt>15000||!channel?.verified||!Number.isInteger(channel.tabId)||channel.sessionId!==owner.sessionId||channel.accountId!==a.accountId||channel.guildId!==a.guildId||channel.channelId!==a.channelId)continue;
       // 읽기 전용 조회의 응답이 유실되어도 대기열에 영구히 묶이지 않습니다.
       for(const cmd of state.commands.filter(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)&&now()-c.createdAt>=30000))cmd.status='superseded';
       if(now()<(a.recoveryAfter||0)||state.commands.some(c=>c.type==='RECONCILE'&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status)))continue;

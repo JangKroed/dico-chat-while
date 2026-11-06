@@ -17,7 +17,7 @@ export function preparationDeadline(deadline:Timestamp|null|undefined,leadSecond
 function stoppedState(group:TimingGroup|undefined):string|null {
   if(!group)return '발송 그룹 미지정'
   // 시스템 복구 의도가 남아 있으면 수동 일시정지와 구분하되 발송 시각은 약속하지 않습니다.
-  if(group.autoResume)return group.activeAttemptId?'발송 결과 확인 중 · 자동 복구 대기':'자동 복구 중 · 정상 확인 후 재개'
+  if(group.autoResume)return group.activeAttemptId?'이전 실행 차단 확인 중 · 자동 복구 대기':'자동 복구 중 · 정상 확인 후 재개'
   return ({stopped:'중지됨',paused:'일시정지됨',pause_pending:'일시정지 확인 중',stop_pending:'중지 확인 중',resume_required:'재개 확인 필요',needs_review:'발송 복구 대기'} as Record<string,string>)[group.status]||null
 }
 export function groupTimingState(group:TimingGroup,seconds:number|null):string {
@@ -33,7 +33,7 @@ export function groupTimingState(group:TimingGroup,seconds:number|null):string {
   return seconds>0?`입력 준비까지 약 ${seconds}초`:'입력 준비 대기'
 }
 export function accountTimingState(channel:Pick<Channel,'id'|'nextEligibleAt'>,group:TimingGroup|undefined,attempt:Pick<Attempt,'status'>|undefined,seconds:number|null):string {
-  if(attempt?.status==='unknown')return group?.autoResume?'발송 결과 확인 중 · 자동 복구 대기':'발송 복구 대기'
+  if(attempt?.status==='unknown')return group?.autoResume?'이전 실행 차단 확인 중 · 자동 복구 대기':'발송 복구 대기'
   if(attempt?.status==='permitted'&&group?.waitReason==='delivery_observation')return '전송 처리 중 · 입력창 자동 관찰'
   if(attempt?.status==='permitted'&&group?.waitReason==='authorization_retry')return '전송 허가 연결 자동 복구 중'
   if(attempt?.status==='permitted')return group?.waitReason==='send_retry'?'전송 재시도 중':'발송 확인 중'

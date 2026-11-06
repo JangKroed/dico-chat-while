@@ -7,10 +7,10 @@ export function visiblePage(path:string):UserPage {
 export function recentConfirmed(s:Snapshot){return s.attempts.filter(a=>a.status==='confirmed').sort((a,b)=>new Date(b.confirmedAt||b.finalizedAt||b.createdAt||0).getTime()-new Date(a.confirmedAt||a.finalizedAt||a.createdAt||0).getTime()).slice(0,8)}
 export function operationSummary(s:Snapshot,stale=false):{kind:string;title:string;description:string}{
  if(stale)return {kind:'stale',title:'최신 상태를 기다리고 있습니다',description:'마지막으로 받은 상태를 표시합니다. 현재 실행·중지 완료 여부는 아직 확인할 수 없습니다.'}
- if(s.groups.some(g=>g.autoResume?.reasonCode!=='delivery_recovery_requested'&&['stop_pending','pause_pending'].includes(g.status)))return {kind:'pending',title:'중단 요청의 적용을 기다리고 있습니다',description:'브라우저 확인 전에는 중지 완료로 표시하지 않습니다. 이전 발송의 결과는 별도로 보존됩니다.'}
+ if(s.groups.some(g=>!g.autoResume&&['stop_pending','pause_pending'].includes(g.status)))return {kind:'pending',title:'중단 요청의 적용을 기다리고 있습니다',description:'브라우저 확인 전에는 중지 완료로 표시하지 않습니다. 이전 발송의 결과는 별도로 보존됩니다.'}
  const reserved=s.groups.filter(g=>g.autoResume?.reasonCode==='delivery_recovery_requested'||g.autoResume&&s.attempts.some(a=>a.id===g.activeAttemptId&&a.status==='unknown'))
  const waitingForResult=reserved.filter(g=>g.activeAttemptId).length
- if(waitingForResult)return {kind:'recovering',title:'실행을 예약했습니다',description:`${waitingForResult}개 그룹이 이전 발송 결과 확인을 기다리고 있습니다. 확인이 어렵다면 그룹에서 그 차례를 건너뛰고 재개할 수 있습니다.`}
+ if(waitingForResult)return {kind:'recovering',title:'실행을 예약했습니다',description:`${waitingForResult}개 그룹이 이전 실행 차단을 확인하고 있습니다. 차단이 확인되면 연결과 설정을 점검한 뒤 자동으로 다음 차례를 시작합니다.`}
  if(reserved.length)return {kind:'recovering',title:'실행을 예약했습니다',description:'브라우저 연결과 적용된 설정이 확인되면 자동으로 시작합니다.'}
  const unknown=s.attempts.filter(a=>a.status==='unknown'&&s.groups.some(g=>g.activeAttemptId===a.id))
  // 재시도 횟수나 과거 오류만으로 복구 중이라고 추측하지 않습니다.
