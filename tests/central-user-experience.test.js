@@ -53,3 +53,14 @@ test('exhausted preparation remains a current failure even after active attempt 
  const s=snapshot();s.groups=[{id:'g',status:'paused',waitReason:'preparation_failed'}];
  assert.equal(operationSummary(s).kind,'blocked');
 });
+
+test('모두 실행 예약은 대조 명령 사이와 화면 재접속 후에도 예약으로 표시한다',()=>{
+ const s=snapshot();
+ s.groups=[{id:'g',status:'pause_pending',activeAttemptId:'old',autoResume:{reasonCode:'delivery_recovery_requested'}}];
+ s.attempts=[{id:'old',status:'unknown'}];
+ assert.equal(operationSummary(s).title,'실행을 예약했습니다');
+ s.groups[0].status='paused';
+ assert.equal(operationSummary(s).title,'실행을 예약했습니다');
+ delete s.groups[0].autoResume;
+ assert.equal(operationSummary(s).kind,'blocked');
+});

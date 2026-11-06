@@ -638,9 +638,23 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(targets.length>0,'NO_GROUPS','활성화된 그룹이 없습니다.',409);
         for(const g of targets)ensure(g.enabled!==false,'GROUP_DISABLED','비활성 그룹이 선택되어 있습니다.',409);
         const candidates=targets.filter(g=>g.status!=='running');
-        for(const g of candidates)start(g);
-        event('service.started_all',{started:candidates.length,alreadyRunning:targets.length-candidates.length});
-        return{started:candidates.length,alreadyRunning:targets.length-candidates.length};
+        let started=0,queuedForRecovery=0;
+        for(const g of candidates){
+          if(g.autoResume?.reasonCode==='delivery_recovery_requested'){queuedForRecovery++;continue;}
+          const active=state.attempts.find(a=>a.id===g.activeAttemptId);
+          if(!g.controlIntent&&['stopped','paused','needs_review'].includes(g.status)&&active?.status==='unknown'&&active.executionBlocked===true){
+            // 사용자 실행 요청을 보존하되, 과거 결과가 확정될 때까지 새 시도를 만들지 않습니다.
+            // 현재 세션의 제어 ACK·관찰·설정 검증은 기존 자동 재개 경로에서 처리합니다.
+            control(g,'pause',{systemReason:'delivery_recovery_requested'});
+            queuedForRecovery++;
+            event('group.start_queued_for_recovery',{groupId:g.id,attemptId:active.id});
+            continue;
+          }
+          start(g);started++;
+        }
+        const result={started,alreadyRunning:targets.length-candidates.length,...(queuedForRecovery?{queuedForRecovery}:{})};
+        event('service.started_all',result);
+        return result;
       }
       case 'settings.reset':{
         ensure(p.confirmation==='RESET_ALL_SETTINGS','RESET_CONFIRMATION_REQUIRED','초기화 확인 문구가 필요합니다.');

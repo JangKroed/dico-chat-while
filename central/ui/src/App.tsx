@@ -206,6 +206,8 @@ function App() {
     const noticeId=++noticeSequence.current
     try {
       const result=await submitAndRefresh(()=>command(action,payload),()=>refresh(undefined,true))
+      const queued=action==='service.startAll'?(result.response as {result?:{queuedForRecovery?:number}})?.result?.queuedForRecovery:0
+      if(queued)success=`실행 요청을 접수했습니다. ${queued}개 그룹은 이전 발송 확인 후 자동으로 시작합니다.`
       if(noticeSequence.current===noticeId)showNotice(result.refreshed?success:`${success} 요청은 접수됐으며 화면 상태를 다시 불러오고 있습니다.`)
       return true
     }

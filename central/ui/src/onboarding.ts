@@ -37,7 +37,13 @@ export function groupBlockers(s:Snapshot,g:Group,now=Date.now()):string[] {
   return [...new Set(reasons)]
 }
 export function allRunBlockers(s:Snapshot,now=Date.now()):string[] {
-  const reasons=s.groups.filter(g=>g.enabled!==false&&g.status!=='running').flatMap(g=>groupBlockers(s,g,now))
+  const reasons=s.groups.filter(g=>g.enabled!==false&&g.status!=='running').flatMap(g=>{
+    if(g.autoResume?.reasonCode==='delivery_recovery_requested')return []
+    const active=s.attempts?.find(a=>a.id===g.activeAttemptId)
+    // 결과 대기 중에도 중앙이 실행 요청을 보존하고 안전 조건이 회복되면 재개합니다.
+    if(['stopped','paused','needs_review'].includes(g.status)&&active?.status==='unknown'&&active.executionBlocked===true)return []
+    return groupBlockers(s,g,now)
+  })
   const targets=new Set<string>()
   for(const g of s.groups.filter(g=>g.enabled!==false)){
     const key=`${g.guildId}:${g.channelId}`

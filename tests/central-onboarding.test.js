@@ -70,3 +70,12 @@ test('unnamed legacy channel IDs use a pending label while explicit numeric alia
  s.targets[0].nameCustomized=true;assert.equal(logicalTargets(s)[0].name,'123');
  delete s.targets;s.channels=[{guildId:'g',channelId:'123',name:'123'}];assert.equal(logicalTargets(s)[0].namePending,true);
 });
+
+test('실행 차단이 확인된 이전 발송은 모두 실행을 막지 않고 복구 예약을 허용한다',()=>{
+ const s=snapshot();s.groups[0].activeAttemptId='old';
+ s.channels[0].appliedVersion=0;
+ s.attempts=[{id:'old',status:'unknown',executionBlocked:true}];
+ assert.deepEqual(allRunBlockers(s,now),[]);
+ s.attempts[0].executionBlocked=false;
+ assert.ok(allRunBlockers(s,now).includes('진행·미확인 시도 확인 필요'));
+});
