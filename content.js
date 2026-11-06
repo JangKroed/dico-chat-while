@@ -396,8 +396,8 @@
   }
   function slowmode(editor) {
     const form = editor?.closest('form') || editor?.parentElement;
-    const nodes = [...(form?.querySelectorAll?.('[class*="slowModeCooldown"], [class*="slowmodeCooldown"]') || [])]
-      .filter(node => node.getClientRects().length > 0);
+    const candidates = [...(form?.querySelectorAll?.('[class*="slowModeCooldown"], [class*="slowmodeCooldown"]') || [])];
+    const nodes = candidates.filter(node => node.getClientRects().length > 0);
     let seconds = 0,cooldownKnown=true;
     for (const node of nodes) {
       const text = (node.textContent || '').trim();
@@ -405,7 +405,7 @@
       if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) {cooldownKnown=false;continue;}
       seconds = Math.max(seconds, Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     }
-    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0,cooldownKnown, cooldownMs:Math.min(seconds,21600)*1000};
+    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0,hiddenCooldownIndicator:candidates.length>nodes.length,cooldownKnown, cooldownMs:Math.min(seconds,21600)*1000};
   }
   let cooldownProbeCancel = null;
   /**
@@ -1167,7 +1167,16 @@
         const retryRisk=managedTiming(target)&&retryCount===0&&profile?.path===location.pathname&&
           profile.accountId===target.ownUserId&&profileAge>=0&&profileAge<=RECEIPT_TTL_MS&&
           profile.retryCount>=3&&!cooldown.slowmodeDetected;
-        trace('before-enter',{retryCount,retryRisk,...(retryRisk?{priorRetryCount:profile.retryCount}:{})});
+        // 화면에 노출된 제출 제한만 기록합니다. 숨은 카운트다운은 대기 시간으로 적용하지 않습니다.
+        const submit=editor.closest('form')?.querySelector?.('button[type="submit"], input[type="submit"]');
+        trace('before-enter',{
+          retryCount,retryRisk,
+          editorAriaDisabled:editor.getAttribute?.('aria-disabled')==='true',
+          editorAriaReadonly:editor.getAttribute?.('aria-readonly')==='true',
+          submitControlPresent:Boolean(submit),
+          ...(submit?{submitControlDisabled:submit.disabled===true||submit.getAttribute?.('aria-disabled')==='true'}:{}),
+          ...(retryRisk?{priorRetryCount:profile.retryCount}:{}),
+        });
         operation.cancel=()=>watcher?.cancel('EXECUTION_STOPPED');
         assertOperationActive();
         const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed:true, view:window });
