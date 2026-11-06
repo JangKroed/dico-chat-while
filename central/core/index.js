@@ -852,7 +852,14 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         // 연결 확장 버전으로 페이지 코드를 추정하지 않으며 기존 trace를 재사용합니다.
         if(data.contentVersion||data.contentBuildId)a.codeObservation={...(data.contentVersion?{version:data.contentVersion}:{}),...(data.contentBuildId?{buildId:data.contentBuildId}:{}),observedAt:message.observedAt};
         if(!a.traceWindowAt||now()-a.traceWindowAt>=60000){a.traceWindowAt=now();a.traceWindowCount=0;}
-        if(a.traceWindowCount>=120&&!['finished','exception'].includes(message.stage))return{ok:true,recorded:false};a.traceWindowCount++;
+        // 입력 재시도 로그가 한도를 채워도 전송 요청/응답 관측은 별도로 남깁니다.
+        if(['network-start','network-result'].includes(message.stage)){
+          if((a.networkTraceCount||0)>=24)return{ok:true,recorded:false};
+          a.networkTraceCount=(a.networkTraceCount||0)+1;
+        }else{
+          if(a.traceWindowCount>=120&&!['finished','exception'].includes(message.stage))return{ok:true,recorded:false};
+          a.traceWindowCount++;
+        }
         event('delivery.trace',{attemptId:a.id,groupId:a.groupId,instanceId:i.id,stage:message.stage,observedAt:message.observedAt,sequence:message.sequence,data});return{ok:true,recorded:true};
       }
       if(message.type==='RECOVERY_STATUS')return{allowed:!state.attempts.some(a=>a.instanceId===i.id&&activeAttempt(a)&&!(a.status==='unknown'&&a.executionBlocked===true))};
