@@ -111,3 +111,31 @@ test('여러 멤버는 모든 브라우저의 현재 ACK와 새 관찰이 필요
  assert.equal(f.manager.snapshot().groups.find(g=>g.id===group.id).status,'pause_pending');ackSecond('CONTROL');f.manager.tick();assert.equal(f.manager.snapshot().groups.find(g=>g.id===group.id).status,'running');
  assert.equal(f.manager.snapshot().groups.find(g=>g.id===f.group.id).status,'stopped');
 });
+
+for(const stopAgain of [false,true])test(`모두 실행 예약은 결과가 확인되면 재개하고 후속 중지가 우선한다 (${stopAgain})`,t=>{
+ const f=fixture(t);f.manager.tick();const attempt=f.manager.snapshot().attempts[0];
+ const bridge=m=>f.manager.bridge({...m,sessionId:f.session.sessionId},f.session.instanceId);
+ bridge({type:'PREPARED',attemptId:attempt.id,accountId:'111',channelId:'333',configVersion:attempt.configVersion,draftClear:true});
+ f.manager.execute('service.stopAll');
+ for(const c of f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL'))bridge({type:'ACK',commandId:c.id,status:'applied',executionBlocked:true,attemptId:attempt.id});
+ assert.equal(f.manager.snapshot().groups[0].status,'stopped');
+ assert.equal(f.manager.execute('service.startAll').queuedForRecovery,1);
+ const controls=f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL');
+ assert.equal(f.manager.execute('service.startAll').queuedForRecovery,1);
+ assert.deepEqual(f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL').map(c=>c.id),controls.map(c=>c.id));
+ for(const c of controls)bridge({type:'ACK',commandId:c.id,status:'applied',executionBlocked:true,attemptId:attempt.id});
+ f.advance(3000);f.observe();f.manager.tick();
+ assert.equal(f.manager.snapshot().attempts.length,1);
+ assert.equal(f.manager.snapshot().attempts[0].status,'unknown');
+ assert.notEqual(f.manager.snapshot().groups[0].status,'running');
+ assert.ok(f.manager.commands(f.session.instanceId).some(c=>c.type==='RECONCILE'));
+ if(stopAgain){
+  f.manager.execute('service.stopAll');
+  for(const c of f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL'))bridge({type:'ACK',commandId:c.id,status:'applied',executionBlocked:true,attemptId:attempt.id});
+ }
+ bridge({type:'DELIVERY_RESULT',attemptId:attempt.id,outcome:'confirmed',messageId:'123456789012345678'});
+ f.manager.tick();
+ assert.equal(f.manager.snapshot().groups[0].status,stopAgain?'stopped':'running');
+ assert.equal(f.manager.snapshot().groups[0].autoResume,undefined);
+ assert.equal(f.manager.snapshot().attempts.length,1);
+});
