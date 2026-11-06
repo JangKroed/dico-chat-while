@@ -1,12 +1,12 @@
 import {channelMessagesChanged,messageSyncLabel} from './message-autosync'
 import {OperationalDashboard} from './OperationalDashboard'
-import {readDiagnosticMode,writeDiagnosticMode,visiblePage,operationSummary} from './user-experience'
+import {visiblePage,operationSummary} from './user-experience'
 import {createPendingActions,submitAndRefresh} from './action-feedback'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {AutomaticSupport} from './AutomaticSupport'
-import {SupportReportButton,SupportReportDialog,AttemptMessageBody,AttemptMessageLookup} from './SupportReport'
+import {SupportReportButton,AttemptMessageBody,AttemptMessageLookup} from './SupportReport'
 import {useRetainedRecords} from './use-retained-records'
-import { ApiError, command, establishSession, getAnalytics, getSetupStatus, getSnapshot, requestErrorMessage, subscribe, testNotification, type Account, type Attempt, type Channel, type EventRecord, type Group, type Incident, type Instance, type Message, type SetupStatus, type Snapshot, type Timestamp } from './api'
+import { ApiError, command, establishSession, getSetupStatus, getSnapshot, requestErrorMessage, subscribe, testNotification, type Account, type Attempt, type Channel, type EventRecord, type Group, type Incident, type Instance, type Message, type SetupStatus, type Snapshot, type Timestamp } from './api'
 import { confirmedSeries, matchesLogLevel, type ConfirmedBucket } from './chart'
 import { draftVersion, savedDraftVersion } from './draft'
 import { getAppearance, setAppearance, subscribeAppearance, type Appearance } from './appearance'
@@ -40,7 +40,6 @@ type Page = 'dashboard'|'messages'|'connections'|'channels'|'groups'|'history'|'
 const navigation: {id:Page; label:string; icon:string}[] = [
   {id:'dashboard',label:'대시보드',icon:'▦'}, {id:'messages',label:'메시지 보관함',icon:'▤'},
   {id:'connections',label:'계정 · 브라우저',icon:'◫'}, {id:'channels',label:'채널 설정',icon:'#'}, {id:'groups',label:'발송 그룹',icon:'◉'},
-  {id:'history',label:'실행 기록',icon:'◷'}, {id:'logs',label:'로그 · 분석',icon:'▥'},
   {id:'settings',label:'설정 · 도움말',icon:'⚙'}
 ]
 const empty:Snapshot = {schemaVersion:0,stateVersion:0,messages:[],instances:[],channels:[],groups:[],attempts:[],incidents:[],events:[]}
@@ -56,14 +55,11 @@ const reasonText = (code?:string) => deliveryReasonLabel(code)||({'draft-retaine
 const eventText = (event:EventRecord) => event.message||event.description||(event.type==='delivery.confirmed'?(event.confirmationBasis==='composer_cleared'?'발송 처리 · 입력창 비움 확인':'Discord 게시 확인'):undefined)||(typeof event.rejectionCode==='string'?reasonText(event.rejectionCode):undefined)||event.type?.replaceAll('.', ' · ')||event.reasonCode||'상태 변경'
 
 function App() {
-  const [supportSelection,setSupportSelection]=useState<{attemptId?:string}|null>(null)
-  const supportReport=(attemptId?:string)=>setSupportSelection({attemptId})
-  const [diagnostic,setDiagnostic]=useState(readDiagnosticMode)
-  const [page,setPage] = useState<Page>(() => visiblePage(location.pathname,readDiagnosticMode()))
-  const diagnosticRef=useRef(diagnostic)
-  // URL 직접 입력·뒤로 가기에도 같은 화면 경계를 적용합니다. 서버 권한과는 별개입니다.
-  useEffect(()=>{diagnosticRef.current=diagnostic;const next=visiblePage(location.pathname,diagnostic);if(next!==page){pageRef.current=next;setPage(next)}if(location.pathname!==(next==='dashboard'?'/':`/${next}`))history.replaceState(null,'',next==='dashboard'?'/':`/${next}`)},[diagnostic,page])
-  const changeDiagnostic=(value:boolean)=>{writeDiagnosticMode(value);diagnosticRef.current=value;setDiagnostic(value)}
+  const [page,setPage] = useState<Page>(() => visiblePage(location.pathname))
+  useEffect(()=>{
+    const next=visiblePage(location.pathname),path=next==='dashboard'?'/':`/${next}`
+    if(location.pathname!==path)history.replaceState(null,'',path)
+  },[])
   const pageRef=useRef(page),navigationGuard=useRef<(()=>boolean)|null>(null)
   const registerNavigationGuard=useCallback((guard:(()=>boolean)|null)=>{navigationGuard.current=guard},[])
   const [snapshot,setSnapshot] = useState<Snapshot>(empty)
@@ -100,15 +96,11 @@ function App() {
   const busy=pendingCount>0
   const beginAction=(key:string)=>{const started=pendingActions.current.begin(key);if(started)setPendingCount(pendingActions.current.size);return started}
   const endAction=(key:string)=>{pendingActions.current.end(key);setPendingCount(pendingActions.current.size)}
-  const [retryWaitingId,setRetryWaitingId]=useState<string|null>(null)
   const [notifications,setNotifications] = useState(false)
   const [menu,setMenu] = useState(false)
   const menuButtonRef=useRef<HTMLButtonElement>(null),sidebarRef=useRef<HTMLElement>(null)
   const closeMenu=()=>{setMenu(false);menuButtonRef.current?.focus()}
   useEffect(()=>{if(!menu)return;sidebarRef.current?.querySelector<HTMLButtonElement>('.nav-item')?.focus();const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();closeMenu()}};window.addEventListener('keydown',escape);return()=>window.removeEventListener('keydown',escape)},[menu])
-  const [analytics,setAnalytics] = useState<{period:string;data:Record<string,unknown>|null;receivedAt:number;loading:boolean;error:boolean}>({period:'24h',data:null,receivedAt:0,loading:true,error:false})
-  const [period,setPeriod] = useState('24h')
-  const [analyticsRetry,setAnalyticsRetry] = useState(0)
   const refresh = useCallback(async (signal?:AbortSignal,afterMutation=false) => {
     // POST 이전에 시작한 GET을 저장 완료의 최신 상태로 사용하지 않습니다.
     if(afterMutation&&snapshotRequest.current)await snapshotRequest.current.catch(()=>{})
@@ -172,7 +164,7 @@ function App() {
         if(!active)return
         if(requestEpoch!==epoch){wanted=true;return}
         closeStream();needsSession=true;setConnected(false)
-        if(error instanceof ApiError&&error.status===401){stopped=true;setAuth('unauthorized');setConnectionPhase('expired');if(accessModeRef.current==='lan'){hasConnected.current=false;setSnapshot(empty);setAnalytics({period:'24h',data:null,receivedAt:0,loading:false,error:false});setNotice(null);setRetryWaitingId(null);setNotifications(false);navigationGuard.current=null;settingsHaveDraft.current=false}}
+        if(error instanceof ApiError&&error.status===401){stopped=true;setAuth('unauthorized');setConnectionPhase('expired');if(accessModeRef.current==='lan'){hasConnected.current=false;setSnapshot(empty);setNotice(null);setNotifications(false);navigationGuard.current=null;settingsHaveDraft.current=false}}
         else {
           failures++;setRetryCount(failures)
           const delay=reconnectDelay(failures)
@@ -188,16 +180,8 @@ function App() {
     setConnectionPhase(hasConnected.current?'reconnecting':'connecting');setRetryCount(0);void sync()
     return()=>{active=false;stopped=true;closeStream();window.clearTimeout(timer);window.clearTimeout(deadline);controller?.abort()}
   },[refresh,reconnectKey])
-  useEffect(() => {
-    if (auth!=='ready'||!connected||!diagnostic) return
-    let active=true
-    setAnalytics(current=>({period,data:current.period===period?current.data:null,receivedAt:current.period===period?current.receivedAt:0,loading:true,error:false}))
-    const now = new Date(), from = new Date(now.getTime() - (period==='1h'?3600000:period==='7d'?604800000:86400000))
-    void getAnalytics(from.getTime(),now.getTime()).then(data=>{if(active)setAnalytics({period,data,receivedAt:Date.now(),loading:false,error:false})}).catch(()=>{if(active)setAnalytics(current=>({...current,loading:false,error:true}))})
-    return()=>{active=false}
-  },[auth,connected,period,snapshot.stateVersion,analyticsRetry,diagnostic])
-  useEffect(() => { const pop = () => {const next=visiblePage(location.pathname,diagnosticRef.current);if(location.pathname!==(next==='dashboard'?'/':`/${next}`))history.replaceState(null,'',next==='dashboard'?'/':`/${next}`);if(next!==pageRef.current&&navigationGuard.current&&!navigationGuard.current()){history.pushState(null,'',pageRef.current==='dashboard'?'/':`/${pageRef.current}`);return}pageRef.current=next;setPage(next)}; window.addEventListener('popstate',pop); return () => window.removeEventListener('popstate',pop) },[])
-  const go = (requested:Page) => {const next=visiblePage(requested,diagnosticRef.current);if(next!==page&&navigationGuard.current&&!navigationGuard.current())return;pageRef.current=next;setPage(next);setMenu(false);setNotifications(false);history.pushState(null,'',next==='dashboard'?'/':`/${next}`);window.scrollTo(0,0)}
+  useEffect(() => { const pop = () => {const next=visiblePage(location.pathname);if(location.pathname!==(next==='dashboard'?'/':`/${next}`))history.replaceState(null,'',next==='dashboard'?'/':`/${next}`);if(next!==pageRef.current&&navigationGuard.current&&!navigationGuard.current()){history.pushState(null,'',pageRef.current==='dashboard'?'/':`/${pageRef.current}`);return}pageRef.current=next;setPage(next)}; window.addEventListener('popstate',pop); return () => window.removeEventListener('popstate',pop) },[])
+  const go = (requested:Page) => {const next=visiblePage(requested);if(next!==page&&navigationGuard.current&&!navigationGuard.current())return;pageRef.current=next;setPage(next);setMenu(false);setNotifications(false);history.pushState(null,'',next==='dashboard'?'/':`/${next}`);window.scrollTo(0,0)}
   const run = async (action:string,payload:Record<string,unknown>,success='저장했습니다') => {
     if(auth!=='ready'||!connected){showNotice(auth==='unauthorized'?'연결 세션이 만료됐습니다. 입력 내용은 유지됩니다. 확장에서 다시 인증한 뒤 연결을 확인하세요.':'관리 프로그램에 다시 연결한 뒤 요청해 주세요. 입력 내용은 유지됩니다.','error');return false}
     const key=`${action}:${String(payload.id||'all')}`
@@ -211,27 +195,11 @@ function App() {
       if(noticeSequence.current===noticeId)showNotice(result.refreshed?success:`${success} 요청은 접수됐으며 화면 상태를 다시 불러오고 있습니다.`)
       return true
     }
-    catch(error) {if(error instanceof ApiError&&error.code==='VERSION_CONFLICT')await refresh().catch(()=>{});if(noticeSequence.current===noticeId)showNotice(requestErrorMessage(error,diagnosticRef.current),'error'); return false}
+    catch(error) {if(error instanceof ApiError&&error.code==='VERSION_CONFLICT')await refresh().catch(()=>{});if(noticeSequence.current===noticeId)showNotice(requestErrorMessage(error),'error'); return false}
     finally {endAction(key)}
   }
-  const retryNotSent = async (attemptId:string):Promise<RetryNotSentStatus|null> => {
-    if(auth!=='ready'||!connected){showNotice('관리 프로그램에 다시 연결한 뒤 요청해 주세요.','error');return null}
-    const key=`attempt.retryNotSent:${attemptId}`
-    if(!beginAction(key))return null
-    clearNotice()
-    try {
-      const {response}=await submitAndRefresh(()=>command('attempt.retryNotSent',{id:attemptId,confirmation:'CONFIRM_NOT_SENT'}),()=>refresh(undefined,true))
-      const result=retryNotSentStatus(response)
-      if(!result){showNotice('계속 실행 결과를 확인할 수 없습니다. 최신 실행 기록과 그룹 상태를 확인해 주세요.','error');return null}
-      setRetryWaitingId(result==='waiting'?attemptId:null)
-      showNotice(retryNotSentMessage(result))
-      return result
-    }catch(error){await refresh().catch(()=>{});showNotice(requestErrorMessage(error,diagnosticRef.current),'error');return null}
-    finally{endAction(key)}
-  }
-  const openIncidents = snapshot.incidents.filter(isIncidentOpen)
   const stale = !connected || Date.now()-lastSeen>20000
-  const notificationCount=diagnostic?openIncidents.length:['blocked','pending','recovering','stale'].includes(operationSummary(snapshot,stale).kind)?1:0
+  const notificationCount=['blocked','pending','recovering','stale'].includes(operationSummary(snapshot,stale).kind)?1:0
   const startReasons = allRunBlockers(snapshot)
   const startBlocked = stale||!snapshot.groups.some(g=>g.enabled!==false)||startReasons.length>0||Boolean(snapshot.service?.status&&!['ready','resume_required','stopped'].includes(String(snapshot.service.status)))
   const actionBusy=busy||auth!=='ready'||!connected
@@ -241,24 +209,20 @@ function App() {
     <aside id="main-sidebar" ref={sidebarRef} className={`sidebar ${menu?'open':''}`}>
       <div className="brand"><span className="brand-logo">D</span><span><b>DICO</b><small>CONTROL CENTER</small></span></div>
       <div className="workspace-label">WORKSPACE <span>개인 작업 공간</span></div>
-      <nav aria-label="주 메뉴">{navigation.filter(item=>diagnostic||!['history','logs'].includes(item.id)).map(item=><button key={item.id} aria-current={page===item.id?'page':undefined} className={`nav-item ${page===item.id?'active':''}`} onClick={()=>go(item.id)}><span className="nav-icon" aria-hidden="true">{item.icon}</span>{item.label}{item.id==='logs'&&openIncidents.length>0?<span className="nav-count">{openIncidents.length}</span>:null}</button>)}</nav>
+      <nav aria-label="주 메뉴">{navigation.map(item=><button key={item.id} aria-current={page===item.id?'page':undefined} className={`nav-item ${page===item.id?'active':''}`} onClick={()=>go(item.id)}><span className="nav-icon" aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>
       <div className="sidebar-bottom"><div className="sidebar-help"><span>◈</span><strong>처음 사용하시나요?</strong><p>연결부터 첫 실행까지<br/>차근차근 안내해 드립니다.</p><button onClick={()=>go('settings')}>설정 가이드 보기 →</button></div><div className="sidebar-foot">DICO · LOCAL WORKSPACE</div></div>
     </aside>
     {menu&&<button className="scrim" aria-label="메뉴 닫기" onClick={closeMenu}/>}
     <div className="main-col">
-      <header className="topbar"><button ref={menuButtonRef} className="mobile-menu" onClick={()=>setMenu(true)} aria-label="메뉴 열기" aria-expanded={menu} aria-controls="main-sidebar">☰</button><div className="breadcrumb">개인 작업 공간 <span>/</span> <strong>{navigation.find(x=>x.id===page)?.label}</strong></div><div className="top-actions"><span className={`connection ${stale?'offline':''}`}><i/>{connectionPhase==='reconnecting'?'관리 프로그램 재연결 중':connectionPhase==='offline'?'연결 복귀 대기':connectionPhase==='expired'?'인증 다시 확인 필요':stale?'상태 갱신 중':'로컬 서비스 연결됨'}</span><span className="last-seen">최근 수신 {lastSeen?new Date(lastSeen).toLocaleTimeString('ko-KR'):'—'}</span><div className="bell-wrap"><button className="icon-button bell" aria-label={`알림 ${notificationCount}건`} onClick={()=>setNotifications(!notifications)}>♧{notificationCount>0&&<span>{notificationCount}</span>}</button>{notifications&&<div className="notification-popover"><div className="popover-heading"><strong>알림 센터</strong><button onClick={()=>setNotifications(false)} aria-label="닫기">×</button></div>{diagnostic?<>{openIncidents.length?openIncidents.slice(0,6).map(incident=><button key={incident.id} className="notification-item" onClick={()=>go('logs')}><span className="alert-symbol">!</span><span><strong>{incidentText(incident,snapshot)}</strong><small>{date(incident.createdAt||incident.updatedAt)} · {incident.readAt||incident.read?'읽음':'읽지 않음'}</small></span></button>):<p className="empty-pop">현재 확인할 문제가 없습니다.</p>}<button className="popover-footer" onClick={()=>go('logs')}>모든 문제 보기 →</button></>:<><p className="empty-pop"><strong>{operationSummary(snapshot,stale).title}</strong><br/>{operationSummary(snapshot,stale).description}</p><button className="popover-footer" onClick={()=>go('dashboard')}>현재 작업 상태 보기 →</button></>}</div>}</div><button className="primary" disabled={actionBusy||startBlocked} title={stale?'상태를 다시 수신한 뒤 실행할 수 있습니다.':startReasons.length?startReasons.join(' · '):snapshot.groups.length===0?'발송 그룹을 먼저 만들어 주세요.':startBlocked?'그룹의 연결·메시지·실행 상태를 확인하세요.':'모든 그룹의 실제 실행 조건을 다시 검사합니다.'} onClick={()=>{if(confirm('활성화된 발송 그룹을 모두 실행할까요? 실제 Discord 메시지가 발송됩니다. 준비되지 않은 그룹이 있으면 전체 요청이 취소됩니다.'))void run('service.startAll',{},'활성화된 그룹의 실행 요청을 적용했습니다.')}}>▶ <span>모두 실행</span></button><button className="danger-button" aria-label="전체 중지" disabled={auth!=='ready'||!connected||pendingActions.current.has('service.stopAll:all')} onClick={()=>void run('service.stopAll',{},'전체 중지를 요청했습니다. 브라우저 적용 상태를 자동으로 확인합니다.')}>■ <span>{pendingActions.current.has('service.stopAll:all')?'중지 요청 중…':'전체 중지'}</span></button></div></header>
+      <header className="topbar"><button ref={menuButtonRef} className="mobile-menu" onClick={()=>setMenu(true)} aria-label="메뉴 열기" aria-expanded={menu} aria-controls="main-sidebar">☰</button><div className="breadcrumb">개인 작업 공간 <span>/</span> <strong>{navigation.find(x=>x.id===page)?.label}</strong></div><div className="top-actions"><span className={`connection ${stale?'offline':''}`}><i/>{connectionPhase==='reconnecting'?'관리 프로그램 재연결 중':connectionPhase==='offline'?'연결 복귀 대기':connectionPhase==='expired'?'인증 다시 확인 필요':stale?'상태 갱신 중':'로컬 서비스 연결됨'}</span><span className="last-seen">최근 수신 {lastSeen?new Date(lastSeen).toLocaleTimeString('ko-KR'):'—'}</span><div className="bell-wrap"><button className="icon-button bell" aria-label={`알림 ${notificationCount}건`} onClick={()=>setNotifications(!notifications)}>♧{notificationCount>0&&<span>{notificationCount}</span>}</button>{notifications&&<div className="notification-popover"><div className="popover-heading"><strong>알림 센터</strong><button onClick={()=>setNotifications(false)} aria-label="닫기">×</button></div>{<><p className="empty-pop"><strong>{operationSummary(snapshot,stale).title}</strong><br/>{operationSummary(snapshot,stale).description}</p><button className="popover-footer" onClick={()=>go('dashboard')}>현재 작업 상태 보기 →</button></>}</div>}</div><button className="primary" disabled={actionBusy||startBlocked} title={stale?'상태를 다시 수신한 뒤 실행할 수 있습니다.':startReasons.length?startReasons.join(' · '):snapshot.groups.length===0?'발송 그룹을 먼저 만들어 주세요.':startBlocked?'그룹의 연결·메시지·실행 상태를 확인하세요.':'모든 그룹의 실제 실행 조건을 다시 검사합니다.'} onClick={()=>{if(confirm('활성화된 발송 그룹을 모두 실행할까요? 실제 Discord 메시지가 발송됩니다. 준비되지 않은 그룹이 있으면 전체 요청이 취소됩니다.'))void run('service.startAll',{},'활성화된 그룹의 실행 요청을 적용했습니다.')}}>▶ <span>모두 실행</span></button><button className="danger-button" aria-label="전체 중지" disabled={auth!=='ready'||!connected||pendingActions.current.has('service.stopAll:all')} onClick={()=>void run('service.stopAll',{},'전체 중지를 요청했습니다. 브라우저 적용 상태를 자동으로 확인합니다.')}>■ <span>{pendingActions.current.has('service.stopAll:all')?'중지 요청 중…':'전체 중지'}</span></button></div></header>
       <main>{auth==='unauthorized'&&<div className="callout warning" role="alert"><b>연결 세션이 만료됐습니다.</b><span>현재 입력 내용은 유지되며 저장·발송 요청은 잠시 막혀 있습니다. DICO 확장의 ‘채널 설정 열기’로 다시 인증한 뒤 이 탭에서 연결을 확인하세요.</span><button className="outline small" disabled={connectionPhase==='reconnecting'} onClick={()=>setReconnectKey(key=>key+1)}>인증 후 연결 확인</button></div>}{connectionPhase==='reconnecting'&&<div className="callout warning" role="status"><b>관리 프로그램에 다시 연결하고 있습니다.</b><span>업데이트·재시작 중에도 현재 주소와 탭을 유지합니다. 잠시 기다려 주세요. ({retryCount} / 8)</span></div>}{connectionPhase==='offline'&&<div className="callout warning" role="status"><b>관리 프로그램의 연결 복귀를 기다리고 있습니다.</b><span>현재 편집 내용은 유지됩니다. 1분 간격으로 연결을 다시 확인하며, 네트워크나 화면이 돌아오면 더 빨리 확인합니다.</span><button className="outline small" onClick={()=>setReconnectKey(key=>key+1)}>다시 연결</button></div>}{newAppVersion&&<div className="callout version-banner" role="status"><b>새 관리 프로그램 {newAppVersion}에 연결됐습니다.</b><span>작성 중인 내용을 저장한 뒤 현재 탭의 화면을 업데이트해 주세요.</span><button className="outline small" disabled={actionBusy} onClick={()=>location.reload()}>화면 업데이트</button></div>}{notice&&<div className={`flash ${notice.kind}`} role={notice.kind==='error'?'alert':'status'} onMouseEnter={()=>toastTimer.current?.pause('hover')} onMouseLeave={()=>toastTimer.current?.resume('hover')} onFocusCapture={()=>toastTimer.current?.pause('focus')} onBlurCapture={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node|null))toastTimer.current?.resume('focus')}}><span key={notice.id}>{notice.text}</span><button onClick={clearNotice} aria-label="알림 닫기">×</button></div>}
-        {diagnostic&&page==='dashboard'&&!stale&&snapshot.groups.length>0&&startReasons.length>0&&<section className="callout warning" aria-label="실행 준비 안내"><b>모두 실행 전 확인할 항목이 있습니다.</b><div><ul>{startReasons.map(reason=><li key={reason}>{reason}</li>)}</ul><p>준비된 그룹은 아래에서 개별 실행할 수 있습니다.</p></div><button className="outline small" onClick={()=>go('groups')}>그룹별 준비 상태 보기</button></section>}
-        {page==='dashboard'&&!diagnostic&&<UserDashboard s={snapshot} run={run} busy={actionBusy} go={go} stale={stale}/>}
-        {page==='dashboard'&&diagnostic&&<Dashboard s={snapshot} analytics={analytics.period===period?analytics.data:null} analyticsStatus={analytics.period===period?(analytics.error?'error':analytics.loading?'loading':'ready'):'loading'} analyticsAt={analytics.period===period?analytics.receivedAt:0} retryAnalytics={()=>setAnalyticsRetry(value=>value+1)} lastSeen={lastSeen} period={period} setPeriod={setPeriod} go={go} run={run} busy={actionBusy} stale={stale}/>}
+        {page==='dashboard'&&!stale&&snapshot.groups.length>0&&startReasons.length>0&&<section className="callout warning" aria-label="실행 준비 안내"><b>모두 실행 전 확인할 항목이 있습니다.</b><div><ul>{startReasons.map(reason=><li key={reason}>{reason}</li>)}</ul><p>준비된 그룹은 아래에서 개별 실행할 수 있습니다.</p></div><button className="outline small" onClick={()=>go('groups')}>그룹별 준비 상태 보기</button></section>}
+        {page==='dashboard'&&<UserDashboard s={snapshot} run={run} busy={actionBusy} go={go} stale={stale}/>}
         {page==='messages'&&<Messages s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard}/>}
         {page==='connections'&&<AccountConnections s={snapshot} run={run} busy={actionBusy} go={go}/>}
         {page==='channels'&&<ChannelSetup s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard}/>}
-        {page==='groups'&&<Groups diagnostic={diagnostic} s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard}/>}
-        {diagnostic&&page==='history'&&<History supportReport={supportReport} s={snapshot} go={go} run={run} busy={actionBusy} retryNotSent={retryNotSent} retryWaitingId={retryWaitingId}/>}
-        {diagnostic&&page==='logs'&&<Logs supportReport={supportReport} s={snapshot} analytics={analytics.period===period?analytics.data:null} analyticsStatus={analytics.period===period?(analytics.error?'error':analytics.loading?'loading':'ready'):'loading'} analyticsAt={analytics.period===period?analytics.receivedAt:0} retryAnalytics={()=>setAnalyticsRetry(value=>value+1)} period={period} go={go} run={run} busy={actionBusy} refresh={refresh} retryNotSent={retryNotSent} retryWaitingId={retryWaitingId}/>}
-        {page==='settings'&&<Settings diagnostic={diagnostic} changeDiagnostic={changeDiagnostic} supportReport={supportReport} accessMode={accessMode} draftStatus={settingsHaveDraft} s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard} appVersion={appVersion} notify={async()=>{if(auth!=='ready'||!connected){showNotice('다시 인증하고 관리 프로그램 연결을 확인한 뒤 알림을 요청해 주세요.','error');return}try {const response=await testNotification();showNotice(response.result.status==='requested'?'OS 테스트 알림을 요청했습니다. 표시 여부는 운영체제 설정에 따라 달라질 수 있습니다.':response.result.status==='disabled'?'OS 알림이 꺼져 있습니다. 알림 설정을 켠 뒤 다시 시도해 주세요.':'이 환경에서는 OS 알림을 사용할 수 없습니다. 화면 알림은 계속 표시됩니다.')}catch(e){showNotice(requestErrorMessage(e),'error')}}}/>}
-        {supportSelection&&<SupportReportDialog key={supportSelection.attemptId||'all'} attemptId={supportSelection.attemptId} onClose={()=>setSupportSelection(null)}/>}
+        {page==='groups'&&<Groups s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard}/>}
+        {page==='settings'&&<Settings accessMode={accessMode} draftStatus={settingsHaveDraft} s={snapshot} run={run} busy={actionBusy} go={go} registerGuard={registerNavigationGuard} appVersion={appVersion} notify={async()=>{if(auth!=='ready'||!connected){showNotice('다시 인증하고 관리 프로그램 연결을 확인한 뒤 알림을 요청해 주세요.','error');return}try {const response=await testNotification();showNotice(response.result.status==='requested'?'OS 테스트 알림을 요청했습니다. 표시 여부는 운영체제 설정에 따라 달라질 수 있습니다.':response.result.status==='disabled'?'OS 알림이 꺼져 있습니다. 알림 설정을 켠 뒤 다시 시도해 주세요.':'이 환경에서는 OS 알림을 사용할 수 없습니다. 화면 알림은 계속 표시됩니다.')}catch(e){showNotice(requestErrorMessage(e),'error')}}}/>}
       </main>
     </div>
   </div></ServerClock>
@@ -557,7 +521,7 @@ function SetupDiagnostics() {
   </Section>
 }
 
-function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard,accessMode,supportReport,diagnostic=false,changeDiagnostic}:Common&{changeDiagnostic:(value:boolean)=>void;accessMode:AccessMode|null;notify:()=>Promise<void>;appVersion?:string;draftStatus:{current:boolean}}) {
+function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard,accessMode}:Common&{accessMode:AccessMode|null;notify:()=>Promise<void>;appVersion?:string;draftStatus:{current:boolean}}) {
   const [appearance,showAppearance]=useState(getAppearance)
   useEffect(()=>subscribeAppearance(()=>showAppearance(getAppearance())),[])
   const [draft,setDraft]=useState(()=>createSettingsDraft(s.settings))
@@ -592,14 +556,14 @@ function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard,acc
     if(ok)setImportFile(null)
   }
   return <><Heading eyebrow="PREFERENCES / 도움말" title="설정 · 도움말" description="처음 시작하는 방법과 로컬 작업 공간의 설정을 확인하세요."/>
-    <div className="settings-grid"><div className="settings-main"><UpdatePanel s={s} busy={busy} go={go} appVersion={appVersion}/>{diagnostic&&<SetupDiagnostics/>}<LanAccessPanel mode={accessMode} busy={busy}/>{accessMode==='local'&&<details><summary>고급: SSH 터널로 접속</summary><RemoteAccessGuide busy={busy}/></details>}<Section title="시작 가이드" subtitle={`${steps.filter(x=>x.done).length} / ${steps.length}단계 완료 · 실제 저장과 연결 상태 기준`}>
+    <div className="settings-grid"><div className="settings-main"><UpdatePanel s={s} busy={busy} go={go} appVersion={appVersion}/><LanAccessPanel mode={accessMode} busy={busy}/>{accessMode==='local'&&<details><summary>고급: SSH 터널로 접속</summary><RemoteAccessGuide busy={busy}/></details>}<Section title="시작 가이드" subtitle={`${steps.filter(x=>x.done).length} / ${steps.length}단계 완료 · 실제 저장과 연결 상태 기준`}>
       <div className="guide-list">{steps.map((step,i)=><div className="guide-step" key={step.title}><span className={step.done?'done':''}>{step.done?'✓':i+1}</span><div><strong>{step.title}</strong><p>{step.description}</p></div><button className="text-action" onClick={()=>go(step.page)}>{step.done?'다시 보기':'설정하기'} →</button></div>)}</div>
       <div className="editor-note">ⓘ 설정을 마쳐도 자동으로 시험 메시지를 보내지 않습니다. 발송은 그룹에서 명시적으로 시작합니다.</div>
-    </Section></div><div className="settings-side"><Section title="개발자 진단 모드" subtitle="이 브라우저의 화면 선호 설정이며 관리자 인증이나 접근 권한이 아닙니다."><label className="switch-label"><input type="checkbox" aria-label="개발자 진단 모드" checked={diagnostic} onChange={e=>changeDiagnostic(e.target.checked)}/> 개발자 진단 모드</label><p className="secondary">개발·테스트 시 실행 기록, 로그 분석과 수동 진단 도구를 표시합니다. 기본 사용자 화면에서도 발송 결과와 중지 상태는 계속 확인할 수 있습니다.</p></Section><Section title="화면 모드" subtitle="이 브라우저에 자동으로 저장됩니다."><div className="setting-row"><div><strong>테마</strong><p>시스템 설정을 선택하면 운영체제의 화면 모드를 따릅니다.</p></div><select aria-label="화면 모드" value={appearance} onChange={e=>setAppearance(e.target.value as Appearance)}><option value="system">시스템 설정</option><option value="light">라이트</option><option value="dark">다크</option></select></div></Section><Section title="알림" subtitle="OS 알림과 화면의 작업 상태 안내는 별도로 동작합니다.">
+    </Section></div><div className="settings-side"><Section title="화면 모드" subtitle="이 브라우저에 자동으로 저장됩니다."><div className="setting-row"><div><strong>테마</strong><p>시스템 설정을 선택하면 운영체제의 화면 모드를 따릅니다.</p></div><select aria-label="화면 모드" value={appearance} onChange={e=>setAppearance(e.target.value as Appearance)}><option value="system">시스템 설정</option><option value="light">라이트</option><option value="dark">다크</option></select></div></Section><Section title="알림" subtitle="OS 알림과 화면의 작업 상태 안내는 별도로 동작합니다.">
       <div className="setting-row"><div><strong>OS 문제 알림</strong><p>관리 프로그램에서 확인이 필요한 문제를 알립니다.</p></div><label className="switch-label"><input type="checkbox" disabled={!preferences} checked={notificationsEnabled} onChange={e=>setDraft(d=>editSettingsDraft(d,'notificationsEnabled',e.target.checked))}/> 켬</label></div>
       <div className="setting-row"><div><strong>알림에서 이름 숨기기</strong><p>메시지 본문과 연결 키는 표시하지 않습니다.</p></div><label className="switch-label"><input type="checkbox" disabled={!preferences} checked={hideNames} onChange={e=>setDraft(d=>editSettingsDraft(d,'hideNotificationNames',e.target.checked))}/> 숨김</label></div>
       <div className="setting-row"><div><strong>테스트 알림</strong><p>Discord에는 메시지를 보내지 않습니다.</p></div><button className="outline small" onClick={()=>void notify()}>테스트 요청</button></div>
-      <div className="setting-row"><div><strong>화면 알림</strong><p>완료하지 못한 작업은 상단 알림 센터에 계속 표시됩니다.</p></div><span>{diagnostic?`${s.incidents.filter(isIncidentOpen).length}건`:operationSummary(s).title}</span></div>
+      <div className="setting-row"><div><strong>화면 알림</strong><p>완료하지 못한 작업은 상단 알림 센터에 계속 표시됩니다.</p></div><span>{operationSummary(s).title}</span></div>
       <button className="outline small" disabled={busy||!notificationChanges||!Object.keys(notificationChanges).length} onClick={()=>{if(notificationChanges&&Object.keys(notificationChanges).length)void run('settings.update',notificationChanges)}}>알림 설정 저장</button>
     </Section><Section title="기록 보존" subtitle="종료된 운영 기록의 보존 기간">
       <div className="setting-row"><div><strong>보존 기간</strong><p>진행 중·미확인 발송 정보는 정리 대상에서 제외됩니다.</p></div><select aria-label="기록 보존 기간" disabled={!preferences} value={retention} onChange={e=>setDraft(d=>editSettingsDraft(d,'retentionDays',Number(e.target.value)))}>{!preferences&&<option value="">설정 불러오는 중</option>}<option value="30">30일</option><option value="90">90일</option><option value="180">180일</option></select></div>
@@ -611,7 +575,7 @@ function Settings({s,run,busy,go,notify,appVersion,draftStatus,registerGuard,acc
     </Section><Section title="모든 설정 초기화" subtitle="메시지·채널·그룹·브라우저 연결 설정을 삭제하고 환경 설정을 기본값으로 되돌립니다.">
       <p className="secondary">실행 기록과 중복 방지 기록은 보존합니다. Discord의 게시물·로그인·초안과 OS 설치 등록은 삭제하지 않습니다. 모든 그룹을 중지하고 미확인 결과를 해소한 뒤 진행하세요. 연결된 확장의 저장된 계정·채널도 초기화되며, 꺼져 있던 브라우저는 다음 연결 때 정리됩니다. 이후 계정·채널을 새로 연결하고 메시지를 적용하세요.</p>
       <div className="backup-actions"><a className="outline" href="/api/backup" download="dico-central-backup.json">초기화 전 백업 다운로드</a><button className="danger-button" disabled={busy||s.groups.some(g=>g.status!=='stopped')||s.attempts.some(a=>['preparing','permitted','unknown'].includes(a.status||''))} onClick={()=>{if(prompt('메시지와 모든 연결·그룹 설정을 삭제합니다. 백업을 저장했는지 확인한 뒤 ‘초기화’를 입력하세요.')==='초기화')void run('settings.reset',{confirmation:'RESET_ALL_SETTINGS',expectedConfiguration:s.configurationToken},'설정을 초기화했습니다. 저장된 확장 연결도 정리됩니다. 계정·채널과 메시지를 새로 설정하세요.')}}>모든 설정 초기화</button></div>
-    </Section><Section title="자동 오류 제보" subtitle="문제 발생 시 진단을 자동 전송하고 접수 상태를 확인합니다."><AutomaticSupport diagnostic={diagnostic} accessMode={accessMode||undefined} disabled={busy}/></Section>{diagnostic&&<Section title="관리자에게 제보" subtitle="멈춤·오류를 분석할 수 있도록 시도 당시 본문과 관련 로그를 모읍니다."><p className="secondary">자동 제보를 설정하면 오류 기록이 관리자 수신함으로 전송됩니다. 개별 제보와 파일 백업도 사용할 수 있습니다.</p><SupportReportButton onOpen={supportReport} disabled={busy}/></Section>}<Section title="프로그램 정보" subtitle="이 작업 공간은 이 PC의 로컬 서비스에 연결됩니다.">
+    </Section><Section title="자동 오류 제보" subtitle="문제 발생 시 진단을 자동 전송하고 접수 상태를 확인합니다."><AutomaticSupport diagnostic={false} accessMode={accessMode||undefined} disabled={busy}/></Section><Section title="프로그램 정보" subtitle="이 작업 공간은 이 PC의 로컬 서비스에 연결됩니다.">
       <div className="aggregate-list"><div><span>데이터 버전</span><strong>{s.schemaVersion}</strong></div><div><span>상태 버전</span><strong>{s.stateVersion}</strong></div><div><span>연결된 브라우저</span><strong>{s.instances.length}개</strong></div></div>
       <p className="secondary">관리 프로그램을 종료하면 새 발송 허가가 중단됩니다. 페이지를 닫아도 프로그램과 브라우저가 실행 중이면 작업 상태는 유지됩니다.</p>
     </Section></div></div></>

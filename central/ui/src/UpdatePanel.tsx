@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, getUpdateStatus, reportUpdateFailure, requestErrorMessage, startRollback, startUpdate, type Snapshot, type UpdateStatus } from './api'
+import { ApiError, getLatestUpdate, getUpdateStatus, reportUpdateFailure, requestErrorMessage, startRollback, startUpdate, type LatestUpdate, type Snapshot, type UpdateStatus } from './api'
 import { browserOnline } from './onboarding'
 import { extensionVersionState, showUpdateBlockers,updateBlockers, updateInProgress, updatePollingDecision, rollbackActionState, rollbackUnavailableMessage, safeUpdateMessage, rollbackPhaseMessage } from './update'
 import { UPDATE_RECONNECT_KEY } from './reconnect'
@@ -61,6 +61,7 @@ export function RollbackControls({s,result,busy,submitting,onStart}:{s:Snapshot;
 
 export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(page:'groups'|'history'|'connections')=>void;appVersion?:string}) {
   const [sendingReport,setSendingReport]=useState(false)
+  const [latest,setLatest]=useState<LatestUpdate|null>(null),[checkingLatest,setCheckingLatest]=useState(true)
   const [requestMode,setRequestMode]=useState<'update'|'rollback'>('update')
   const [result,setResult]=useState<UpdateStatus|null>(null),[error,setError]=useState(''),[checking,setChecking]=useState(true),[submitting,setSubmitting]=useState(false),[pollKey,setPollKey]=useState(0),[paused,setPaused]=useState<'connection_lost'|'busy_timeout'|null>(null)
   const alive=useRef(true),postController=useRef<AbortController|null>(null)
@@ -94,8 +95,20 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
   },[pollKey,submitting])
   const sendReport=async()=>{setSendingReport(true);setError('');try{const next=await reportUpdateFailure();if(alive.current)setResult(next)}catch(e){if(alive.current)setError(requestErrorMessage(e))}finally{if(alive.current)setSendingReport(false)}}
   const blockers=updateBlockers(s),updating=updateInProgress(result?.phase)
+  useEffect(()=>{
+    if(submitting||updating)return
+    const controller=new AbortController()
+    setCheckingLatest(true);setLatest(null)
+    void getLatestUpdate(controller.signal).then(value=>{
+      if(!controller.signal.aborted)setLatest(value)
+    }).catch(()=>{
+      if(!controller.signal.aborted)setLatest({state:'unavailable',checkedAt:Date.now()})
+    }).finally(()=>{if(!controller.signal.aborted)setCheckingLatest(false)})
+    return()=>controller.abort()
+  },[pollKey,appVersion,submitting,updating])
+  const canUpdate=latest?.state==='available'&&!checkingLatest
   const start=async(mode:'update'|'rollback'='update')=>{
-    if(busy||submitting||postController.current||updating||blockers.length||!result||error||mode==='rollback'&&!result.rollback?.available)return
+    if(busy||submitting||postController.current||updating||blockers.length||!result||error||(mode==='rollback'?!result.rollback?.available:!canUpdate))return
     setRequestMode(mode);setSubmitting(true);setError('');setPaused(null)
     try{sessionStorage.setItem(UPDATE_RECONNECT_KEY,JSON.stringify({startedAt:Date.now(),fromVersion:appVersion}))}catch{}
     const controller=new AbortController();postController.current=controller
@@ -105,8 +118,13 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
     finally{window.clearTimeout(timeout);postController.current=null;if(alive.current)setSubmitting(false)}
   }
   return <section className="panel update-panel" aria-label="프로그램 업데이트">
-    <div className="panel-head"><div><h2>프로그램 · 확장 업데이트</h2><p>새 버전을 준비하고 관리 프로그램을 다시 시작합니다.</p></div><button className="outline small" disabled={checking||submitting} onClick={()=>setPollKey(k=>k+1)}>{checking?'확인 중…':'상태 다시 확인'}</button></div>
+    <div className="panel-head"><div><h2>프로그램 · 확장 업데이트</h2><p>새 버전을 준비하고 관리 프로그램을 다시 시작합니다.</p></div><button className="outline small" disabled={checking||checkingLatest&&!updating||submitting} onClick={()=>setPollKey(k=>k+1)}>{checking||checkingLatest&&!updating?'확인 중…':'새로고침'}</button></div>
     <div className="update-body">
+      <div className="update-state" role="status">
+        <strong>{updating||submitting?'업데이트 처리 중':checkingLatest?'최신 버전 확인 중…':latest?.state==='current'?'최신 업데이트 완료':latest?.state==='available'?'새 업데이트 사용 가능':latest?.state==='ahead'?'공식 배포보다 높은 버전 사용 중':'최신 버전을 확인하지 못했습니다'}</strong>
+        <p>현재 {appVersion||latest?.currentVersion||'확인 중'}{latest?.latestVersion?` · 공식 배포 ${latest.latestVersion}`:''}</p>
+        {latest?.checkedAt&&<small>마지막 확인 {timestamp(latest.checkedAt)}</small>}
+      </div>
       <div className="update-state" role="status" aria-live="polite"><span className={`setup-status ${result?.phase==='failed'?'error':result?.phase==='completed'?'ok':'warning'}`}>{result?.retrying?'자동 복구 중':result?result.mode==='rollback'?({idle:'이전 버전 복원 대기',preparing:'이전 버전 복원 준비 중',ready:'이전 버전 복원 준비 완료',applying:'이전 버전 적용 · 재시작 중',completed:'이전 버전 복원 완료',failed:'이전 버전 복원 실패'}[result.phase]):phases[result.phase]:'업데이트 상태 확인 중'}</span>{result?.version&&<span className="update-version">버전 정보 {result.version}</span>}{result?.message&&<p>{result.phase==='completed'?(result.mode==='rollback'?'이전 버전 복원을 완료했습니다.':'업데이트를 완료했습니다.') : result.mode==='rollback'?rollbackPhaseMessage(result.phase):result.message}</p>}{updating&&<progress aria-label="업데이트 진행 중"/>}{result?.updatedAt&&<small>최근 갱신 {timestamp(result.updatedAt)}</small>}</div>
       {error&&<p className="update-error" role="alert">{error}</p>}
       {paused==='connection_lost'&&<div className="editor-note">업데이트 상태 연결을 복구하고 있습니다. 15초 간격으로 자동 재확인하며 현재 설치와 실행 기록을 유지합니다.</div>}
@@ -114,7 +132,7 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
       {result?.phase==='failed'&&<UpdateFailureDetails result={result} onReport={()=>void sendReport()} sending={sendingReport}/>}
       <p className="update-description">공식 저장소에서 검증된 업데이트 파일을 받아 준비·검사를 마친 뒤 적용합니다. 일시적인 연결 오류는 자동 재시도하고, 실패 원인과 제보 상태를 이 화면에 표시합니다. 관리 프로그램이 다시 시작되면 같은 주소의 현재 탭에서 연결을 복구하고, 이 화면에서 시작한 업데이트는 새 버전 화면으로 이어집니다. 새 창을 열거나 주소를 바꿀 필요가 없습니다.</p>
       {showUpdateBlockers(result?.phase)&&blockers.length>0&&<div className="update-blockers"><strong>발송 상태 자동 확인 중</strong><ul>{blockers.map(reason=><li key={reason}>{reason}</li>)}</ul></div>}
-      <div className="update-actions"><button className="primary" disabled={busy||submitting||updating||blockers.length>0||!result||Boolean(error)} onClick={()=>void start()}>{submitting?requestMode==='rollback'?'이전 버전 복원 요청 중…':'업데이트 요청 중…':updating?result?.mode==='rollback'?'이전 버전 복원 중…':'업데이트 진행 중…':'업데이트 실행'}</button><small>설정과 실행 기록은 유지합니다. 사용자 중지와 게시 결과가 확인되지 않은 발송을 보호합니다.</small></div>
+      <div className="update-actions"><button className="primary" disabled={busy||submitting||updating||blockers.length>0||!result||Boolean(error)||!canUpdate} onClick={()=>void start()}>{submitting?requestMode==='rollback'?'이전 버전 복원 요청 중…':'업데이트 요청 중…':updating?result?.mode==='rollback'?'이전 버전 복원 중…':'업데이트 진행 중…':'업데이트 실행'}</button><small>설정과 실행 기록은 유지합니다. 사용자 중지와 게시 결과가 확인되지 않은 발송을 보호합니다.</small></div>
       <RollbackControls s={s} result={result} busy={busy||Boolean(error)||submitting} submitting={submitting&&requestMode==='rollback'} onStart={()=>void start('rollback')}/>
       <details className="update-migration"><summary>0.4.3 이하에서 처음 전환하는 경우</summary><p>0.4.3 이하 관리 프로그램은 주소와 연결 세션을 재시작 후 유지하는 기능이 없어, 처음 0.4.4로 옮길 때는 관리 화면을 한 번 다시 열어 인증해야 할 수 있습니다. 0.4.4부터 시작하는 이후 업데이트는 현재 주소와 탭을 유지합니다.</p><p>업데이트 버튼이 없는 0.4.0·0.4.1은 업데이트 기능이 포함된 관리 프로그램과 확장으로 최초 설치를 한 번 옮겨야 합니다. 브라우저 확장도 관리 경로에서 설치되어 있는지 확인하세요.</p></details>
       <div className="update-browsers"><div className="subheading"><h3>브라우저별 확장 확인</h3><button className="text-action" onClick={()=>go('connections')}>계정·브라우저 →</button></div>{s.instances.length?s.instances.map(i=>{const versionState=extensionVersionState(appVersion,i.extensionVersion,browserOnline(i));return <div className="update-browser" key={i.id}><div><strong>{i.browser||'브라우저'}</strong><small>{i.name||'등록된 연결'}</small></div><span>확장 보고 버전 {i.extensionVersion||'확인 필요'}</span><span className={`setup-status ${versionState==='current'?'ok':'warning'}`}>{versionState==='current'?'동일 버전 확인됨':versionState==='mismatch'?`확장 업데이트 필요 · 관리 프로그램 ${appVersion}`:versionState==='offline'?'브라우저 연결 대기':'버전 확인 필요'}</span>{versionState==='mismatch'&&<p className="secondary">관리 프로그램과 확장의 보고 버전이 다릅니다. 발송이 안전하게 멈추면 확장 파일과 실행 버전을 자동으로 확인하고 갱신합니다. 현재 발송 결과와 설정은 보존됩니다.</p>}</div>}):<p className="secondary">연결된 브라우저가 없습니다. 업데이트 후 사용할 브라우저의 확장을 연결하고 보고된 버전을 확인하세요.</p>}<p className="secondary">표시된 버전은 각 확장이 마지막으로 보고한 값입니다. 연결 응답만으로 채널 검증과 메시지 적용까지 완료된 것은 아닙니다.</p></div>

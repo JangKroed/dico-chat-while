@@ -277,3 +277,13 @@ test('사용자 종료 표식이 있으면 업데이트 실패가 런타임을 �
  assert.equal((await f.readStatus()).message,'shutdown_failed');
  assert.equal(await readFile(join(f.job.app,'central/marker'),'utf8'),'old');
 });
+
+test('공식 버전 확인은 숫자로 비교하며 조회 실패를 최신으로 표시하지 않는다',async()=>{
+ const {checkLatestUpdate}=await import('../central/runtime/updater.mjs');
+ const read=version=>async()=>version;
+ assert.deepEqual(await checkLatestUpdate('0.4.9',{readVersion:read('0.4.10'),now:()=>123}),{state:'available',currentVersion:'0.4.9',latestVersion:'0.4.10',checkedAt:123});
+ assert.equal((await checkLatestUpdate('0.4.10',{readVersion:read('0.4.10')})).state,'current');
+ assert.equal((await checkLatestUpdate('0.4.11',{readVersion:read('0.4.10')})).state,'ahead');
+ assert.equal((await checkLatestUpdate('0.4.10',{readVersion:read('invalid')})).state,'unavailable');
+ assert.equal((await checkLatestUpdate('0.4.10',{readVersion:async()=>{throw Error('offline')}})).state,'unavailable');
+});

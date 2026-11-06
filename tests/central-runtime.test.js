@@ -138,3 +138,17 @@ test('재시작 중 설정 경로는 복구 화면을 반환하고 API와 외부
  assert.match(api.headers['content-type'],/^application\/json/);
  assert.equal((await request(app,'/settings',{headers:{host:'example.com'}})).status,403);
 });
+
+test('최신 업데이트 확인은 인증된 로컬 설정 화면에서 실행 버전을 비교한다',async t=>{
+ const calls=[];
+ const updates={latest:async version=>{calls.push(version);return{state:'current',currentVersion:version,latestVersion:version,checkedAt:1};}};
+ const app=createCentralApplication({manager:manager(),origin,bridgeToken,updates,appVersion:'0.4.51'});
+ t.after(()=>app.close());
+ assert.equal((await request(app,'/api/updates/latest')).status,401);
+ assert.deepEqual(calls,[]);
+ const session=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}});
+ const response=await request(app,'/api/updates/latest',{cookie:session.headers['set-cookie'].split(';')[0]});
+ assert.equal(response.status,200);
+ assert.equal(JSON.parse(response.body).state,'current');
+ assert.deepEqual(calls,['0.4.51']);
+});
