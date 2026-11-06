@@ -951,3 +951,19 @@ test('같은 초안이 반복해서 남을 때만 재시도 간격을 늘리고 
  assert.equal(prediction.data.priorRetryCount,5);
  assert.equal(r.traces.some(x=>x.id==='next-attempt'&&x.stage==='retry-wait'),false);
 });
+
+test('읽기 전용 복구는 다른 초안이 있어도 중지 전의 확인된 게시만 찾는다',async()=>{
+ const r=rig({managed:true,loggedUser:'123456789012345678'});r.target.coordinated=true;
+ const from=r.now(),until=from+1000;
+ r.tick(100);
+ r.post({text:r.delivery.text});
+ r.editor.innerText='사용자 초안';
+ const query=window=>r.requestMessage({type:'DICO_RECONCILE',target:r.target,delivery:r.delivery,recoveryWindow:window});
+ const result=await query({from,until});
+ assert.equal(result.status,'confirmed');
+ assert.equal(r.editor.innerText,'사용자 초안');
+ assert.equal(r.events.length,0);
+ assert.notEqual((await query({from:from-1000,until:from-1})).status,'confirmed');
+ r.account('999999999999999999');
+ assert.notEqual((await query({from,until})).status,'confirmed');
+});

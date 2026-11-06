@@ -378,7 +378,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         await report(prior);await ack(c,'applied');
       }
       else {
-        const a=prior || {...p,startedAt:now(),phase:'unknown'};
+        const a=prior || {...p,sessionId:p.originSessionId,startedAt:p.recoveryWindow?.from??now(),phase:'unknown'};
         // 복구에서는 Enter를 재실행하지 않습니다. 동일 시도의 실제 완료 영수증을
         // 먼저 조회하고, 없을 때만 기존 게시 기록 대조로 넘어갑니다.
         // 현재 빈 입력창으로 성공을 추측하지 않으며 content가 시도/세션/초안을 검증합니다.
@@ -395,9 +395,15 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         }
         // 게시 이력 대조만 현재 검증 탭에서 수행합니다. 이전 입력·세션·영수증은 바꾸지 않습니다.
         const recoveryTabId=Number.isInteger(p.recoveryTabId)?p.recoveryTabId:a.tabId;
-        try{result=await queryPage(a,{type:'DICO_RECONCILE',target:{...target(a),tabId:recoveryTabId},delivery:delivery(a)},{tabId:recoveryTabId,allowStopped:true});}catch(error){if(error?.retryable)throw error;}
+        try{result=await queryPage(a,{type:'DICO_RECONCILE',target:{...target(a),tabId:recoveryTabId},delivery:delivery(a),recoveryWindow:p.recoveryWindow},{tabId:recoveryTabId,allowStopped:true});}catch(error){if(error?.retryable)throw error;}
         if(!transport.connected||c.sessionId!==state.sessionId||prior&&state.attempts[p.attemptId]!==prior)return;
-        if(result?.status==='confirmed' && /^\d{17,20}$/.test(result.messageId || '')){a.phase='confirmed';a.result={outcome:'confirmed',messageId:result.messageId,confirmationBasis:'message_observed'};state.attempts[p.attemptId]=a;await save();await report(a);}
+        const postedId=result?.messageId;
+        const postedAt=/^\d{17,20}$/.test(postedId||'')?Number((BigInt(postedId)>>22n)+1420070400000n):null;
+        const withinWindow=!p.recoveryWindow||postedAt!==null&&postedAt>=p.recoveryWindow.from&&postedAt<=p.recoveryWindow.until;
+        if(result?.status==='confirmed'&&postedAt!==null&&withinWindow){
+          a.phase='confirmed';a.result={outcome:'confirmed',messageId:postedId,confirmationBasis:'message_observed'};
+          state.attempts[p.attemptId]=a;await save();await report(a);
+        }
         else if(prior?.result?.outcome==='unknown')await report(prior);
         else await request({type:'DELIVERY_RESULT',attemptId:p.attemptId,outcome:'unknown',reasonCode:'reconcile_inconclusive'});
         await ack(c,'applied');
