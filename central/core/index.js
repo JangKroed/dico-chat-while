@@ -492,7 +492,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(Number.isFinite(confirmationMs)&&confirmationMs>=0)a.confirmationMs=Math.min(confirmationMs,86_400_000);
     const g=get('groups',a.groupId),c=get('channels',a.bindingId);g.activeAttemptId=null;
     if(outcome==='confirmed'){
-      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;
+      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;
       g.cursor=(g.cursor+1)%g.members.length;g.lastConfirmedAt=now();g.nextMono=monotonicNow()+g.intervalMs;
       c.playlistIndex=(a.playlistIndex+1)%c.playlist.length;c.lastConfirmedAt=now();c.lastConfirmedMono=monotonicNow();c.lastConfirmedAttemptId=a.id;c.lastConfirmationMs=Number.isFinite(a.confirmationMs)&&a.confirmationMs<=30000?a.confirmationMs:0;c.nextMono=c.lastConfirmedMono-confirmationOffset(c)+effectiveInterval(c);
     }
@@ -507,7 +507,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     else if(['stopped','paused'].includes(g.status)){g.waitReason=null;release(g);}
     event(`delivery.${outcome}`,{attemptId:a.id,groupId:g.id,instanceId:a.instanceId,accountId:a.accountId,channelId:a.channelId,manual,...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{})});return a;
   }
-  function failPreparation(a,reasonCode){
+  function failPreparation(a,reasonCode,executionFinished=false){
     if(a.permitId||a.permitIssued||!['preparing','unknown'].includes(a.status))return false;
     const g=get('groups',a.groupId),wasRunning=g.status==='running'&&!g.controlIntent&&g.activeAttemptId===a.id;
     const canRetry=wasRunning&&transientPreparationCodes.has(reasonCode);
@@ -515,7 +515,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     // cannot press Enter, even if its PREPARE response arrives after timeout.
     a.reasonCode=reasonCode;a.executionBlocked=true;finish(a,'not_sent');
     if(canRetry){
-      schedulePreparationRetry(g,a,reasonCode);
+      schedulePreparationRetry(g,a,reasonCode,executionFinished);
     }else if(wasRunning){
       g.status='paused';g.waitReason='preparation_failed';g.nextEligibleAt=null;release(g);
       const cmd=state.commands.find(c=>c.type==='PREPARE'&&c.payload.attemptId===a.id);
@@ -525,19 +525,20 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     return true;
   }
-  function schedulePreparationRetry(g,a,reasonCode){
-    const draftInspectionFailed=reasonCode==='DRAFT_INSPECTION_UNAVAILABLE'&&!a.permitId&&!a.permitIssued;
-    g.draftInspectionFailures=draftInspectionFailed?(g.draftInspectionFailures||0)+1:0;
-    if(g.draftInspectionFailures>=3&&g.members.length>1){
-      // 발송 허가 전에 초안 확인만 실패했으므로 문구와 입력창은 보존하고 계정 차례만 넘깁니다.
+  function schedulePreparationRetry(g,a,reasonCode,executionFinished){
+    const retryCount=(g.prepareRetryCount||0)+1;
+    if(executionFinished&&retryCount>=3&&g.members.length>1){
+      // 실행기가 이번 입력 경로의 종료를 보고한 경우만 넘깁니다. 중앙 타임아웃만으로
+      // 로컬 입력 종료를 추정하지 않으며, 미발송 문구는 다음 차례에도 그대로 사용합니다.
       g.cursor=(g.cursor+1)%g.members.length;
+      g.lastSkippedAt=now();
       g.nextMono=Math.max(g.nextMono||0,monotonicNow()+g.intervalMs);
-      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;
+      delete g.prepareRetryCount;delete g.prepareRetryAfterMono;
       g.waitReason='group_interval';g.nextEligibleAt=now()+Math.max(0,g.nextMono-monotonicNow());
       event('delivery.prepare_turn_skipped',{attemptId:a.id,groupId:g.id,reasonCode},'warning');
       return;
     }
-    g.prepareRetryCount=(g.prepareRetryCount||0)+1;g.prepareRetryAfterMono=monotonicNow()+5000;
+    g.prepareRetryCount=retryCount;g.prepareRetryAfterMono=monotonicNow()+5000;
     g.waitReason='preparation_retry';g.nextEligibleAt=now()+5000;
     event('delivery.prepare_retry',{attemptId:a.id,groupId:g.id,reasonCode,retryCount:g.prepareRetryCount},'warning');
   }
@@ -1089,7 +1090,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(rejectionCode)c.rejectionCode=rejectionCode;else delete c.rejectionCode;
           if(c.type==='PREPARE'&&rejectionCode==='DRAFT_INSPECTION_UNAVAILABLE'&&draftInspectionCodes.has(message.draftInspectionCode))c.draftInspectionCode=message.draftInspectionCode;
           const attempt=c.payload.attemptId?get('attempts',c.payload.attemptId):null;
-          if(!(c.type==='PREPARE'&&attempt&&failPreparation(attempt,rejectionCode||'PREPARE_REJECTED'))){
+          // 구버전의 초안 검사 실패는 입력 명령을 보내기 전의 읽기 실패입니다.
+          // 그 외 거절은 실행기가 입력 차단을 명시한 경우에만 차례를 넘길 근거가 됩니다.
+          const preparationBlocked=message.executionBlocked===true||rejectionCode==='DRAFT_INSPECTION_UNAVAILABLE';
+          if(!(c.type==='PREPARE'&&attempt&&failPreparation(attempt,rejectionCode||'PREPARE_REJECTED',preparationBlocked))){
             incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
             if(attempt&&activeAttempt(attempt))markUnknown(attempt,rejectionCode||'command_rejected');
           }
@@ -1169,7 +1173,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         }
         if(message.outcome==='confirmed'&&message.confirmationBasis==='composer_cleared')a.deliveryEvidence=deliveryEvidence(message.deliveryEvidence);
         const finished=finish(a,message.outcome,{messageId:message.outcome==='confirmed'?message.messageId:undefined,confirmationMs:message.confirmationMs,confirmationBasis:message.confirmationBasis});
-        if(retryUnsent)schedulePreparationRetry(group,a,message.reasonCode);
+        if(retryUnsent)schedulePreparationRetry(group,a,message.reasonCode,true);
         return{ok:true,attempt:publicAttempt(finished)};
       }
       if(message.type==='EMERGENCY_STOP'){

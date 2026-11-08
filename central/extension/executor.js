@@ -238,7 +238,7 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     if(c.sessionId!==state.sessionId || c.instanceId!==state.instanceId)return;
     if(state.processed[c.id]&&state.processed[c.id]?.status!=='report-pending'){
       const previous=state.processed[c.id];
-      if(previous?.status==='rejected')await ack(c,'rejected',{rejectionCode:previous.rejectionCode,...(previous.draftInspectionCode?{draftInspectionCode:previous.draftInspectionCode}:{})});
+      if(previous?.status==='rejected')await ack(c,'rejected',{rejectionCode:previous.rejectionCode,...(previous.draftInspectionCode?{draftInspectionCode:previous.draftInspectionCode}:{}),...(previous.executionBlocked===true?{executionBlocked:true}:{})});
       else if(previous?.status==='ack-pending'){await ack(c,'applied',previous.extra);state.processed[c.id]=true;state.lastError=null;await save();}
       return;
     }
@@ -462,11 +462,18 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         }
         if(error?.retryable===true){await save();return;}
 
+        // 중앙이 다음 차례를 열기 전에 종료한 준비의 로컬 입력 권한도 닫습니다.
+        // Enter를 요청한 시도는 이 경로에서 미발송으로 확정하지 않습니다.
+        const beforeEnter=c.type==='PREPARE'&&attempt&&attempt.sessionId===c.sessionId&&!attempt.enterRequested;
+        if(beforeEnter&&['preparing','prepared'].includes(attempt.phase)){
+          attempt.phase='not_sent';attempt.result={outcome:'not_sent',executionBlocked:true};
+        }
         // Rejection is terminal too. Persist before ACK so already queued or
         // replayed commands cannot replace the original cause with PREPARE_FAILED.
         const rejectionCode=/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code||'')?error.code:`${c.type}_FAILED`;
         // 원문과 초안은 저장하거나 전달하지 않고 제한된 진단 코드만 보냅니다.
-        const rejection={rejectionCode,...(error.draftInspectionCode?{draftInspectionCode:error.draftInspectionCode}:{})};
+        const executionBlocked=beforeEnter&&attempt.phase==='not_sent'&&attempt.result?.executionBlocked===true;
+        const rejection={rejectionCode,...(error.draftInspectionCode?{draftInspectionCode:error.draftInspectionCode}:{}),...(executionBlocked?{executionBlocked:true}:{})};
         state.processed[c.id]={status:'rejected',...rejection};await save();
         if(c.sessionId===state.sessionId)try{await ack(c,'rejected',rejection);}catch{}
       });lanes.set(key,lane);await lane;

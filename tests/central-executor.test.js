@@ -95,6 +95,24 @@ test('입력 준비 거절 사유 코드를 보고하고 본문이나 오류 원
  assert.equal(JSON.stringify(r.reports).includes('private message text'),false);
 });
 
+test('입력 준비 거절을 보고하기 전에 같은 시도의 로컬 입력 권한을 닫는다',async()=>{
+ const r=rig();await configured(r);
+ r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():{status:'blocked',code:'PREPARE_EDITOR_UNSTABLE'};
+ let allowedAtRejection;
+ r.transport.request=async m=>{
+  if(m.type==='ACK'&&m.status==='rejected')allowedAtRejection=await r.client.canSend({id:'attempt',phase:'prepare'},7);
+  return{ok:true};
+ };
+ await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(allowedAtRejection,false);
+ const restarted=createCentralExecutor({chrome:r.chrome,transport:r.transport});
+ assert.equal(await restarted.canSend({id:'attempt',phase:'prepare'},7),false);
+ r.transport.request=async m=>{r.reports.push(m);return{ok:true};};
+ await restarted.handleCommand(cmd('PREPARE'));
+ assert.equal(r.reports.at(-1).executionBlocked,true);
+ assert.equal(r.reports.at(-1).status,'rejected');
+});
+
 test('채널 열기 명령은 창 연결만 수행하고 발송 준비·Enter를 실행하지 않는다',async()=>{
  const r=rig();const opened=[];
  const client=createCentralExecutor({chrome:r.chrome,transport:r.transport,openChannel:async p=>{opened.push(p);}});
@@ -721,16 +739,22 @@ test('업데이트 maintenance도 활성 전송과 실행 차단 증거 없는 �
  }
 });
 
-test('재연결 설정 동기화는 중앙에서 종료된 준비 실패 기록을 대조해 해제한다',async()=>{
+test('재연결 설정 동기화는 구버전에 남은 준비 실패 기록을 중앙에서 대조해 해제한다',async()=>{
  const r=rig();await configured(r);
  r.chrome.tabs.sendMessage=async(id,m)=>m.type==='DICO_DRAFT_INSPECT'?emptyDraft():{status:'blocked',code:'MANAGED_DELAY_UNAVAILABLE'};
  await r.client.handleCommand(cmd('PREPARE'));
+ assert.equal(r.state.attempts.attempt.phase,'not_sent');
+ // 구버전은 거절 ACK 이후에도 로컬 시도를 preparing으로 남겼습니다.
+ r.client.state.attempts.attempt.phase='preparing';
+ delete r.client.state.attempts.attempt.result;
+ await r.client.save();
  assert.equal(r.state.attempts.attempt.phase,'preparing');
  await r.client.setSession({instanceId:'instance',sessionId:'reconnected'});
  const request=r.transport.request;r.transport.request=async m=>{await request(m);return m.type==='HEARTBEAT'?{ok:true,terminalAttempts:[{attemptId:'attempt',status:'not_sent'}]}:{ok:true};};
  await r.client.handleCommand({...cmd('CONFIG_SYNC','reconnect-sync'),sessionId:'reconnected',payload:{...payload,attemptId:undefined,configVersion:2}});
  assert.equal(r.state.attempts.attempt.phase,'not_sent');
  assert.equal(r.state.bindings.binding.configVersion,2);
+ assert.ok(r.reports.some(m=>m.type==='HEARTBEAT'&&m.knownAttemptIds.includes('attempt')));
  assert.ok(r.reports.some(m=>m.type==='ACK'&&m.commandId==='reconnect-sync'&&m.status==='applied'));
  assert.equal(r.messages.some(m=>m.type==='DICO_DELIVER'),false);
 });
