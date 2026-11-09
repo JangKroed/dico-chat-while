@@ -182,6 +182,92 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const instanceId of new Set(closing.map(c=>c.instanceId)))queuePendingCloses(instanceId);
     event(`${kind}.deleted`,{entityId:entity.id,removedBindings:channels.length,pendingTabCloses:closing.length});return{id:entity.id,deleted:true,removedBindings:channels.length,pendingTabCloses:closing.length};
   }
+  // 명시적으로 저장한 계정은 Discord ID를 기준으로 연결 소유권만 이동합니다.
+  // 채널 ID를 유지해 그룹 순서와 문구 설정이 브라우저 교체에도 이어집니다.
+  function transferAccount(instance,accountId){
+    const accounts=state.accounts.filter(a=>a.accountId===accountId);
+    if(!accounts.some(a=>a.instanceId!==instance.id))return;
+    const channels=state.channels.filter(c=>c.accountId===accountId),ids=new Set(channels.map(c=>c.id));
+    const groups=state.groups.filter(g=>g.members.some(member=>ids.has(member)));
+    // 이전 실행기의 차단 ACK/결과는 그대로 수신합니다. 미확인 게시를 성공으로 바꾸지 않습니다.
+    for(const g of groups)if((g.status==='running'||g.autoResume)&&!g.controlIntent)control(g,'pause',{systemReason:'account_mismatch'});
+    for(const a of state.attempts.filter(a=>ids.has(a.bindingId)&&activeAttempt(a)))markUnknown(a,'account_transferred');
+    const oldOwners=new Set(accounts.filter(a=>a.instanceId!==instance.id).map(a=>a.instanceId));
+    for(const owner of oldOwners)rememberRemoval('accounts',removalKey(owner,accountId));
+    for(const c of channels.filter(c=>c.instanceId!==instance.id)){
+      rememberRemoval('bindings',bindingKey(c));
+      if(!state.removals.closeRequests.some(r=>bindingKey(r)===bindingKey(c)))state.removals.closeRequests.push({removalId:id(),instanceId:c.instanceId,accountId,guildId:c.guildId,channelId:c.channelId,bindingId:c.id,...(Number.isInteger(c.tabId)?{tabId:c.tabId}:{}),accountName:accounts.find(a=>a.instanceId===c.instanceId)?.name||accountId,channelName:c.name,createdAt:now()});
+    }
+    // 이전 연결에 남은 입력/설정/창 열기 명령이 나중에 되살아나지 않게 합니다.
+    for(const cmd of state.commands)if(cmd.type!=='CONTROL'&&cmd.type!=='CLOSE_CHANNEL'&&cmd.type!=='RECONCILE'&&
+      (ids.has(cmd.payload.bindingId)||cmd.payload.accountId===accountId)&&['queued','received'].includes(cmd.status))cmd.status='superseded';
+    const retained=accounts[0];
+    const custom=accounts.find(accountNameCustomized);
+    if(custom&&!accountNameCustomized(retained)){retained.name=custom.name;retained.nameCustomized=true;}
+    retained.instanceId=instance.id;retained.verified=false;retained.version++;
+    state.accounts=state.accounts.filter(a=>a.accountId!==accountId||a.id===retained.id);
+    const byTarget=new Map();
+    for(const c of channels){const key=targetKey(c);if(!byTarget.has(key))byTarget.set(key,[]);byTarget.get(key).push(c);}
+    for(const candidates of byTarget.values()){
+      // 이미 생긴 중복에서는 실제 그룹/문구가 있는 연결을 우선 보존합니다.
+      candidates.sort((a,b)=>Number(groups.some(g=>g.members.includes(b.id)))-Number(groups.some(g=>g.members.includes(a.id)))||Number(b.playlist.length>0)-Number(a.playlist.length>0));
+      const kept=candidates[0],duplicates=new Set(candidates.slice(1).map(c=>c.id));
+      if(duplicates.size){
+        const union=lists=>{const items=[];for(const list of lists)for(const item of list)if(!items.some(x=>x.messageId===item.messageId&&x.revisionId===item.revisionId))items.push(clone(item));return items;};
+        let mergedPlaylist=union(candidates.map(c=>c.playlist));
+        // 예약된 수정은 각 연결의 최종 선택을 합쳐 결과 확정 뒤에도 보존합니다.
+        if(candidates.some(c=>c.pendingPlaylist)){
+          const preserveIndex=candidates.filter(c=>c.pendingPlaylist).every(c=>c.pendingPlaylistPreserveIndex===true);
+          const effectivePlaylist=union(candidates.map(c=>c.pendingPlaylist||c.playlist));
+          if(state.attempts.some(a=>candidates.some(c=>c.id===a.bindingId)&&activeAttempt(a))){kept.pendingPlaylist=effectivePlaylist;kept.pendingPlaylistPreserveIndex=preserveIndex;}
+          else{mergedPlaylist=effectivePlaylist;if(!preserveIndex)kept.playlistIndex=0;delete kept.pendingPlaylist;delete kept.pendingPlaylistPreserveIndex;}
+        }
+        kept.playlist=mergedPlaylist;
+        // 실제 관측/발송 기록을 그대로 옮기되 가장 늦은 대기 기준을 선택합니다.
+        // mono 값만 합치면 재시작 시 대기 근거가 사라지므로 영속 필드도 보존합니다.
+        const intervalSource=candidates.reduce((best,c)=>effectiveInterval(c)>effectiveInterval(best)?c:best);
+        const intervalFields=['intervalMode','intervalMs','customIntervalMs','slowmodeMs','slowmodeObservedAt','cooldownCorrectionMs','cooldownCalibratedAttemptId','cooldownCalibratedAt'];
+        for(const key of intervalFields){if(intervalSource[key]===undefined)delete kept[key];else kept[key]=intervalSource[key];}
+        const confirmed=candidates.filter(c=>Number.isFinite(c.lastConfirmedAt)).sort((a,b)=>(b.lastConfirmedAt-confirmationOffset(b))-(a.lastConfirmedAt-confirmationOffset(a)))[0];
+        if(confirmed)for(const key of ['lastConfirmedAt','lastConfirmedMono','lastConfirmedAttemptId','lastConfirmationMs']){if(confirmed[key]===undefined)delete kept[key];else kept[key]=confirmed[key];}
+        const skipped=candidates.filter(c=>Number.isFinite(c.lastSkippedAt));
+        if(skipped.length)kept.lastSkippedAt=Math.max(...skipped.map(c=>c.lastSkippedAt));
+        kept.nextMono=Math.max(...candidates.map(c=>c.nextMono||0));
+        for(const a of state.attempts.filter(a=>candidates.some(c=>c.id===a.bindingId)&&activeAttempt(a))){
+          const index=mergedPlaylist.findIndex(item=>item.messageId===a.messageIdRef&&item.revisionId===a.revisionId);
+          if(index>=0)a.playlistIndex=index;
+        }
+      }
+      for(const g of groups)if(g.members.some(member=>duplicates.has(member))){
+        const current=g.members[g.cursor];g.members=[...new Set(g.members.map(member=>duplicates.has(member)?kept.id:member))];g.cursor=Math.max(0,g.members.indexOf(duplicates.has(current)?kept.id:current));g.version++;
+      }
+      for(const a of state.attempts)if(duplicates.has(a.bindingId))a.bindingId=kept.id;
+      state.channels=state.channels.filter(c=>!duplicates.has(c.id));
+      kept.instanceId=instance.id;kept.sessionId=instance.sessionId;delete kept.tabId;delete kept.observedAt;delete kept.observedMono;
+      kept.verified=false;kept.verificationReason='awaiting_observation';kept.version++;
+      kept.configVersion=Math.max(...candidates.map(c=>c.configVersion))+1;kept.appliedVersion=0;
+      state.removals.bindings=state.removals.bindings.filter(key=>key!==bindingKey(kept));
+      // 새 창 열기 의도는 세션 교체 후에도 남겨 닫기 완료 뒤 복구합니다.
+      kept.pendingTransferOpen=true;
+    }
+    // 제어 완료는 현재 소유자의 ACK도 요구하므로 이동한 브라우저에도 같은 세대의
+    // 중지/일시정지를 전달합니다. 기존 사용자의 중지 의도는 바꾸지 않습니다.
+    for(const g of groups)if(g.controlIntent&&!state.commands.some(c=>c.type==='CONTROL'&&c.instanceId===instance.id&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded'))command('CONTROL',instance.id,controlPayload(g,instance.id));
+    queueTransferOpens(instance);
+    for(const owner of oldOwners)queuePendingCloses(owner);
+    event('account.transferred',{accountEntityId:retained.id,instanceId:instance.id,previousInstanceIds:[...oldOwners],channelCount:byTarget.size});
+  }
+  function queueTransferOpens(instance){
+    if(!instance.capabilities?.includes('open-channel-v1'))return;
+    for(const c of state.channels.filter(c=>c.instanceId===instance.id&&c.pendingTransferOpen)){
+      if(state.commands.some(cmd=>cmd.type==='OPEN_CHANNEL'&&cmd.instanceId===instance.id&&cmd.sessionId===instance.sessionId&&['queued','received','applied'].includes(cmd.status)&&cmd.payload.accountId===c.accountId&&cmd.payload.guildId===c.guildId&&cmd.payload.channelId===c.channelId))continue;
+      const rejected=state.commands.findLast(cmd=>cmd.type==='OPEN_CHANNEL'&&cmd.instanceId===instance.id&&cmd.sessionId===instance.sessionId&&cmd.status==='rejected'&&cmd.payload.accountId===c.accountId&&cmd.payload.guildId===c.guildId&&cmd.payload.channelId===c.channelId);
+      if(rejected&&now()-(rejected.rejectedAt||rejected.createdAt)<30000)continue;
+      // 이미 전달된 닫기는 취소할 수 없으므로 실제 완료 전에는 OPEN을 전달하지 않습니다.
+      const waitForRemovalIds=state.removals.closeRequests.filter(r=>bindingKey(r)===bindingKey(c)).map(r=>r.removalId);
+      command('OPEN_CHANNEL',instance.id,{accountId:c.accountId,guildId:c.guildId,channelId:c.channelId,accountEntityId:state.accounts.find(a=>accountKey(a)===accountKey(c))?.id,targetId:state.targets.find(t=>targetKey(t)===targetKey(c))?.id,...(waitForRemovalIds.length?{waitForRemovalIds}:{})});
+    }
+  }
   function invalidateAccounts(instanceId){for(const a of state.accounts.filter(a=>a.instanceId===instanceId))a.verified=false;}
   function currentAccount(account){const instance=state.instances.find(i=>i.id===account.instanceId);return !!(account.verified&&instance?.connected&&account.sessionId===instance.sessionId&&Number.isFinite(account.lastVerifiedAt)&&now()-account.lastVerifiedAt<=15000&&now()-instance.lastSeenAt<=15000);}
   function recordIntervals(){
@@ -400,7 +486,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }else {delete g.autoResume;delete g.reconcileResumeRunId;}
     g.controlRecoveryCount=0;g.controlRecoveryAfter=0;
     g.controlIntent=intent;g.controlGeneration=(g.controlGeneration||0)+1;g.status=intent==='stop'?'stop_pending':'pause_pending';g.nextEligibleAt=null;
-    for(const instanceId of new Set(g.members.map(m=>get('channels',m).instanceId)))command('CONTROL',instanceId,controlPayload(g,instanceId));
+    const active=state.attempts.find(a=>a.id===g.activeAttemptId&&activeAttempt(a));
+    for(const instanceId of new Set([...g.members.map(m=>get('channels',m).instanceId),...(active?[active.instanceId]:[])]))command('CONTROL',instanceId,controlPayload(g,instanceId));
     event(`group.${intent}_requested`,{groupId:g.id});controlComplete(g);
   }
   function blockInstanceGroups(instanceId,reasonCode){
@@ -878,8 +965,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         invalidateAccounts(i.id);i.sessionId=id();i.connected=true;i.stableSinceMono=monotonicNow();i.lastSeenAt=now();i.lastSeenMono=monotonicNow();i.legacyFrozen=false;i.legacyPending=true;
         for(const c of state.channels.filter(c=>c.instanceId===i.id)){c.verified=false;c.verificationReason='session_changed';c.appliedVersion=0;delete c.tabId;}
         for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a))){markUnknown(a,'session_changed');if(!i.capabilities.includes('skip-unknown-v1'))command('RECONCILE',i.id,attemptPayload(a));}
-        for(const g of state.groups.filter(g=>g.controlIntent&&g.members.some(m=>get('channels',m).instanceId===i.id)))command('CONTROL',i.id,controlPayload(g,i.id));
-        queuePendingCloses(i.id);event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
+        for(const g of state.groups.filter(g=>g.controlIntent&&(g.members.some(m=>get('channels',m).instanceId===i.id)||state.attempts.some(a=>a.id===g.activeAttemptId&&a.instanceId===i.id&&activeAttempt(a)))))command('CONTROL',i.id,controlPayload(g,i.id));
+        queuePendingCloses(i.id);queueTransferOpens(i);event('instance.connected',{instanceId:i.id});return{instanceId:i.id,sessionId:i.sessionId,protocolVersion:1,resetEpoch:state.resetEpoch,resetRequired:(message.resetEpoch??0)!==state.resetEpoch,commands:commands(i.id)};
       }
       if(message.type==='HEARTBEAT'&&state.resetEpoch>0&&message.resetEpoch!==state.resetEpoch)return{ok:false,resetRequired:true,resetEpoch:state.resetEpoch};
       const i=ensureSession(message,instanceId);
@@ -983,7 +1070,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       }
 
       if(message.type==='HEARTBEAT'){
-        queuePendingCloses(i.id);
+        queuePendingCloses(i.id);queueTransferOpens(i);
         const requested=message.knownAttemptIds??[];ensure(Array.isArray(requested)&&requested.length<=500&&requested.every(value=>typeof value==='string'&&value.length<=100),'VALIDATION','knownAttemptIds must contain at most 500 identifiers.');
         const ids=new Set(requested),terminalAttempts=state.attempts.filter(a=>a.instanceId===i.id&&ids.has(a.id)&&(TERMINAL.has(a.status)||i.capabilities?.includes('skip-unknown-v1')&&a.skippedAt&&a.detached===true&&a.executionBlocked===true)).map(a=>({attemptId:a.id,status:a.skippedAt&&a.status==='unknown'?'skipped_unknown':a.status,...(a.messageId?{messageId:a.messageId}:{}),...(a.confirmationBasis?{confirmationBasis:a.confirmationBasis}:{}),...(a.confirmationBasis==='composer_cleared'?{deliveryEvidence:a.deliveryEvidence}:{})}));
         return{ok:true,commands:commands(i.id),terminalAttempts};
@@ -1003,6 +1090,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         }
         const deletedKey=removalKey(i.id,message.accountId);
         if(state.removals.accounts.includes(deletedKey)){if(message.explicitRegistration!==true||!message.verified)return{ok:true,account:null,commands:commands(i.id)};state.removals.accounts=state.removals.accounts.filter(key=>key!==deletedKey);}
+        if(message.verified&&message.explicitRegistration===true)transferAccount(i,message.accountId);
         const affected=accountId=>message.verified?accountId!==message.accountId:accountId===message.accountId;
         const transientReasons=new Set(['tab_loading','tab_missing','script_unavailable','identity_unverified','content_refresh_required','awaiting_observation']);
         const confirmedMismatch=message.verified===true||!transientReasons.has(message.verificationReason);
@@ -1026,7 +1114,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const observed of message.channels){
           const accountId=text(observed.accountId,'accountId',100),channelId=text(observed.channelId,'channelId',100),guildId=text(observed.guildId||'@me','guildId',100);
           ensure(Number.isInteger(observed.tabId)&&observed.tabId>=0&&!seenTabs.has(observed.tabId),'VALIDATION','Each observed channel needs its own dedicated tab.');seenTabs.add(observed.tabId);
-          if(removedScope({instanceId:i.id,accountId,guildId,channelId}))continue;
+          if(removedScope({instanceId:i.id,accountId,guildId,channelId})||state.removals.closeRequests.some(r=>r.instanceId===i.id&&r.accountId===accountId&&r.guildId===guildId&&r.channelId===channelId))continue;
           ensure(!state.attempts.some(a=>a.instanceId===i.id&&a.tabId===observed.tabId&&activeAttempt(a)&&(a.accountId!==accountId||a.channelId!==channelId||a.guildId!==guildId)),'TAB_BUSY','An unresolved attempt owns this execution tab.',409);
           let c=state.channels.find(c=>c.instanceId===i.id&&c.accountId===accountId&&c.guildId===guildId&&c.channelId===channelId);
           if(!c){const candidates=state.channels.filter(x=>x.legacyPlaceholder&&x.accountId===accountId&&x.guildId===guildId&&x.channelId===channelId);if(candidates.length===1&&i.legacyFrozen&&i.legacyPending===false){c=candidates[0];const previousInstance=c.instanceId;c.instanceId=i.id;c.legacyPlaceholder=false;c.version++;if(!state.channels.some(x=>x.instanceId===previousInstance)){
@@ -1043,6 +1131,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           if(tabChanged&&state.attempts.some(a=>a.bindingId===c.id&&activeAttempt(a)&&!(a.status==='unknown'&&a.executionBlocked===true))){c.verified=false;for(const a of state.attempts.filter(a=>a.bindingId===c.id&&activeAttempt(a)))markUnknown(a,'execution_tab_changed');continue;}
           c.tabId=observed.tabId;c.sessionId=i.sessionId;c.verified=observed.verified===true;c.observedAt=now();c.observedMono=monotonicNow();if(c.verified)delete c.verificationReason;else c.verificationReason=verificationReason(observed.verificationReason);
           if(c.verified){
+            delete c.pendingTransferOpen;
             applyChannelName(c,{observedName:observed.channelName??observed.name},createdChannel);
             upsertAccount(i.id,accountId,{verified:true,sessionId:i.sessionId,accountName:observed.accountName,username:observed.username});upsertTarget(guildId,channelId,{observedName:c.observedName});
             for(const cmd of state.commands.filter(cmd=>cmd.type==='OPEN_CHANNEL'&&cmd.instanceId===i.id&&cmd.sessionId===i.sessionId&&['queued','received','applied'].includes(cmd.status)&&cmd.payload.accountId===accountId&&cmd.payload.guildId===guildId&&cmd.payload.channelId===channelId)){cmd.status='completed';cmd.completedAt=now();}
@@ -1349,7 +1438,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     }
     return{ok:true};
   });}
-  function commands(instanceId,{pendingOnly=true}={}){const i=get('instances',instanceId);return clone(state.commands.filter(c=>c.instanceId===instanceId&&c.sessionId===i.sessionId&&(!pendingOnly||['queued','received'].includes(c.status))));}
+  function commands(instanceId,{pendingOnly=true}={}){const i=get('instances',instanceId);return clone(state.commands.filter(c=>c.instanceId===instanceId&&c.sessionId===i.sessionId&&(!pendingOnly||['queued','received'].includes(c.status)&&!(c.type==='OPEN_CHANNEL'&&c.payload.waitForRemovalIds?.some(id=>state.removals.closeRequests.some(r=>r.removalId===id))))));}
   function publicAccount(a){const{sessionId,...dto}=a;const connected=currentAccount(a);return{...clone(dto),verified:connected,connected};}
   function publicInstance(i){const{sessionId,lastSeenMono,stableSinceMono,...dto}=i;return clone(dto);}
   function deadlineClock(){
