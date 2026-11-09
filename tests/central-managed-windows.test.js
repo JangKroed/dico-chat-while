@@ -177,3 +177,17 @@ test('탭 그룹 생성 중 실패하면 새 탭만 정리하고 원래 로그�
  chrome.tabGroups={query:async()=>{throw Error('denied');}};
  await assert.rejects(createManagedWindow(chrome,{...target,sourceTabId:70}));assert.deepEqual(calls,[['remove',71]]);
 });
+
+test('준비 시 전용 창을 복원하고 대상 탭을 활성화하되 포커스를 요구하지 않는다',async()=>{
+ const {manage,calls}=fixture();
+ await manage({...target,action:'prepare'});
+ assert.deepEqual(calls,[['tab',7,{active:true}],['window',8,{state:'normal',focused:false}]]);
+});
+
+test('준비 시 사용자 탭이 섞인 창과 직접 연결한 탭은 변경하지 않는다',async()=>{
+ for(const options of [{otherTabs:[{id:9,url:'https://example.com'}]},{record:{...target,windowId:8,ownership:'adopted'}}]){
+  const {manage,calls}=fixture(options);
+  await manage({...target,action:'prepare'});
+  assert.deepEqual(calls,[]);
+ }
+});

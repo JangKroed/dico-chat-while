@@ -261,7 +261,7 @@ test('미확인 발송이 남으면 탭 모으기 콜백에 진입하지 않는�
  const r=rig(),seen=[];r.client=createCentralExecutor({chrome:r.chrome,transport:r.transport,manageChannelWindow:async p=>seen.push(p)});
  await configured(r);await r.client.handleCommand(cmd('PREPARE'));
  await r.client.handleCommand({...cmd('MANAGE_WINDOW'),payload:{...payload,action:'consolidate'}});
- assert.equal(seen.length,0);assert.ok(r.reports.some(m=>m.type==='ACK'&&m.rejectionCode==='ATTEMPT_UNRESOLVED'));
+ assert.deepEqual(seen.map(p=>p.action),['prepare']);assert.ok(r.reports.some(m=>m.type==='ACK'&&m.rejectionCode==='ATTEMPT_UNRESOLVED'));
 });
 
 test('다른 초안은 원문을 먼저 영구 보관한 뒤 정확한 교체 문자열로 준비한다',async()=>{

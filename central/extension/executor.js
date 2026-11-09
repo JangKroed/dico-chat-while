@@ -300,6 +300,9 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
         delete state.stoppedGroups[p.groupId];volatileStops.delete(p.groupId);
         a={...structuredClone(p),maxSendRetries:normalizeSendRetries(p.maxSendRetries),sessionId:state.sessionId,phase:'preparing',startedAt:now(),enterRequested:false};state.attempts[p.attemptId]=a;await save();
       } else if(!matches(a,p) || a.sessionId!==state.sessionId || !['preparing','prepared'].includes(a.phase))throw Error('기존 발송 시도를 다시 준비할 수 없습니다.');
+      // 전용 전송 창의 최소화로 Discord 자체 슬로우모드 타이머가 지연되는 것을 방지한다.
+      if(typeof manageChannelWindow==='function')await manageChannelWindow({...p,action:'prepare'});
+      if(c.sessionId!==state.sessionId||!transport.connected||state.stoppedRuns[p.runId]||volatileStoppedRuns.has(p.runId)||state.stoppedGroups[p.groupId]||volatileStops.has(p.groupId)||state.emergencyStopped)throw Object.assign(Error('창 준비 중 실행이 중지되었습니다.'),{code:'EXECUTION_STOPPED'});
       if(a.phase!=='prepared') {
         let inspection;
         try{inspection=await inspectBeforePrepare(a,{type:'DICO_DRAFT_INSPECT',target:target(a),delivery:delivery(a)});}catch(error){if(['CONTENT_INSPECTION_TIMEOUT','EXECUTION_STOPPED'].includes(error?.code))throw error;throw Object.assign(Error('기존 입력 내용을 확인하지 못했습니다. 초안을 보존합니다.'),{code:'DRAFT_INSPECTION_UNAVAILABLE',draftInspectionCode:'TAB_REQUEST_FAILED'});}
