@@ -32,11 +32,12 @@ export async function recoverConnections({chrome,state,findAccount,openChannel,r
   if(!current())return cancelled();
   let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{}
   if(!current())return cancelled();
-  // 누락 탭 복구는 사용자가 다른 페이지로 이동한 기존 탭을 변경하지 않습니다.
-  if(tab&&onlyMissing){completed++;continue;}
+  // 탭 번호는 영속 식별자가 아닙니다. 사용자가 다른 페이지로 이동한 탭은
+  // 그대로 두고 openChannel의 계정·채널 재탐색과 기존 탭 재사용 경로를 이용합니다.
   if(tab){
-   let matching=false;try{const url=new URL(tab.url);matching=url.origin==='https://discord.com'&&url.pathname===`/channels/${record.guildId}/${record.channelId}`;}catch{}
-   if(!matching)return blocked('TARGET_MISMATCH');
+   let matching=false;try{const url=new URL(tab.url);matching=url.origin==='https://discord.com'&&[ `/channels/${record.guildId}/${record.channelId}`,`/channels/${record.guildId}/${record.channelId}/`].includes(url.pathname);}catch{}
+   if(!matching)tab=null;
+   else if(onlyMissing){completed++;continue;}
   }
   if(!await safe())return blocked('ATTEMPT_UNRESOLVED');
   attempted=true;

@@ -32,9 +32,14 @@ test('관찰 예약이 실제 저장 연결 복구 함수를 호출해 누락 �
  await scheduler.run({safe:()=>true,repair:()=>recoverConnections({chrome,state,findAccount:async()=>({verified:true,accountId:'a'}),openChannel:async record=>opened.push(record),report:async()=>{}})});
  assert.equal(opened.length,1);assert.equal(opened[0].channelId,'c');
 });
-test('다른 페이지로 이동한 기존 탭은 보존하면서 뒤의 누락 탭만 복구한다',async()=>{
+test('다른 페이지로 이동한 탭은 보존하면서 두 목적지를 다시 연결한다',async()=>{
  const {recoverConnections}=await import('../central/extension/connection-recovery.js');const opened=[],moved=[];
  const first={accountId:'a',guildId:'g',channelId:'first',tabId:1},second={accountId:'a',guildId:'g',channelId:'second',tabId:2};
  await recoverConnections({onlyMissing:true,chrome:{storage:{local:{get:async()=>({dicoCentralAccount:{accountId:'a'},dicoCentralTabs:[first,second]})}},tabs:{get:async id=>{if(id===1)return{url:'https://example.com'};throw Error('missing');}}},state:{legacyDeclaration:'fresh',attempts:{}},findAccount:async()=>({verified:true,accountId:'a'}),openChannel:async record=>opened.push(record),ensureManagedWindow:async record=>moved.push(record),report:async()=>{}});
- assert.deepEqual(opened,[second]);assert.deepEqual(moved,[]);
+ assert.deepEqual(opened,[first,second]);assert.deepEqual(moved,[]);
+});
+test('계정이 확인된 주소 불일치는 기존 탭을 보존하는 재탐색을 예약한다',async()=>{
+ const scheduler=createRecoveryScheduler();let calls=0;
+ scheduler.observe({...missing,channels:[{...missing.channels[0],verificationReason:'target_mismatch'}]});
+ assert.equal(await scheduler.run({safe:()=>true,repair:async()=>calls++}),true);assert.equal(calls,1);
 });

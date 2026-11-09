@@ -33,9 +33,12 @@ test('navigation during identity observation prevents adopting the old URL',asyn
  const r=rig();r.scope.chrome.tabs.get=async()=>({id:7,windowId:8,url:'https://discord.com/channels/111/999'});
  await r.open();assert.deepEqual(r.calls,['create']);assert.equal(r.saved.dicoCentralTabs[0].tabId,9);
 });
-test('a surviving registered tab on another channel is not replaced or closed during recovery',async()=>{
- const r=rig({records:[{...target,tabId:7,windowId:8}],seen:{...target,channelId:'999',verified:true}});
- await assert.rejects(r.scope.openTest({...target,recovery:true}),{code:'TARGET_MISMATCH'});assert.deepEqual(r.calls,[]);assert.equal(r.saved.dicoCentralTabs[0].tabId,7);
+test('이동한 기존 탭은 보존하고 다른 검증된 탭을 재사용한다',async()=>{
+ const r=rig({records:[{...target,tabId:7,windowId:8}]}),replacement={id:12,windowId:13,url:'https://discord.com/channels/111/222'};
+ r.scope.observe=async id=>({...target,channelId:id===7?'999':'222',verified:true});
+ r.scope.chrome.tabs.get=async id=>id===7?{id:7,windowId:8,url:'https://discord.com/channels/111/999'}:replacement;
+ r.scope.chrome.tabs.query=async()=>[replacement];
+ const result=await r.scope.openTest({...target,recovery:true});assert.equal(result.reused,true);assert.deepEqual(r.calls,[]);assert.equal(r.saved.dicoCentralTabs[0].tabId,12);
 });
 test('tab adoption uses only read-only content status and preserves a user draft',async()=>{
  const r=rig(),messages=[];let draft='사용자가 작성 중인 초안';
@@ -69,4 +72,14 @@ test('recovery of a closed adopted tab prefers another verified user tab before 
  r.scope.chrome.tabs.get=async tabId=>{if(tabId===7)throw Error('closed');return replacement;};r.scope.chrome.tabs.query=async()=>[replacement];
  assert.equal((await r.scope.openTest({...target,recovery:true})).reused,true);assert.deepEqual(r.calls,[]);
  assert.equal(r.saved.dicoCentralTabs.length,1);assert.equal(r.saved.dicoCentralTabs[0].tabId,12);assert.equal(r.saved.dicoCentralTabs[0].ownership,'adopted');
+});
+test('같은 목적지의 일시 미검증 탭은 중복 생성하지 않는다',async()=>{
+ const r=rig({records:[{...target,tabId:7,windowId:8}],seen:{verified:false}});
+ await assert.rejects(r.scope.openTest({...target,recovery:true}),{code:'ACCOUNT_UNVERIFIED'});
+ assert.deepEqual(r.calls,[]);assert.equal(r.saved.dicoCentralTabs[0].tabId,7);
+});
+test('재탐색 도중 세션이 바뀌면 새 탭을 만들지 않는다',async()=>{
+ const r=rig({records:[{...target,tabId:7,windowId:8}],seen:{verified:false}});
+ r.scope.chrome.tabs.get=async()=>{r.state.sessionId='new';return{id:7,url:'https://example.com'};};
+ await assert.rejects(r.scope.openTest({...target,recovery:true}),{code:'STALE_SESSION'});assert.deepEqual(r.calls,[]);
 });

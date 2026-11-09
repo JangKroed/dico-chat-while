@@ -239,7 +239,11 @@ async function openManagedChannelNow(p) {
     const seen=await observe(existing.tabId);ensureCurrent();
     if(matches(seen)){await observation();ensureCurrent();return {alreadyConnected:true,tabId:existing.tabId};}
     if(Object.values(executor.state.attempts).some(a=>a.tabId===existing.tabId&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('기존 전송용 창의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
-    try{await chrome.tabs.get(existing.tabId);throw Object.assign(Error('기존 전송용 창이 다른 화면에 있습니다. 원래 채널로 돌아가거나 창을 닫고 다시 연결하세요.'),{code:'TARGET_MISMATCH'});}catch(error){if(error.code==='TARGET_MISMATCH')throw error;}
+    // 살아 있는 다른 페이지를 이동하거나 닫지 않습니다. 정확한 목적지에
+    // 머문 탭이 일시적으로 미검증인 경우는 새 탭을 만들지 않고 재관찰합니다.
+    let live;try{live=await chrome.tabs.get(existing.tabId);}catch{}
+    ensureCurrent();
+    if(live&&matchesUrl(live))throw Object.assign(Error('기존 채널의 계정 확인을 기다립니다.'),{code:'ACCOUNT_UNVERIFIED'});
     records.splice(records.indexOf(existing),1);
   }
   if(executor.state.emergencyStopped||!transport.connected)throw Object.assign(Error('브라우저 중지로 채널 열기를 취소했습니다.'),{code:'EXECUTION_STOPPED'});
