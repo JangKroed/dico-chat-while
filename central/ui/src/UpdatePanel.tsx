@@ -64,6 +64,7 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
   const [latest,setLatest]=useState<LatestUpdate|null>(null),[checkingLatest,setCheckingLatest]=useState(true)
   const [requestMode,setRequestMode]=useState<'update'|'rollback'>('update')
   const [result,setResult]=useState<UpdateStatus|null>(null),[error,setError]=useState(''),[checking,setChecking]=useState(true),[submitting,setSubmitting]=useState(false),[pollKey,setPollKey]=useState(0),[paused,setPaused]=useState<'connection_lost'|'busy_timeout'|null>(null)
+  useEffect(()=>{const check=()=>setPollKey(key=>key+1);window.addEventListener('dico:check-update',check);return()=>window.removeEventListener('dico:check-update',check)},[])
   const alive=useRef(true),postController=useRef<AbortController|null>(null)
   const lastResult=useRef<UpdateStatus|null>(null)
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;postController.current?.abort()}},[])
