@@ -28,6 +28,7 @@ const traceDelivery=createDeliveryTracer({executor});
 const networkObserverReady=observeDiscordSendRequests(chrome.webRequest,executor,traceDelivery);
 const observation=createObservationQueue(collectObservation,publishObservation);
 const heartbeat=createSingleFlight(runHeartbeat);
+const maintenance=createSingleFlight(runMaintenance);
 const automaticRecovery=createRecoveryScheduler();
 let channelOpening=Promise.resolve();
 let connecting=null,heartbeatTimer=null,lastError=null,updateIssue=null,recoveryPending=false;
@@ -113,6 +114,22 @@ async function restoreSavedConnections({onlyMissing=false}={}){
     canRecover:async()=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId||!executor.isMaintenanceIdle)return false;const result=await executor.request({type:'RECOVERY_STATUS'});return result.allowed===true&&transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId&&executor.isMaintenanceIdle;},
     report:async progress=>{if(!transport.connected||executor.state.emergencyStopped||executor.state.sessionId!==sessionId)return;recoveryPending=progress.stage==='blocked'&&progress.reasonCode==='ATTEMPT_UNRESOLVED';await executor.request({type:'CONNECTION_PROGRESS',...progress});}});
 }
+// 탭 검사·복구가 느려져도 5초 연결 유지와 중지 명령 수신은 계속 진행합니다.
+// 관찰은 single-flight로 합치며, 이전 세션의 늦은 결과는 적용하지 않습니다.
+async function runMaintenance() {
+  const sessionId=executor.state.sessionId;
+  const current=()=>transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId;
+  try {
+    if(!current()||connecting)return;
+    await refreshManagedContent();if(!current())return;
+    await observation();if(!current())return;
+    await automaticRecovery.run({safe:()=>current()&&executor.isMaintenanceIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});
+    if(current())lastError=null;
+  }catch{
+    // 탭 관찰 실패를 Native 연결 실패로 취급하면 정상 연결까지 반복 해제됩니다.
+    if(current())lastError='Discord 탭 확인이 지연됩니다. 연결을 유지하며 자동으로 다시 확인합니다.';
+  }
+}
 async function runHeartbeat() {
   const sessionId=executor.state.sessionId;
   const current=()=>transport.connected&&executor.state.sessionId===sessionId;
@@ -135,7 +152,7 @@ async function runHeartbeat() {
     if(!current())return;
     for(const command of result.commands || [])void executor.handleCommand(command);
     if(executor.state.emergencyStopped)return;
-    await refreshManagedContent();if(!current()||executor.state.emergencyStopped)return;await observation();if(!current()||executor.state.emergencyStopped)return;await automaticRecovery.run({safe:()=>transport.connected&&!executor.state.emergencyStopped&&executor.isMaintenanceIdle,repair:()=>restoreSavedConnections({onlyMissing:true})});if(current())lastError=null;
+    void maintenance();
   }catch{if(!current())return;lastError='관리 프로그램 응답이 지연됩니다. 자동으로 다시 연결합니다.';transport.disconnect();}
 }
 async function connect({explicit=false}={}) {
@@ -165,10 +182,12 @@ async function connect({explicit=false}={}) {
       for(const command of response.commands||[])if(command.type!=='CLOSE_CHANNEL')void executor.handleCommand(command);
       const sessionId=executor.state.sessionId;
       const current=()=>transport.connected&&!executor.state.emergencyStopped&&executor.state.sessionId===sessionId;
+      // 초기 복구가 오래 걸려도 연결 유지 요청부터 시작합니다.
+      clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);
       await updater.check({force:true});if(!current())return;
       await refreshManagedContent();if(!current())return;
       await restoreSavedConnections();if(!current())return;
-      await observation();if(!current())return;clearInterval(heartbeatTimer);heartbeatTimer=setInterval(()=>void heartbeat(),5000);lastError=null;
+      await observation();if(!current())return;lastError=null;
       await chrome.alarms.clear('dico-central-reconnect');
     } catch(error){lastError=String(error.message || error).slice(0,200);transport.disconnect();throw Error(lastError);}
   })().finally(()=>{connecting=null;});return connecting;

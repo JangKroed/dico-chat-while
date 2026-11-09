@@ -3687,3 +3687,20 @@ small {
 .support-checks p {margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .support-actions {position:sticky;top:0;background:var(--surface);padding:12px 0;z-index:1;flex-wrap:wrap}
 @media(max-width:700px){.support-modal{width:calc(100vw - 20px)}.support-file{flex-wrap:wrap}.support-file input{max-width:100%}.support-actions{position:static}}
+
+/* 작업 상태는 스크롤 위치와 관계없이 보이며, 실패 알림과 구분됩니다. */
+.work-feedback {position:sticky;top:82px;z-index:15;margin-bottom:16px;padding:14px 18px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:var(--shadow-popover)}
+.work-feedback-row {display:flex;align-items:center;gap:12px}
+.work-feedback-row + .work-feedback-row {margin-top:12px}
+.work-feedback-row p {margin:3px 0 0;font-size:12px;color:var(--text-muted)}
+.work-elapsed {margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+.work-spinner {display:inline-block;flex-shrink:0;width:16px;height:16px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:work-spin .8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes work-spin {to {transform:rotate(360deg)}}
+.account-connection-state {max-width:280px!important;min-width:150px}
+.account-connection-state strong,.account-connection-state small {display:block}
+.account-connection-state small {margin-top:4px;line-height:1.55;font-weight:400}
+.account-connection-state.waiting {color:var(--text-muted)}
+@media(prefers-reduced-motion:reduce){.work-spinner {animation:none;border-style:dotted}}
+@media(max-width:600px){.connect-account {flex-wrap:wrap}.account-connection-state {max-width:100%!important;width:100%;text-align:left!important}.work-feedback {top:72px;padding:12px}.work-feedback-row {align-items:flex-start}}
+
+.connect-account-row > .control-row {margin-top:0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}

@@ -12,6 +12,8 @@ import assert from 'node:assert/strict';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {Dashboard,History} from './src/App.tsx';
 import {ConnectionProgress} from './src/ConnectionProgress.tsx';
+import {ChannelConnectionStatus} from './src/ChannelConnectionStatus.tsx';
+import {PendingFeedback} from './src/PendingFeedback.tsx';
 import {ServerClock,GroupCountdown} from './src/RuntimeCountdown.tsx';
 const now=Date.now();
 const instances=['Brave','Chrome','Chrome'].map((browser,index)=>({id:'b'+index,name:'연결된 '+browser,browser,connected:true,lastSeenAt:now,legacyFrozen:true,legacyPending:false,capabilities:['managed-window-v1','early-prepare-v1'],extensionVersion:'0.4.7'}));
@@ -19,6 +21,18 @@ const accounts=instances.map((i,index)=>({id:'a'+index,instanceId:i.id,accountId
 const targets=[{id:'t1',guildId:'guild',channelId:'channel',name:'테스트 채널'}];
 const channels=accounts.map((a,index)=>({id:'c'+index,instanceId:a.instanceId,accountId:a.accountId,guildId:'guild',channelId:'channel',name:'테스트 채널',verified:true,tabId:index+1,version:1,configVersion:1,appliedVersion:1,playlist:[{messageId:'m1',revisionId:'r1'}],playlistIndex:0,intervalMs:63000,slowmodeMs:60000,slowmodeObservedAt:now,nextEligibleAt:now+63000}));
 const snapshot={schemaVersion:1,stateVersion:1,serverNow:now,service:{status:'ready'},settings:{retentionDays:90,notificationsEnabled:false,hideNotificationNames:true},messages:[{id:'m1',name:'안내',body:'테스트',tags:[],archived:false,version:1,revisionId:'r1',createdAt:now,updatedAt:now,revisions:[{id:'r1',version:1,body:'테스트',at:now}]}],instances,accounts,targets,channels,groups:[{id:'g1',name:'순환 그룹',guildId:'guild',channelId:'channel',members:channels.map(c=>c.id),intervalMs:1000,version:1,status:'running',cursor:0,nextEligibleAt:now+63000}],attempts:[],incidents:[],events:[]};
+// 계정 미검증이 함께 있어도 확인된 오류를 로딩 표시로 숨기지 않습니다.
+for(const reason of ['account_mismatch','target_mismatch','script_unavailable','identity_unverified','content_refresh_required','tab_missing']){
+ const markup=renderToStaticMarkup(<ChannelConnectionStatus s={snapshot} account={{...accounts[0],verified:false}} binding={{...channels[0],verified:false,verificationReason:reason}} pending={false}/>);
+ assert.ok(!markup.includes('로그인 계정 확인 중'),reason);
+ assert.ok(!markup.includes('work-spinner'),reason);
+}
+const waiting=renderToStaticMarkup(<ChannelConnectionStatus s={snapshot} account={accounts[0]} binding={{...channels[0],verified:false,verificationReason:'tab_loading'}} pending={false}/>);
+assert.ok(waiting.includes('work-spinner')&&waiting.includes('로딩 중'));
+const processing=renderToStaticMarkup(<PendingFeedback items={{save:{action:'message.create',phase:'submitting',startedAt:performance.now()-11000}}}/>);
+assert.ok(processing.includes('메시지 추가')&&processing.includes('응답이 늦어지고'));
+const accepted=renderToStaticMarkup(<PendingFeedback items={{save:{action:'message.create',phase:'refreshing',startedAt:performance.now()}}}/>);
+assert.ok(accepted.includes('접수 완료 · 화면 갱신 중'));
 const analytics={from:now-86400000,to:now,total:21,confirmed:21,outcomes:{confirmed:21},confirmedBuckets:[]};
 const props={s:snapshot,analytics,analyticsStatus:'ready',analyticsAt:now,retryAnalytics:()=>{},lastSeen:now,period:'24h',setPeriod:()=>{},go:()=>{},run:async()=>true,busy:false,stale:false};
 const html=renderToStaticMarkup(<Dashboard {...props}/>);

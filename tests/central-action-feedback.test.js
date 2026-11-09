@@ -13,3 +13,8 @@ test('저장 중에도 중단을 접수하며 중복 클릭과 작업 진행 상
  const pending=createPendingActions();assert.equal(pending.begin('save'),true);assert.equal(pending.begin('stop'),true);assert.equal(pending.begin('stop'),false);
  pending.end('stop');assert.equal(pending.size,1);assert.equal(pending.has('save'),true);pending.end('save');assert.equal(pending.size,0);
 });
+
+test('접수와 최신 상태 확인 단계를 구분해서 알린다',async()=>{
+ const phases=[];await submitAndRefresh(async()=>{phases.push('submit');return{};},async()=>{phases.push('refresh');},phase=>phases.push(phase));
+ assert.deepEqual(phases,['submitting','submit','refreshing','refresh']);
+});

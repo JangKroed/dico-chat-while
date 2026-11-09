@@ -22,7 +22,7 @@ export function channelVerification(channel:Pick<Channel,'verified'|'verificatio
 
 export function managedWindowAvailable(s:Snapshot,channel:Channel|undefined):boolean {
   const browser=s.instances.find(instance=>instance.id===channel?.instanceId)
-  return Boolean(channel?.id&&Number.isInteger(channel.tabId)&&browserOnline(browser)&&Array.isArray(browser?.capabilities)&&browser.capabilities.includes('managed-window-v1'))
+  return Boolean(channel?.id&&Number.isInteger(channel.tabId)&&browserOnline(browser,s.serverNow??Date.now())&&Array.isArray(browser?.capabilities)&&browser.capabilities.includes('managed-window-v1'))
 }
 
 export function managedWindowSeparationAvailable(s:Snapshot,channel:Channel|undefined):boolean {
