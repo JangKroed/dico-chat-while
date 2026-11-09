@@ -525,7 +525,7 @@
     try {
       // Never wait for telemetry before typing; record only allowlisted metadata.
       const request = chrome.runtime.sendMessage({type:'DICO_TRACE',id:delivery.id,stage,version:CONTENT_VERSION,buildId:CONTENT_BUILD_ID,
-        data:{...data,messageIndex:delivery.index,deliveryPhase:delivery.phase || 'send',eventAt:Date.now(),scheduledAt:delivery.scheduledAt,startedAt:delivery.startedAt,observedPath:location.pathname,elapsedMs:Date.now()-delivery.startedAt,latenessMs:Date.now()-delivery.scheduledAt}});
+        data:{...data,messageIndex:delivery.index,deliveryPhase:delivery.phase || 'send',eventAt:data.eventAt??Date.now(),scheduledAt:delivery.scheduledAt,startedAt:delivery.startedAt,observedPath:location.pathname,elapsedMs:Date.now()-delivery.startedAt,latenessMs:Date.now()-delivery.scheduledAt}});
       return request?.catch?.(() => {});
     } catch { /* Diagnostics must not change delivery behavior. */ }
   }
@@ -1195,17 +1195,30 @@
         evidence.submitMethod='keyboard';
         evidence.documentHidden=document.hidden===true;
         evidence.documentFocused=document.hasFocus()===true;
-        editor.dispatchEvent(keydown);
+        const dispatchAt=Date.now();
+        const keyRoute={};
+        if(target.managed&&typeof document.removeEventListener==='function'){
+          // 우리가 만든 Enter 한 건의 전파만 관측합니다. 사용자 키나 이벤트 원문은 기록하지 않습니다.
+          keyRoute.keyDownDocumentCapture=false;keyRoute.keyDownDocumentBubble=false;
+          const capture=event=>{if(event===keydown)keyRoute.keyDownDocumentCapture=true;};
+          const bubble=event=>{if(event===keydown)keyRoute.keyDownDocumentBubble=true;};
+          document.addEventListener('keydown',capture,true);
+          document.addEventListener('keydown',bubble);
+          try{editor.dispatchEvent(keydown);}
+          finally{document.removeEventListener('keydown',capture,true);document.removeEventListener('keydown',bubble);}
+        }else editor.dispatchEvent(keydown);
         editor.dispatchEvent(keyup);
         evidence.enterDefaultPrevented=keydown.defaultPrevented===true;
         evidence.keyupDefaultPrevented=keyup.defaultPrevented===true;
         trace('enter-dispatched', {
+          eventAt:dispatchAt,
           retryCount,
           cooldownMs:cooldown.cooldownMs,
           cooldownKnown:cooldown.cooldownKnown,
           slowmodeDetected:cooldown.slowmodeDetected,
           enterPrevented:keydown.defaultPrevented,
           keyupPrevented:keyup.defaultPrevented,
+          ...keyRoute,
         });
         evidence.stage='observe';watcher.submitted();
         const outcome = await watcher.promise;

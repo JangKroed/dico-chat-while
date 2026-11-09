@@ -33,6 +33,18 @@ function fixture(options = {}) {
   return { manager, connect, message, apply, group, start, prepared, result, advance, jumpWall: ms => { time += ms; } };
 }
 
+test('연결 진단은 명시적 종료와 중앙 응답 만료를 구분한다',t=>{
+ const f=fixture();t.after(()=>f.manager.close());
+ const a=f.connect('A'),b=f.connect('B');
+ f.manager.bridge({type:'DISCONNECT',sessionId:a.sessionId},a.instanceId);
+ for(let i=0;i<3;i++){f.advance(6000);f.manager.tick();}
+ const events=f.manager.events({type:'instance.disconnected'});
+ assert.equal(events.find(e=>e.instanceId===a.instanceId).reasonCode,'transport_disconnect');
+ const timeout=events.find(e=>e.instanceId===b.instanceId);
+ assert.equal(timeout.reasonCode,'heartbeat_timeout');
+ assert.equal(timeout.lastBridgeMessageAgeMs,18000);
+});
+
 test('message revisions stay immutable, validate content and reject stale editors', () => {
   const f = fixture(); const m = f.message('Original');
   const updated = f.manager.execute('message.update', { id: m.id, expectedVersion: 1, body: 'Updated' });
@@ -1396,4 +1408,78 @@ test('반복 초안 판독 실패는 초안과 문구 순서를 보존하고 다
   tick(10000);tick(9999);assert.equal(f.manager.snapshot().attempts.length,3);
   tick(1);assert.equal(f.manager.snapshot().attempts.at(-1).accountId,'B');
  }finally{f.manager.close();}
+});
+
+test('서로 다른 Enter 전 실패가 반복되어도 다음 계정이 진행하고 이전 차례를 다시 승인하지 않는다', t=>{
+ const f=fixture();t.after(()=>f.manager.close());
+ const a=f.connect('A'),b=f.connect('B');
+ const [a1,a2,b1,b2]=['A1','A2','B1','B2'].map(name=>f.message(name));
+ f.apply(a,[a1,a2]);f.apply(b,[b1,b2]);f.start(f.group([a,b],20000));
+ const tick=ms=>{
+  while(ms>0){
+   const step=Math.min(ms,5000);ms-=step;f.advance(step);
+   for(const c of [a,b])f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);
+   f.manager.tick();
+  }
+ };
+ const rejected=[];
+ for(const reasonCode of ['DRAFT_INSPECTION_UNAVAILABLE','CONTENT_INSPECTION_TIMEOUT','COOLDOWN_UNVERIFIED']){
+  const attempt=f.manager.snapshot().attempts.at(-1);
+  assert.equal(attempt.messageIdRef,a1.id);rejected.push(attempt);
+  if(reasonCode==='COOLDOWN_UNVERIFIED'){
+   assert.ok(f.prepared(a,attempt).permitId);
+   f.result(a,attempt,'not_sent',{executionBlocked:true,reasonCode,deliveryEvidence:{phase:'commit',stage:'stable',enterAttempted:false}});
+  }else{
+   const cmd=f.manager.commands(a.instanceId).find(c=>c.type==='PREPARE'&&c.payload.attemptId===attempt.id);
+   f.manager.bridge({type:'ACK',sessionId:a.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:reasonCode},a.instanceId);
+   tick(5000);
+  }
+ }
+ assert.equal(f.manager.snapshot().groups[0].cursor,1);
+ tick(19999);assert.equal(f.manager.snapshot().attempts.length,3);
+ tick(1);
+ for(const [peer,message] of [[b,b1],[a,a1],[b,b2],[a,a2]]){
+  const next=f.manager.snapshot().attempts.at(-1);
+  assert.equal(next.accountId,peer.channel.accountId);
+  assert.equal(next.messageIdRef,message.id);
+  for(const previous of rejected){
+   assert.equal(f.manager.bridge({type:'AUTHORIZE_ENTER',sessionId:a.sessionId,attemptId:previous.id,runId:previous.runId,configVersion:previous.configVersion,retryCount:0},a.instanceId).allowed,false);
+   f.result(a,previous,'not_sent',{executionBlocked:true});
+  }
+  assert.equal(f.manager.snapshot().groups[0].activeAttemptId,next.id);
+  f.prepared(peer,next);f.result(peer,next);tick(20000);
+ }
+});
+
+test('중앙 타임아웃만 반복되면 로컬 종료 근거 없이 계정 차례를 넘기지 않는다', t=>{
+ const f=fixture();t.after(()=>f.manager.close());
+ const a=f.connect('A'),b=f.connect('B');
+ f.apply(a,[f.message('A1')]);f.apply(b,[f.message('B1')]);f.start(f.group([a,b],20000));
+ for(let n=0;n<24;n++){
+  f.advance(5000);
+  for(const c of [a,b])f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);
+  f.manager.tick();
+ }
+ const state=f.manager.snapshot();
+ assert.ok(state.attempts.filter(a=>a.reasonCode==='PREPARE_TIMEOUT').length>=3);
+ assert.equal(state.groups[0].cursor,0);
+ assert.ok(state.attempts.every(a=>a.accountId==='A'));
+});
+
+test('구버전 준비 거절만으로는 계정 차례를 넘기지 않고 차단 확인을 받은 뒤 진행한다', t=>{
+ const f=fixture();t.after(()=>f.manager.close());
+ const a=f.connect('A'),b=f.connect('B');
+ f.apply(a,[f.message('A1')]);f.apply(b,[f.message('B1')]);f.start(f.group([a,b],20000));
+ for(let n=0;n<4;n++){
+  const attempt=f.manager.snapshot().attempts.at(-1);
+  assert.equal(attempt.accountId,'A');
+  const cmd=f.manager.commands(a.instanceId).find(c=>c.type==='PREPARE'&&c.payload.attemptId===attempt.id);
+  f.manager.bridge({type:'ACK',sessionId:a.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:'PREPARE_EDITOR_UNSTABLE',...(n===3?{executionBlocked:true}:{})},a.instanceId);
+  assert.equal(f.manager.snapshot().groups[0].cursor,n===3?1:0);
+  if(n<3){
+   f.advance(5000);
+   for(const c of [a,b])f.manager.bridge({type:'HEARTBEAT',sessionId:c.sessionId},c.instanceId);
+   f.manager.tick();
+  }
+ }
 });
