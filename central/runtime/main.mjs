@@ -53,13 +53,15 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     const selectedPort=await selectRuntimePort({directory,port});
     const packageInfo=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')),appVersion=packageInfo.version;
     manager=createCentralManager({databasePath:resolve(directory,'central.sqlite')});
+    const {createBrowserPreparation}=await import('../host/browser-profiles.mjs');
+    const browserPreparation=createBrowserPreparation({manager});
     supportCollector=createSupportCollector({databasePath:resolve(directory,'central.sqlite'),appVersion});
     const collectSupportReport=options=>supportCollector.collect(options);
     // Diagnostics must never take down the primary delivery service.
     try{const connection=await readJSON(fileURLToPath(new URL('../support-connection.json',import.meta.url)))??await readJSON(fileURLToPath(new URL('../support-email-connection.json',import.meta.url)));supportDelivery=createSupportDelivery({dir:resolve(directory,'support'),connection,createReport:collectSupportReport});supportDelivery.start();}catch{supportDelivery=undefined;}
     const dispatcher=createNotificationDispatcher({load:()=>readJSON(resolve(directory,'notification-state.json')),save:v=>atomicJSON(resolve(directory,'notification-state.json'),v)});
     const closeRuntime=async({forUpdate=false}={})=>{
-      if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();const notificationDrain=notificationRefresh?.close();let shutdownError;
+      if(closing)return;closing=true;browserPreparation.close();clearInterval(timer);unsubscribe?.();const notificationDrain=notificationRefresh?.close();let shutdownError;
       if(!forUpdate)try{manager.execute('service.stopAll',{});}catch(error){shutdownError=error;}
       // 먼저 새 발송을 차단하고, 기존 알림 쓰기를 정리한 뒤 프로세스 잠금을 해제합니다.
       await updateNotifier?.close();
@@ -93,7 +95,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     await new Promise((accept,reject)=>{server.once('error',error=>reject(error.code==='EADDRINUSE'?Object.assign(Error(`중앙 관리 주소의 ${selectedPort} 포트를 다른 프로그램이 사용하고 있습니다. 해당 프로그램을 종료한 뒤 다시 실행하세요. 주소를 임의로 변경하지 않았습니다.`),{code:'PORT_IN_USE'}):error));server.listen(selectedPort,'127.0.0.1',accept);});
     const url=`http://127.0.0.1:${server.address().port}`,sessionStore=await createSessionStore({directory,origin:url});
     lanAccess=await createLanAccess({directory,defaultPort:server.address().port<65535?server.address().port+1:43128,createApplication:options=>createCentralApplication({manager,uiDirectory,notificationDispatcher:dispatcher,updates,appVersion,supportDelivery,collectSupportReport,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()}),...options})});
-    app=createCentralApplication({manager,origin:url,bridgeToken,lanAccess,supportDelivery,collectSupportReport,uiDirectory,notificationDispatcher:dispatcher,updates,appVersion,initialSessions:sessionStore.sessions,saveSessions:sessionStore.save,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
+    app=createCentralApplication({manager,browserPreparation,origin:url,bridgeToken,lanAccess,supportDelivery,collectSupportReport,uiDirectory,notificationDispatcher:dispatcher,updates,appVersion,initialSessions:sessionStore.sessions,saveSessions:sessionStore.save,setupStatus:()=>inspectInstallation({directory,uiDirectory,snapshot:manager.snapshot()})});
     const descriptor={protocolVersion:1,url,pid:process.pid,bridgeToken};
     await atomicJSON(resolve(directory,'runtime.json'),descriptor);updates.setRuntimeDescriptor(descriptor);
     await unlink(resolve(directory,'shutdown.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
@@ -103,7 +105,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     updateNotifier=createUpdateNotifier({check:()=>updates.latest(appVersion),snapshot:()=>manager.snapshot(),dispatch:(snapshot,latest)=>dispatcher.update(snapshot,latest)});
     const report=()=>notificationRefresh.request();
     unsubscribe=manager.subscribe(event=>{report();if(event.type==='incident.opened'&&supportDelivery)void supportDelivery.queue({automatic:true,incidentId:event.incidentId,attemptId:event.attemptId}).catch(()=>{});if(event.type==='settings.reset')void lanAccess.reset().catch(()=>{});});
-    timer=setInterval(()=>{void updates.monitor();void updateNotifier.tick();try{manager.tick();report();}catch{report();}},1000);timer.unref();
+    timer=setInterval(()=>{void updates.monitor();void updateNotifier.tick();try{manager.tick();void browserPreparation.tick().catch(()=>{});report();}catch{report();}},1000);timer.unref();
     return {url,manager,app,updates,lanAccess,supportDelivery,close:closeRuntime};
   } catch(error) {clearInterval(timer);unsubscribe?.();await updateNotifier?.close();await notificationRefresh?.close();await supportCollector?.close();await supportDelivery?.close().catch(()=>{});await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
 }

@@ -483,7 +483,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     // 재개 의도를 저장하고, 사용자 pause/stop은 대기 중·적용 완료 여부와 관계없이 취소합니다.
     if(systemReason){
       g.autoResume={reasonCode:systemReason,requestedAt:now(),requestedMono:monotonicNow(),retryCount:0,retryAfterMono:monotonicNow()+3000};
-    }else {delete g.autoResume;delete g.reconcileResumeRunId;}
+    }else {delete g.pendingStart;delete g.autoResume;delete g.reconcileResumeRunId;}
     g.controlRecoveryCount=0;g.controlRecoveryAfter=0;
     g.controlIntent=intent;g.controlGeneration=(g.controlGeneration||0)+1;g.status=intent==='stop'?'stop_pending':'pause_pending';g.nextEligibleAt=null;
     const active=state.attempts.find(a=>a.id===g.activeAttemptId&&activeAttempt(a));
@@ -641,6 +641,23 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       if(age===null)delete c.lastConfirmedMono;else c.lastConfirmedMono=mono-age;
     }
   }
+  // 실행 요청은 연결 준비와 분리해 보존합니다. 실제 start가 검증·잠금·runId를 맡습니다.
+  function requestStart(g){
+    const members=g.members.map(m=>get('channels',m));
+    if(!members.every(c=>get('instances',c.instanceId).launchProfileId))return start(g);
+    if(g.status==='running')return g;
+    ensure(g.enabled!==false,'GROUP_DISABLED','비활성 그룹입니다.',409);
+    ensure(!g.activeAttemptId&&!state.attempts.some(a=>a.groupId===g.id&&activeAttempt(a)),'ATTEMPT_UNRESOLVED','이전 발송 결과를 대조 중입니다.',409);
+    ensure(!g.controlIntent,'CONTROL_PENDING','중지 적용을 기다리고 있습니다.',409);
+    ensure(members.every(c=>c.playlist.length),'PLAYLIST_EMPTY','메시지를 먼저 적용하세요.',409);
+    try{members.forEach(eligibleChannel);}catch(error){
+      if(!['CONNECTION_LOST','ACCOUNT_UNVERIFIED','CONFIG_PENDING'].includes(error.code))throw error;
+      ensure(members.every(c=>get('instances',c.instanceId).connected||get('instances',c.instanceId).launchProfileId),'CONNECTION_LOST','브라우저 자동 실행 프로필을 지정하세요.',409);
+      g.pendingStart={requestedAt:now()};g.waitReason='connection_preparing';
+      event('group.connection_preparing',{groupId:g.id});return g;
+    }
+    return start(g);
+  }
   function start(g){
     ensure(g.enabled!==false,'GROUP_DISABLED','비활성 그룹을 먼저 활성화하세요.',409);
     ensure(!g.activeAttemptId,'ATTEMPT_UNRESOLVED','Resolve the current attempt before resuming.',409);
@@ -651,7 +668,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       restoreConfirmedDeadlines();
     }
     ensure(state.service.status==='ready','SERVICE_STOPPED','Resume the central service before starting a group.',409);
-    delete g.autoResume;delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
+    delete g.pendingStart;delete g.autoResume;delete g.prepareRetryCount;delete g.prepareRetryAfterMono;delete g.draftInspectionFailures;g.runId=id();g.status='running';g.waitReason=null;event('group.started',{groupId:g.id});return g;
   }
   /**
    * 화면에서 요청한 설정·실행·중지 등 업무 명령의 입구입니다.
@@ -664,7 +681,20 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'message.duplicate':{const original=get('messages',p.id),at=now(),r={id:id(),version:1,body:original.body,at};const m={...clone(original),id:id(),name:text(p.name||`${original.name.slice(0,190)} 복사`,'name'),version:1,archived:false,revisionId:r.id,revisions:[r],createdAt:at,updatedAt:at};state.messages.push(m);event('message.created',{messageId:m.id});return m;}
       case 'message.archive':{const m=get('messages',p.id);expected(m,p);m.archived=p.archived!==false;m.version++;event('message.archived',{messageId:m.id});return m;}
       case 'message.delete':{const m=get('messages',p.id);expected(m,p);ensure(!state.channels.some(c=>[...c.playlist,...(c.pendingPlaylist||[])].some(i=>i.messageId===m.id))&&!state.attempts.some(a=>a.messageIdRef===m.id&&activeAttempt(a)),'MESSAGE_IN_USE','This message is referenced. Archive it or remove its channel assignments.',409);state.messages=state.messages.filter(x=>x.id!==m.id);event('message.deleted',{messageId:m.id});return {id:m.id,deleted:true};}
+      case 'instance.setLaunchProfile':{
+        const i=get('instances',p.id);expected(i,p);
+        ensure(!state.groups.some(g=>(g.status==='running'||g.pendingStart||g.autoResume||g.controlIntent||g.activeAttemptId)&&g.members.some(m=>get('channels',m).instanceId===i.id)),'GROUP_RUNNING','그룹 중지 후 프로필을 변경하세요.',409);
+        ensure(p.profileId===null||typeof p.profileId==='string'&&/^(Chrome|Brave):(Default|Profile \d+)$/.test(p.profileId)&&p.profileId.startsWith(i.browser+':'),'VALIDATION','같은 브라우저의 프로필을 선택하세요.');
+        ensure(!p.profileId||!state.instances.some(x=>x.id!==i.id&&x.launchProfileId===p.profileId),'VALIDATION','이미 다른 연결에 배정된 프로필입니다.');
+        i.launchProfileId=p.profileId;i.version++;event('instance.launch_profile_updated',{instanceId:i.id});return publicInstance(i);
+      }
       case 'instance.update':{const i=get('instances',p.id);expected(i,p);i.name=text(p.name,'name');i.nameCustomized=true;i.version++;event('instance.updated',{instanceId:i.id});return publicInstance(i);}
+      case 'account.assignBrowser':{
+        const a=get('accounts',p.id);expected(a,p);const destination=get('instances',p.instanceId);
+        const bindings=state.channels.filter(c=>c.accountId===a.accountId),ids=new Set(bindings.map(c=>c.id));
+        ensure(!state.groups.some(g=>g.members.some(id=>ids.has(id))&&(g.status==='running'||g.pendingStart||g.autoResume||g.controlIntent||g.activeAttemptId))&&!state.attempts.some(x=>x.accountId===a.accountId&&activeAttempt(x)),'GROUP_RUNNING','관련 그룹 중지와 발송 결과 정리 후 브라우저를 변경하세요.',409);
+        transferAccount(destination,a.accountId);return publicAccount(state.accounts.find(x=>x.accountId===a.accountId));
+      }
       case 'account.update':{const a=get('accounts',p.id);expected(a,p);a.name=text(p.name,'name');a.nameCustomized=true;a.version++;a.updatedAt=now();event('account.updated',{accountEntityId:a.id,instanceId:a.instanceId});return publicAccount(a);}
       case 'instance.delete':case 'account.delete':case 'target.delete':case 'channel.delete':{const kind=action.split('.')[0],entity=get({instance:'instances',account:'accounts',target:'targets',channel:'channels'}[kind],p.id);expected(entity,p);return removeConfiguration(kind,entity);}
       case 'target.update':{const target=get('targets',p.id);expected(target,p);applyChannelName(target,{name:text(p.name,'name')});event('target.updated',{targetId:target.id});return target;}
@@ -725,11 +755,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId:m.revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&activeAttempt(a));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
         if(active){c.pendingPlaylist=items;delete c.pendingPlaylistPreserveIndex;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
       case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??20000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
-      case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}
+      case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.pendingStart&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}
       // 활성 설정은 실행 선택과 별도로 저장하며, 해제 시 기존 중지 경로를 사용합니다.
-      case 'group.setEnabled':{const g=get('groups',p.id);expected(g,p);ensure(typeof p.enabled==='boolean','VALIDATION','활성 여부가 필요합니다.');g.enabled=p.enabled;g.version++;if(!p.enabled){delete g.autoResume;if(g.status!=='stopped'||g.activeAttemptId||g.controlIntent)control(g,'stop');}event('group.enabled_changed',{groupId:g.id,enabled:g.enabled});return g;}
+      case 'group.setEnabled':{const g=get('groups',p.id);expected(g,p);ensure(typeof p.enabled==='boolean','VALIDATION','활성 여부가 필요합니다.');g.enabled=p.enabled;g.version++;if(!p.enabled){delete g.pendingStart;delete g.autoResume;if(g.status!=='stopped'||g.activeAttemptId||g.controlIntent)control(g,'stop');}event('group.enabled_changed',{groupId:g.id,enabled:g.enabled});return g;}
       case 'group.delete':{const g=get('groups',p.id);expected(g,p);ensure(g.status==='stopped'&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop this group before deleting it.',409);for(const attempt of state.attempts.filter(a=>a.groupId===g.id))attempt.groupName??=g.name;release(g);state.groups=state.groups.filter(x=>x.id!==g.id);event('group.deleted',{groupId:g.id});return{id:g.id,deleted:true};}
-      case 'group.start':case 'group.resume':return start(get('groups',p.id));
+      case 'group.start':case 'group.resume':return requestStart(get('groups',p.id));
       case 'group.pause':case 'group.stop':{const g=get('groups',p.id);control(g,action.endsWith('stop')?'stop':'pause');return g;}
       case 'service.startAll':{
         ensure(state.groups.length>0,'NO_GROUPS','먼저 발송 그룹을 만들어 주세요.',409);
@@ -751,7 +781,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             event('group.start_queued_for_recovery',{groupId:g.id,attemptId:active.id});
             continue;
           }
-          start(g);started++;
+          requestStart(g);if(g.pendingStart)queuedForRecovery++;else started++;
         }
         const result={started,alreadyRunning:targets.length-candidates.length,...(queuedForRecovery?{queuedForRecovery}:{})};
         event('service.started_all',result);
@@ -769,7 +799,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         state.settings=initial(now()).settings;state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;
         event('settings.reset',{...removed,resetEpoch:state.resetEpoch},'warning');return{reset:true,removed,historyPreserved:true};
       }
-      case 'service.stopAll':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId))control(g,'stop');event('service.stopped');return state.service;
+      case 'service.stopAll':state.service.status='ready';state.service.reasonCode=null;for(const g of state.groups.filter(g=>g.status!=='stopped'||g.activeAttemptId||g.pendingStart))control(g,'stop');event('service.stopped');return state.service;
       case 'service.resume':state.service.status='ready';state.service.reasonCode=null;delete state.service.clockDiagnostic;restoreConfirmedDeadlines();lastWall=now();lastMono=monotonicNow();event('service.resumed');return state.service;
       case 'attempt.skipUnknown':{
         ensure(p.confirmation==='SKIP_UNCONFIRMED_TURN','CONFIRMATION_REQUIRED','미확인 차례를 건너뛰는 선택을 확인해 주세요.',409);
@@ -1369,6 +1399,16 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     if(monoDelta>15000||monoDelta<0||Math.abs(wallDelta-monoDelta)>2000)suspendForClockGap();
     lastWall=wall;lastMono=mono;
     preserveAppliedUserStops();
+    for(const g of state.groups.filter(g=>g.pendingStart)){
+      if(g.enabled===false||g.controlIntent){delete g.pendingStart;continue;}
+      if(g.activeAttemptId||state.attempts.some(a=>a.groupId===g.id&&activeAttempt(a)))continue;
+      try{
+        g.members.map(m=>get('channels',m)).forEach(eligibleChannel);
+        if(state.locks.some(l=>resourceKeys(g).includes(l.key)&&l.groupId!==g.id))continue;
+        start(g);
+      }catch{/* 검증되지 않은 계정·채널에는 허가를 내리지 않고 기존 실행 요청을 유지합니다. */}
+    }
+
     for(const g of state.groups.filter(g=>g.controlIntent)){recoverControl(g);controlComplete(g);}
     for(const i of state.instances.filter(i=>i.connected&&mono-(i.lastSeenMono??mono)>15000)){
       blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;

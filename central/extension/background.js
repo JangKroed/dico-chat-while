@@ -237,7 +237,7 @@ async function openManagedChannelNow(p) {
   if(existing) {
     assertIdle(existing.tabId);
     const seen=await observe(existing.tabId);ensureCurrent();
-    if(matches(seen)){await observation();ensureCurrent();return {alreadyConnected:true,tabId:existing.tabId};}
+    if(matches(seen)){await chrome.storage.local.set({dicoCentralAccount:{accountId:p.accountId,sourceTabId:existing.tabId,resetEpoch}});ensureCurrent();await observation();ensureCurrent();return {alreadyConnected:true,tabId:existing.tabId};}
     if(Object.values(executor.state.attempts).some(a=>a.tabId===existing.tabId&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('기존 전송용 창의 발송 결과를 먼저 확인하세요.'),{code:'ATTEMPT_UNRESOLVED'});
     // 살아 있는 다른 페이지를 이동하거나 닫지 않습니다. 정확한 목적지에
     // 머문 탭이 일시적으로 미검증인 경우는 새 탭을 만들지 않고 재관찰합니다.
@@ -266,7 +266,9 @@ async function openManagedChannelNow(p) {
     // 연결 정보와 창 소유권은 다릅니다. 사용자가 열었던 탭은 재시작 복구나
     // 채널 삭제 시 자동으로 이동·최소화·닫지 않도록 출처를 함께 보존합니다.
     records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:live.id,windowId:live.windowId,ownership:'adopted'});
-    await chrome.storage.local.set({dicoCentralTabs:records});ensureCurrent();
+    // 중앙에서 계정을 다른 브라우저에 배정한 경우에도 실제 로그인 검증 뒤에만
+    // 로컬 계정 기준을 갱신합니다. 세션 재연결 때 과거 계정을 복구하지 않게 합니다.
+    await chrome.storage.local.set({dicoCentralTabs:records,dicoCentralAccount:{accountId:p.accountId,resetEpoch}});ensureCurrent();
     await observation();ensureCurrent();return{connected:true,reused:true,tabId:live.id};
   }
   ensureCurrent();
@@ -277,7 +279,9 @@ async function openManagedChannelNow(p) {
   try{ensureCurrent();}catch(error){try{if(win.tabs?.[0]?.id)await chrome.tabs.remove(win.tabs[0].id);}catch{}throw error;}
   const tab=win.tabs?.[0];if(!tab)throw Error('전송용 창을 열지 못했습니다.');
   ensureCurrent();
-  records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id,...(win.ownership?{ownership:win.ownership}:{})});await chrome.storage.local.set({dicoCentralTabs:records});
+  records.push({resetEpoch,accountId:p.accountId,guildId:p.guildId,channelId:p.channelId,tabId:tab.id,windowId:win.id,...(win.ownership?{ownership:win.ownership}:{})});// 중앙에서 계정을 다른 브라우저에 배정한 경우에도 실제 로그인 검증 뒤에만
+    // 로컬 계정 기준을 갱신합니다. 세션 재연결 때 과거 계정을 복구하지 않게 합니다.
+    await chrome.storage.local.set({dicoCentralTabs:records,dicoCentralAccount:{accountId:p.accountId,resetEpoch}});
   for(let n=0;n<20;n++) {
     ensureCurrent();
     const ready=await observe(tab.id);

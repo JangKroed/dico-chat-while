@@ -52,3 +52,8 @@ test('stale stopped or pending snapshots still allow an explicit stop against cu
   const {s,group}=fixture();
   for(const status of ['stopped','stop_pending']){group.status=status;assert.equal(groupControls(s,group,{stale:true}).stop.disabled,false);assert.equal(groupControls(s,group,{stale:true,busy:true}).stop.disabled,false);}
 });
+test('자동 프로필이 지정되면 오프라인 시작을 예약하고 준비 중 중지할 수 있다',()=>{
+ const {s,group}=fixture();s.instances[0].launchProfileId='Chrome:Default';s.instances[0].connected=false;s.channels[0].verified=false;
+ assert.equal(groupControls(s,group).start.disabled,false);
+ group.pendingStart={requestedAt:s.serverNow};const controls=groupControls(s,group);assert.equal(controls.start.disabled,true);assert.equal(controls.stop.disabled,false);assert.equal(controls.start.label,'연결 준비 중');
+});

@@ -287,3 +287,6 @@ test('공식 버전 확인은 숫자로 비교하며 조회 실패를 최신으�
  assert.equal((await checkLatestUpdate('0.4.10',{readVersion:read('invalid')})).state,'unavailable');
  assert.equal((await checkLatestUpdate('0.4.10',{readVersion:async()=>{throw Error('offline')}})).state,'unavailable');
 });
+test('브라우저 연결 준비 중인 실행 요청이 있으면 업데이트 교체를 허용하지 않는다',()=>{
+ assert.equal(safeToUpdate({groups:[{status:'stopped',pendingStart:{requestedAt:1}}],attempts:[],commands:[]}),false);
+});

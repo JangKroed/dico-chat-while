@@ -19,7 +19,7 @@ async function body(req,maxBytes=1024*1024) {
   try {const value=JSON.parse(text);if (!value || typeof value!=='object' || Array.isArray(value))throw Error();return value;}
   catch {throw fail(400,'JSON 요청을 확인하세요.');}
 }
-export function createCentralApplication({manager,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,supportDelivery,collectSupportReport,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
+export function createCentralApplication({manager,browserPreparation,origin='http://127.0.0.1:43127',bridgeToken,uiDirectory,notificationDispatcher,setupStatus,updates,appVersion,supportDelivery,collectSupportReport,initialSessions=[],saveSessions=async()=>{},now=Date.now,mode='local',pairingCodes,lanAccess}) {
   if(!['local','lan'].includes(mode))throw Error('Invalid access mode');
   if (mode==='local'&&(typeof bridgeToken!=='string' || bridgeToken.length<32))throw Error('Private bridge credential required');
   if(mode==='lan'&&typeof pairingCodes?.consume!=='function')throw Error('LAN pairing provider required');
@@ -153,6 +153,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           if(!updates)throw fail(503,'업데이트 기능이 준비되지 않았습니다.');
           return json(res,200,await updates.status());
         }
+        if(path==='/api/browser-profiles'&&req.method==='GET'){
+          if(mode!=='local'||!browserPreparation)throw fail(404,'중앙 PC에서 브라우저 프로필을 설정하세요.');
+          return json(res,200,{profiles:await browserPreparation.list(),preparation:browserPreparation.status()});
+        }
         if (path==='/api/snapshot' && req.method==='GET')return json(res,200,manager.snapshot());
         if (path==='/api/support/report' && req.method==='GET'){
           const boolean=key=>{const value=url.searchParams.get(key);if(value!==null&&!['true','false','1','0'].includes(value))throw fail(400,'보고서 포함 옵션을 확인하세요.');return value===null||value==='true'||value==='1';};
@@ -212,6 +216,10 @@ export function createCentralApplication({manager,origin='http://127.0.0.1:43127
           if(path==='/api/remote-access-link')return json(res,200,{url:`${origin}/#bootstrap=${issueBootstrap(120000)}`,expiresAt:now()+120000});
           if (path==='/api/command') {
             if (typeof payload.action!=='string')throw fail(400,'명령을 확인하세요.');
+            if(payload.action==='instance.setLaunchProfile'){
+              if(mode!=='local'||!browserPreparation)throw fail(403,'중앙 PC에서만 프로필을 지정할 수 있습니다.');
+              if(payload.payload?.profileId!==null&&!(await browserPreparation.list()).some(p=>p.id===payload.payload?.profileId))throw fail(400,'설치된 프로필을 선택하세요.');
+            }
             const result=manager.execute(payload.action,payload.payload || {});
             return json(res,200,{ok:true,result,snapshot:manager.snapshot()});
           }

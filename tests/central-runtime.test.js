@@ -152,3 +152,12 @@ test('최신 업데이트 확인은 인증된 로컬 설정 화면에서 실행 
  assert.equal(JSON.parse(response.body).state,'current');
  assert.deepEqual(calls,['0.4.51']);
 });
+test('자동 실행 프로필 조회는 로그인 필요하고 발견하지 않은 경로는 저장하지 않는다',async t=>{
+ const app=createCentralApplication({manager:manager(),origin,bridgeToken,browserPreparation:{list:async()=>[{id:'Chrome:Default',browser:'Chrome'}],status:()=>[]}});t.after(()=>app.close());
+ assert.equal((await request(app,'/api/browser-profiles')).status,401);
+ const login=await request(app,'/api/session',{method:'POST',body:{token:app.issueBootstrap()},headers:{origin}}),session=JSON.parse(login.body);
+ const headers={origin,cookie:login.headers['set-cookie'].split(';')[0],'x-dico-csrf':session.csrfToken};
+ assert.equal((await request(app,'/api/browser-profiles',{headers})).status,200);
+ assert.equal((await request(app,'/api/command',{method:'POST',headers,body:{action:'instance.setLaunchProfile',payload:{id:'i',profileId:'/arbitrary/command'}}})).status,400);
+ assert.equal((await request(app,'/api/command',{method:'POST',headers,body:{action:'instance.setLaunchProfile',payload:{id:'i',profileId:'Chrome:Default'}}})).status,200);
+});

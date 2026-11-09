@@ -219,7 +219,7 @@ export function supportedUpdateNode(version){const [major,minor,patch]=String(ve
  * 그룹 중지와 실제 입력 차단을 함께 확인합니다. 과거 결과가 unknown이어도
  * 현재 실행 차단이 입증되면 이력을 그대로 보존하며 교체할 수 있습니다.
  */
-export function safeToUpdate(snapshot){return safeToReloadExtension(snapshot)&&snapshot.groups.every(g=>['stopped','paused'].includes(g.status));}
+export function safeToUpdate(snapshot){return safeToReloadExtension(snapshot)&&snapshot.groups.every(g=>!g.pendingStart&&['stopped','paused'].includes(g.status));}
 /**
  * 확장 코드 교체는 관리 프로그램 전체 교체와 구분한다. 이미 입력 차단이 확인된
  * 미확인 결과는 기록·그룹 잠금을 그대로 보존한 채 확장만 교체할 수 있다.

@@ -8,6 +8,7 @@ export function recentConfirmed(s:Snapshot){return s.attempts.filter(a=>a.status
 export function operationSummary(s:Snapshot,stale=false):{kind:string;title:string;description:string}{
  if(stale)return {kind:'stale',title:'최신 상태를 기다리고 있습니다',description:'마지막으로 받은 상태를 표시합니다. 현재 실행·중지 완료 여부는 아직 확인할 수 없습니다.'}
  if(s.groups.some(g=>!g.autoResume&&['stop_pending','pause_pending'].includes(g.status)))return {kind:'pending',title:'중단 요청의 적용을 기다리고 있습니다',description:'브라우저 확인 전에는 중지 완료로 표시하지 않습니다. 이전 발송의 결과는 별도로 보존됩니다.'}
+ if(s.groups.some(g=>g.pendingStart))return {kind:'recovering',title:'브라우저 연결을 자동 준비하고 있습니다',description:'저장한 프로필을 열고 계정·채널·설정 응답을 확인한 뒤 시작합니다. 중지를 누르면 실행 예약을 취소합니다.'}
  const reserved=s.groups.filter(g=>g.autoResume?.reasonCode==='delivery_recovery_requested'||g.autoResume&&s.attempts.some(a=>a.id===g.activeAttemptId&&a.status==='unknown'))
  const waitingForResult=reserved.filter(g=>g.activeAttemptId).length
  if(waitingForResult)return {kind:'recovering',title:'실행을 예약했습니다',description:`${waitingForResult}개 그룹이 이전 실행 차단을 확인하고 있습니다. 차단이 확인되면 연결과 설정을 점검한 뒤 자동으로 다음 차례를 시작합니다.`}

@@ -58,3 +58,4 @@ test('모두 실행 예약은 대조 명령 사이와 화면 재접속 후에도
  delete s.groups[0].autoResume;
  assert.equal(operationSummary(s).kind,'blocked');
 });
+test('연결 준비 예약을 중지 완료로 표시하지 않는다',()=>{const s=snapshot();s.groups=[{id:'g',status:'stopped',pendingStart:{requestedAt:1}}];assert.equal(operationSummary(s).kind,'recovering');assert.match(operationSummary(s).title,/연결/);});
