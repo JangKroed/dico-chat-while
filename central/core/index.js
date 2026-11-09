@@ -1094,7 +1094,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           // 그 외 거절은 실행기가 입력 차단을 명시한 경우에만 차례를 넘길 근거가 됩니다.
           const preparationBlocked=message.executionBlocked===true||rejectionCode==='DRAFT_INSPECTION_UNAVAILABLE';
           if(!(c.type==='PREPARE'&&attempt&&failPreparation(attempt,rejectionCode||'PREPARE_REJECTED',preparationBlocked))){
-            incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
+            const group=attempt&&state.groups.find(g=>g.id===attempt.groupId);
+            // 중지 요청으로 허가 실행을 막은 것은 정상 제어입니다. 실제 게시 결과는
+            // 계속 미확인으로 보존하되 명령 실패 사건을 중복 생성하지 않습니다.
+            const expectedStop=c.type==='COMMIT_PERMIT'&&rejectionCode==='EXECUTION_STOPPED'&&group?.runId===attempt?.runId&&(Boolean(group?.controlIntent)||['stopped','paused'].includes(group?.status));
+            if(!expectedStop)incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
             if(attempt&&activeAttempt(attempt))markUnknown(attempt,rejectionCode||'command_rejected');
           }
         }
@@ -1152,7 +1156,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             // 제출 세션을 바꾸지 않고 현재 조회 명령에 묶인 원본 영수증만 복구합니다.
             const originalSession=typeof a.sessionId==='string'&&a.sessionId.length>0&&message.receiptOriginSessionId===a.sessionId&&recovery?.payload.originSessionId===a.sessionId;
             const sessionMatches=a.sessionId===i.sessionId||a.status==='unknown'&&a.executionBlocked===true&&recovery&&originalSession;
-            ensure((a.status==='permitted'||a.status==='unknown'&&a.executionBlocked===true&&recovery)&&sessionMatches&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
+            // 중지 ACK와 이미 저장한 완료 보고는 서로 다른 통신 대기열에서 도착합니다.
+            // 같은 제출 세션의 중지 경합만 허용하고 재연결 복구는 조회 명령을 요구합니다.
+            const stoppedReceipt=a.status==='unknown'&&a.reasonCode==='EXECUTION_STOPPED'&&a.executionBlocked===true&&a.sessionId===i.sessionId&&Boolean(a.permitId||a.permitIssued);
+            ensure((a.status==='permitted'||stoppedReceipt||a.status==='unknown'&&a.executionBlocked===true&&recovery)&&sessionMatches&&composerClearedEvidence(message.deliveryEvidence),'EVIDENCE_REQUIRED','A fresh submitted draft must clear in the same verified editor.');
           }else{
             ensure(typeof message.messageId==='string'&&message.messageId.trim(),'EVIDENCE_REQUIRED','A confirmed post requires an observed message ID.');
             const window=a.status==='unknown'&&state.commands.find(c=>c.type==='RECONCILE'&&c.instanceId===i.id&&c.sessionId===i.sessionId&&c.payload.attemptId===a.id&&['queued','received'].includes(c.status))?.payload.recoveryWindow;

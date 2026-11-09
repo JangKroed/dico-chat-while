@@ -13,11 +13,11 @@ test('disconnect closes only the exact managed channel tab in a shared window',a
  assert.deepEqual(r.removed,[7]);assert.equal(r.tabs.has(8),true);assert.deepEqual(r.saved.dicoCentralTabs.map(record=>record.tabId),[8]);
  await r.manage({...target,action:'close'});assert.deepEqual(r.removed,[7]);
 });
-test('a navigated tab is unregistered but left open and reported for manual inspection',async()=>{
+test('a navigated tab is detached successfully and repeat cleanup is idempotent',async()=>{
  const r=fixture();r.tabs.get(7).url='https://example.com';
- await assert.rejects(r.manage({...target,action:'close'}),{code:'TARGET_MISMATCH'});
+ assert.equal((await r.manage({...target,action:'close'})).detached,true);
  assert.deepEqual(r.removed,[]);assert.deepEqual(r.saved.dicoCentralTabs.map(record=>record.tabId),[8]);
- await assert.rejects(r.manage({...target,action:'close'}),{code:'TARGET_MISMATCH'});
+ assert.equal((await r.manage({...target,action:'close'})).detached,true);
 });
 test('tab removal failure remains retryable and retains the registered ownership record',async()=>{
  const r=fixture();r.chrome.tabs.remove=async()=>{throw Error('browser refused');};
@@ -53,9 +53,9 @@ test('multiple queued close commands follow pending channel opens and do not rej
  await Promise.all([executor.handleCommand(command('open','OPEN_CHANNEL',first)),executor.handleCommand(command('close-one','CLOSE_CHANNEL',first)),executor.handleCommand(command('close-two','CLOSE_CHANNEL',second))]);
  assert.deepEqual(r.removed,[7,8]);assert.deepEqual(executor.state.bindings,{});assert.equal(reports.filter(message=>message.status==='rejected').length,0);
 });
-test('another Discord channel is left open and reported instead of closing a navigated managed tab',async()=>{
+test('another Discord channel is preserved while the removed connection completes',async()=>{
  const r=fixture();r.tabs.get(7).url='https://discord.com/channels/111/999';
- await assert.rejects(r.manage({...target,action:'close'}),{code:'TARGET_MISMATCH'});assert.deepEqual(r.removed,[]);assert.equal(r.saved.dicoCentralTabs.some(record=>record.tabId===7),false);
+ assert.equal((await r.manage({...target,action:'close'})).detached,true);assert.deepEqual(r.removed,[]);assert.equal(r.saved.dicoCentralTabs.some(record=>record.tabId===7),false);
 });
 
 test('입력 차단을 확인한 미확인 시도만 기록을 유지하며 연결 해제할 수 있다',async()=>{
@@ -66,4 +66,18 @@ test('입력 차단을 확인한 미확인 시도만 기록을 유지하며 연�
   assert.equal(r.removed.length,blocked?1:0);assert.equal(executor.state.attempts.a.result.outcome,'unknown');
   assert.ok(reports.some(m=>m.type==='ACK'&&m.status===(blocked?'applied':'rejected')));
  }
+});
+
+ test('같은 URL이어도 소유 기록이 이미 사라진 탭은 닫지 않고 연결 해제를 완료한다',async()=>{
+ const r=fixture();r.saved.dicoCentralTabs=r.saved.dicoCentralTabs.filter(x=>x.tabId!==7);
+ const result=await r.manage({...target,action:'close'});
+ assert.equal(result.detached,true);assert.deepEqual(r.removed,[]);assert.equal(r.tabs.has(7),true);
+ });
+
+test('연결 해제 직전 중앙 종료 기록을 대조하여 오래된 로컬 준비 상태를 정리한다',async()=>{
+ const r=fixture(),reports=[];
+ const executor=createCentralExecutor({chrome:r.chrome,transport:{connected:true,request:async m=>{reports.push(m);return m.type==='HEARTBEAT'?{ok:true,terminalAttempts:[{attemptId:'a',status:'not_sent'}]}:{ok:true};}},manageChannelWindow:r.manage});await executor.load();
+ Object.assign(executor.state,{instanceId:'instance',sessionId:'session',bindings:{binding:{...target}},attempts:{a:{...target,attemptId:'a',phase:'preparing'}}});
+ await executor.handleCommand({id:'close-stale',type:'CLOSE_CHANNEL',instanceId:'instance',sessionId:'session',payload:target});
+ assert.deepEqual(r.removed,[7]);assert.equal(executor.state.attempts.a.phase,'not_sent');assert.ok(reports.some(m=>m.status==='applied'));
 });
