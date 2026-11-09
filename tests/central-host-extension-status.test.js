@@ -62,3 +62,144 @@ test('누적 trace 대기열보다 발송 승인·결과를 우선하되 세션�
  assert.deepEqual(sent.filter(s=>s.startsWith('DELIVERY_TRACE')),Array.from({length:15},(_,n)=>'DELIVERY_TRACE'+(n+1)));
  assert.equal(sent.at(-1),'DISCONNECT');
 });
+
+test('느린 파일 점검 중에도 현재 세션 heartbeat는 응답하고 발송 승인은 복구 완료를 기다린다',async()=>{
+ const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output),sent=[];
+ let release,started;const began=new Promise(resolve=>{started=resolve;});
+ const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+  if(path==='/api/bridge/status')return{reloadSafe:true};
+  sent.push(body.message.type);return body.message.type==='HELLO'?{instanceId:'i',sessionId:'s',resetEpoch:1}:{ok:true};
+ }},extensionStatus:async()=>{started();return new Promise(resolve=>{release=resolve;});}});
+ try{
+  input.write(encodePacket({requestId:'hello',message:{type:'HELLO',protocolVersion:1}}));await packets.next();
+  input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+  input.write(encodePacket({requestId:'authorize',message:{type:'AUTHORIZE_ENTER',attemptId:'a'}}));
+  input.write(encodePacket({requestId:'heartbeat',instanceId:'i',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.deepEqual(sent,['HELLO','HEARTBEAT']);
+  assert.equal((await packets.next()).value.requestId,'heartbeat');
+ }finally{
+  input.end();release({reloadSafe:true});await running;output.end();
+ }
+ assert.deepEqual(sent,['HELLO','HEARTBEAT','AUTHORIZE_ENTER','DISCONNECT']);
+});
+
+test('파일 점검 중 heartbeat 우회는 세션 교체·종료 경계를 넘지 않는다',async()=>{
+ for(const boundary of ['HELLO','DISCONNECT']){
+  const input=new PassThrough(),output=new PassThrough(),packets=readPackets(output),sent=[];
+  let release,started;const began=new Promise(resolve=>{started=resolve;});
+  const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+   if(path==='/api/bridge/status')return{reloadSafe:true};sent.push(body.message.type);return{instanceId:'i',sessionId:'s',resetEpoch:1};
+  }},extensionStatus:async()=>{started();return new Promise(resolve=>{release=resolve;});}});
+  input.write(encodePacket({requestId:'hello',message:{type:'HELLO',protocolVersion:1}}));await packets.next();
+  input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+  input.write(encodePacket({requestId:'boundary',message:{type:boundary,protocolVersion:1,sessionId:'s',resetEpoch:1}}));
+  input.end(encodePacket({requestId:'heartbeat',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));
+  await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(sent,['HELLO']);
+  release({reloadSafe:true});await running;output.end();
+  assert.deepEqual(sent.slice(0,3),['HELLO',boundary,'HEARTBEAT']);
+ }
+});
+
+test('파일 복구 중 큐 포화는 초과 요청만 거절하고 뒤의 heartbeat를 계속 읽는다',async()=>{
+ const input=new PassThrough(),output=new PassThrough(),responses=[],sent=[];
+ const collecting=(async()=>{for await(const packet of readPackets(output))responses.push(packet);})();
+ let release,started,healthSeen;const began=new Promise(r=>{started=r;}),healthy=new Promise(r=>{healthSeen=r;});
+ const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+  if(path==='/api/bridge/status')return{reloadSafe:true};sent.push(body.message.type);
+  if(body.message.type==='HEARTBEAT')healthSeen();
+  return{instanceId:'i',sessionId:'s',resetEpoch:1};
+ }},extensionStatus:async()=>{started();return new Promise(r=>{release=r;});}});
+ try{
+  input.write(encodePacket({requestId:'hello',message:{type:'HELLO'}}));
+  input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+  for(let n=0;n<300;n++)input.write(encodePacket({requestId:`trace${n}`,message:{type:'DELIVERY_TRACE'}}));
+  input.write(encodePacket({requestId:'health',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));
+  await Promise.race([healthy,new Promise((_,reject)=>{const timer=setTimeout(()=>reject(Error('heartbeat blocked by full queue')),1000);timer.unref();})]);
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(sent,['HELLO','HEARTBEAT']);
+  const rejected=responses.filter(packet=>!packet.ok);
+  assert.equal(rejected.length,44);assert.ok(rejected.every(packet=>packet.code==='SERVICE_UNAVAILABLE'&&packet.retryable===true));
+  assert.ok(responses.some(packet=>packet.requestId==='health'&&packet.ok));
+ }finally{input.end();release({reloadSafe:true});await running;output.end();await collecting;}
+ assert.equal(sent.filter(type=>type==='DELIVERY_TRACE').length,256);
+ assert.equal(sent.at(-1),'DISCONNECT');
+});
+
+test('포화 큐에서도 세션 경계 뒤의 heartbeat는 파일 복구를 기다린다',async()=>{
+ for(const boundary of ['HELLO','DISCONNECT']){
+  const input=new PassThrough(),output=new PassThrough(),sent=[];output.resume();
+  let release,started;const began=new Promise(r=>{started=r;});
+  const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+   if(path==='/api/bridge/status')return{reloadSafe:true};sent.push(body.message.type);return{instanceId:'i',sessionId:'s',resetEpoch:1};
+  }},extensionStatus:async()=>{started();return new Promise(r=>{release=r;});}});
+  try{
+   input.write(encodePacket({requestId:'hello',message:{type:'HELLO'}}));
+   input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+   for(let n=0;n<256;n++)input.write(encodePacket({requestId:`trace${n}`,message:{type:'DELIVERY_TRACE'}}));
+   input.write(encodePacket({requestId:'boundary',message:{type:boundary,sessionId:'s',resetEpoch:1}}));
+   input.write(encodePacket({requestId:'health',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));
+   await new Promise(r=>setImmediate(r));assert.deepEqual(sent,['HELLO']);
+  }finally{input.end();release({reloadSafe:true});await running;output.end();}
+  assert.equal(sent[257],boundary);assert.equal(sent[258],'HEARTBEAT');
+ }
+});
+
+test('포화 응답의 출력이 막히면 버퍼 증가를 멈추고 출력 재개 후 heartbeat를 처리한다',{timeout:3000},async()=>{
+ const input=new PassThrough(),output=new PassThrough({highWaterMark:1024}),sent=[],responses=[];
+ let release,started,healthSeen,blocked,collecting,writes=0;
+ const began=new Promise(r=>{started=r;}),healthy=new Promise(r=>{healthSeen=r;}),backpressured=new Promise(r=>{blocked=r;});
+ const write=output.write.bind(output);
+ output.write=(...args)=>{writes++;const accepted=write(...args);if(!accepted)blocked();return accepted;};
+ const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+  if(path==='/api/bridge/status')return{reloadSafe:true};sent.push(body.message.type);
+  if(body.message.type==='HEARTBEAT')healthSeen();
+  return{instanceId:'i',sessionId:'s',resetEpoch:1};
+ }},extensionStatus:async()=>{started();return new Promise(r=>{release=r;});}});
+ try{
+  input.write(encodePacket({requestId:'hello',message:{type:'HELLO'}}));
+  input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+  for(let n=0;n<10000;n++)input.write(encodePacket({requestId:`trace${n}`,message:{type:'DELIVERY_TRACE'}}));
+  input.end(encodePacket({requestId:'health',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));
+  await backpressured;
+  const stalledWrites=writes,stalledBytes=output.writableLength;
+  await new Promise(r=>setImmediate(r));
+  assert.equal(writes,stalledWrites);assert.equal(output.writableLength,stalledBytes);
+  assert.ok(stalledWrites<100,'stalled output must stop rejection production');
+  assert.ok(stalledBytes<2048,'output queue must remain near its high water mark');
+  assert.deepEqual(sent,['HELLO']);
+  collecting=(async()=>{for await(const packet of readPackets(output))responses.push(packet);})();
+  await healthy;await new Promise(r=>setImmediate(r));
+  assert.deepEqual(sent,['HELLO','HEARTBEAT']);
+  assert.ok(responses.some(packet=>packet.requestId==='health'&&packet.ok));
+ }finally{
+  if(!collecting)output.resume();input.end();release?.({reloadSafe:true});await running;output.end();await collecting;
+ }
+ assert.equal(responses.filter(packet=>!packet.ok).length,10000-256);
+ assert.equal(sent.filter(type=>type==='DELIVERY_TRACE').length,256);
+ assert.equal(sent.at(-1),'DISCONNECT');
+});
+
+test('복구 중 heartbeat는 하나씩 실행하고 종료는 진행 중인 heartbeat를 기다린다',async()=>{
+ const input=new PassThrough(),output=new PassThrough(),sent=[];output.resume();
+ let releaseStatus,releaseHealth,started,healthStarted,active=0,peak=0,draining=false;
+ const began=new Promise(r=>{started=r;}),healthBegan=new Promise(r=>{healthStarted=r;});
+ const running=runNativeHost({input,output,origin:`chrome-extension://${id}/`,ids:[id],pollMs:60000,service:{request:async(path,method,body)=>{
+  if(path==='/api/bridge/status')return{reloadSafe:true};sent.push(body.message.type);
+  if(body.message.type==='HEARTBEAT'){
+   peak=Math.max(peak,++active);healthStarted();if(!draining)await new Promise(r=>{releaseHealth=r;});active--;
+  }
+  return{instanceId:'i',sessionId:'s',resetEpoch:1};
+ }},extensionStatus:async()=>{started();return new Promise(r=>{releaseStatus=r;});}});
+ try{
+  input.write(encodePacket({requestId:'hello',message:{type:'HELLO'}}));
+  input.write(encodePacket({requestId:'status',message:{type:'EXTENSION_STATUS'}}));await began;
+  input.write(encodePacket({requestId:'health1',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));await healthBegan;
+  input.end(encodePacket({requestId:'health2',message:{type:'HEARTBEAT',sessionId:'s',resetEpoch:1}}));
+  await new Promise(r=>setImmediate(r));assert.deepEqual(sent,['HELLO','HEARTBEAT']);
+  releaseStatus({reloadSafe:true});await new Promise(r=>setImmediate(r));assert.deepEqual(sent,['HELLO','HEARTBEAT']);
+  releaseHealth();await new Promise(r=>setImmediate(r));assert.deepEqual(sent,['HELLO','HEARTBEAT','HEARTBEAT']);
+  assert.equal(peak,1);assert.equal(active,1);
+ }finally{draining=true;input.end();releaseStatus?.({reloadSafe:true});releaseHealth?.();await running;output.end();}
+ assert.equal(sent.at(-1),'DISCONNECT');
+});

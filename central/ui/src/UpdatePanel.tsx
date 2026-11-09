@@ -7,6 +7,24 @@ import { UPDATE_RECONNECT_KEY } from './reconnect'
 const phases:Record<UpdateStatus['phase'],string>={idle:'업데이트 대기',preparing:'새 버전 준비 중',ready:'새 버전 준비 완료',applying:'업데이트 적용 · 재시작 중',completed:'업데이트 완료',failed:'업데이트 실패'}
 const timestamp=(value?:string|number)=>value===undefined?'—':new Date(value).toLocaleString('ko-KR')
 
+// 최신 배포 확인과 실제 작업 상태를 한 카드에서 보여 주되 진행·실패를 우선합니다.
+export function UpdateStatusCard({result,latest,checkingLatest,submitting,requestMode,appVersion}:{result:UpdateStatus|null;latest:LatestUpdate|null;checkingLatest:boolean;submitting:boolean;requestMode:'update'|'rollback';appVersion?:string}){
+ const updating=updateInProgress(result?.phase),currentVersion=appVersion||latest?.currentVersion
+ const rollback=result?.mode==='rollback'
+ const operationLabel=result?(rollback?({idle:'이전 버전 복원 대기',preparing:'이전 버전 복원 준비 중',ready:'이전 버전 복원 준비 완료',applying:'이전 버전 적용 · 재시작 중',completed:'이전 버전 복원 완료',failed:'이전 버전 복원 실패'}[result.phase]):phases[result.phase]):'업데이트 상태 확인 중'
+ const label=result?.retrying?'자동 복구 중':submitting?(requestMode==='rollback'?'이전 버전 복원 요청 중…':'업데이트 요청 중…'):updating||result?.phase==='failed'||rollback&&result?.phase==='completed'?operationLabel:checkingLatest?'최신 버전 확인 중…':latest?.state==='current'?'최신 버전 사용 중':latest?.state==='available'?'새 업데이트 사용 가능':latest?.state==='ahead'?'공식 배포보다 높은 버전 사용 중':'최신 버전을 확인하지 못했습니다'
+ const tone=result?.phase==='failed'?'error':!submitting&&!updating&&(latest?.state==='current'||rollback&&result?.phase==='completed')?'ok':'warning'
+ return <div className="update-state" role="status" aria-live="polite" aria-label="업데이트 상태">
+  <strong className={`setup-status ${tone}`}>{label}</strong>
+  <p>현재 {currentVersion||'확인 중'}{latest?.latestVersion?` · 공식 배포 ${latest.latestVersion}`:''}</p>
+  {result?.version&&result.version!==currentVersion&&<span className="update-version">{updating?'적용할 버전':'최근 작업 버전'} {result.version}</span>}
+  {result?.message&&(updating||result.phase==='failed')&&<p>{rollback?rollbackPhaseMessage(result.phase):result.message}</p>}
+  {updating&&<progress aria-label="업데이트 진행 중"/>}
+  {latest?.checkedAt&&<small>마지막 확인 {timestamp(latest.checkedAt)}</small>}
+  {result?.updatedAt&&result.phase!=='idle'&&<small>{result.phase==='completed'?(rollback?'복원 완료':'업데이트 완료'):'작업 상태 변경'} {timestamp(result.updatedAt)}</small>}
+ </div>
+}
+
 // 확장 설치 버전과 페이지에서 실제 관측한 코드를 분리합니다. 오래된 관측은
 // 현재 버전 확인으로 바꾸지 않고, 원본 빌드 지문은 상세 진단 자료에 보존합니다.
 export function PageCodeVersions({s}:{s:Snapshot}){
@@ -121,12 +139,7 @@ export function UpdatePanel({s,busy,go,appVersion}:{s:Snapshot;busy:boolean;go:(
   return <section className="panel update-panel" aria-label="프로그램 업데이트">
     <div className="panel-head"><div><h2>프로그램 · 확장 업데이트</h2><p>새 버전을 준비하고 관리 프로그램을 다시 시작합니다.</p></div><button className="outline small" disabled={checking||checkingLatest&&!updating||submitting} onClick={()=>setPollKey(k=>k+1)}>{checking||checkingLatest&&!updating?'확인 중…':'새로고침'}</button></div>
     <div className="update-body">
-      <div className="update-state" role="status">
-        <strong>{updating||submitting?'업데이트 처리 중':checkingLatest?'최신 버전 확인 중…':latest?.state==='current'?'최신 업데이트 완료':latest?.state==='available'?'새 업데이트 사용 가능':latest?.state==='ahead'?'공식 배포보다 높은 버전 사용 중':'최신 버전을 확인하지 못했습니다'}</strong>
-        <p>현재 {appVersion||latest?.currentVersion||'확인 중'}{latest?.latestVersion?` · 공식 배포 ${latest.latestVersion}`:''}</p>
-        {latest?.checkedAt&&<small>마지막 확인 {timestamp(latest.checkedAt)}</small>}
-      </div>
-      <div className="update-state" role="status" aria-live="polite"><span className={`setup-status ${result?.phase==='failed'?'error':result?.phase==='completed'?'ok':'warning'}`}>{result?.retrying?'자동 복구 중':result?result.mode==='rollback'?({idle:'이전 버전 복원 대기',preparing:'이전 버전 복원 준비 중',ready:'이전 버전 복원 준비 완료',applying:'이전 버전 적용 · 재시작 중',completed:'이전 버전 복원 완료',failed:'이전 버전 복원 실패'}[result.phase]):phases[result.phase]:'업데이트 상태 확인 중'}</span>{result?.version&&<span className="update-version">버전 정보 {result.version}</span>}{result?.message&&<p>{result.phase==='completed'?(result.mode==='rollback'?'이전 버전 복원을 완료했습니다.':'업데이트를 완료했습니다.') : result.mode==='rollback'?rollbackPhaseMessage(result.phase):result.message}</p>}{updating&&<progress aria-label="업데이트 진행 중"/>}{result?.updatedAt&&<small>최근 갱신 {timestamp(result.updatedAt)}</small>}</div>
+      <UpdateStatusCard result={result} latest={latest} checkingLatest={checkingLatest} submitting={submitting} requestMode={requestMode} appVersion={appVersion}/>
       {error&&<p className="update-error" role="alert">{error}</p>}
       {paused==='connection_lost'&&<div className="editor-note">업데이트 상태 연결을 복구하고 있습니다. 15초 간격으로 자동 재확인하며 현재 설치와 실행 기록을 유지합니다.</div>}
       {paused==='busy_timeout'&&<div className="editor-note">준비·적용이 이어지고 있습니다. 15초 간격으로 자동 재확인하며 같은 업데이트를 중복 실행하지 않습니다.</div>}
