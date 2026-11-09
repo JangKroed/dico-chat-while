@@ -396,7 +396,10 @@
   }
   function slowmode(editor) {
     const form = editor?.closest('form') || editor?.parentElement;
-    const candidates = [...(form?.querySelectorAll?.('[class*="slowModeCooldown"], [class*="slowmodeCooldown"]') || [])];
+    // Discord의 카운트다운 텍스트 변형을 같은 입력창 범위에서 함께 읽는다.
+    // 일반 채팅 본문이나 다른 입력창의 시간 표시는 발송 제한으로 사용하지 않는다.
+    const selector = '[class*="slowModeCooldown"], [class*="slowmodeCooldown"], [class*="cooldownText"]';
+    const candidates = [...(form?.querySelectorAll?.(selector) || [])];
     const nodes = candidates.filter(node => node.getClientRects().length > 0);
     let seconds = 0,cooldownKnown=true;
     for (const node of nodes) {
@@ -405,7 +408,12 @@
       if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) {cooldownKnown=false;continue;}
       seconds = Math.max(seconds, Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     }
-    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0,hiddenCooldownIndicator:candidates.length>nodes.length,cooldownKnown, cooldownMs:Math.min(seconds,21600)*1000};
+    // 표시 부재는 명시적 0초나 권한 면제의 증거가 아니다.
+    // 기존 실행 허용값과 관찰 근거를 분리해 서버장 계정을 영구 대기시키지 않는다.
+    const cooldownEvidence = !cooldownKnown ? 'unreadable' : nodes.length ? 'countdown' : candidates.length ? 'hidden' : 'absent';
+    const allCandidates = [...(document.querySelectorAll?.(selector) || [])];
+    const cooldownOutsideScopeCount = allCandidates.filter(node=>!candidates.includes(node)).length;
+    return {slowmodeSeconds:slowmodeSetting.path===location.pathname?slowmodeSetting.seconds:null,slowmodeDetected:nodes.length > 0,hiddenCooldownIndicator:candidates.length>nodes.length,cooldownKnown,cooldownEvidence,cooldownOutsideScopeCount, cooldownMs:Math.min(seconds,21600)*1000};
   }
   let cooldownProbeCancel = null;
   /**

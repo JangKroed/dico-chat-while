@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {compareSubmitTraces} from '../central/runtime/diagnose-discord-submit.mjs';
 
-function sample({sameAccount=true,braveAge=65000,mixedBuild=false}={}) {
+function sample({sameAccount=true,braveAge=65000,mixedBuild=false,cooldownEvidence='countdown'}={}) {
  const state={instances:[{id:'chrome',browser:'Chrome'},{id:'brave',browser:'Brave'}],attempts:[]},events=[];
  const last=new Map();
  for(let i=0;i<8;i++){
@@ -13,7 +13,7 @@ function sample({sameAccount=true,braveAge=65000,mixedBuild=false}={}) {
   last.set(accountId,finalizedAt);
   state.attempts.push({id,instanceId,accountId,guildId:'private-guild',channelId:'private-channel',revisionId:'private-revision',status:'confirmed',finalizedAt});
   for(const [stage,observedAt,data] of [
-   ['before-enter',first,{retryCount:0,networkObserverReady:true,contentBuildId:(mixedBuild&&instanceId==='brave'?'b':'a').repeat(64),pageHidden:true,documentFocused:false,cooldownKnown:true,cooldownMs:0}],
+   ['before-enter',first,{retryCount:0,networkObserverReady:true,contentBuildId:(mixedBuild&&instanceId==='brave'?'b':'a').repeat(64),pageHidden:true,documentFocused:false,cooldownKnown:true,cooldownMs:0,cooldownEvidence}],
    ['network-start',first+delay,{networkOrdinal:1}],
    ['network-result',first+delay+50,{httpStatus:200,networkOrdinal:1}],
   ])events.push({attemptId:id,stage,observedAt,data});
@@ -58,4 +58,13 @@ test('같은 계정·채널의 직전 POST와 실제 Enter로 지연 구간을 �
  });
  assert.deepEqual(result.observations.Brave.firstKeyRoute,{samples:3,capture:3,bubble:0});
  assert.doesNotMatch(JSON.stringify(result),/private-/);
+});
+
+
+test('표시 부재·숨김·판독 실패·구형 기록의 0초는 제한 해제 대조 표본에서 제외한다',()=>{
+ for(const cooldownEvidence of ['absent','hidden','unreadable',null]){
+  const result=sample({cooldownEvidence});
+  assert.equal(result.comparison,'needs_same_account_channel_samples');
+  assert.equal(result.observations.Brave.delayed,4);
+ }
 });
