@@ -161,3 +161,43 @@ test('자동 실행 프로필 조회는 로그인 필요하고 발견하지 않�
  assert.equal((await request(app,'/api/command',{method:'POST',headers,body:{action:'instance.setLaunchProfile',payload:{id:'i',profileId:'/arbitrary/command'}}})).status,400);
  assert.equal((await request(app,'/api/command',{method:'POST',headers,body:{action:'instance.setLaunchProfile',payload:{id:'i',profileId:'Chrome:Default'}}})).status,200);
 });
+
+test('프로필 복원 표식은 올바른 브라우저의 현재 세션에서 한 번만 저장하고 재시작 뒤에도 남긴다',async t=>{
+ const {createCentralManager}=await import('../central/core/index.js');
+ const {createBrowserPreparation}=await import('../central/host/browser-profiles.mjs');
+ const {validatePacket}=await import('../central/host/protocol.mjs');
+ const dir=await mkdtemp(join(tmpdir(),'dico-profile-proof-')),databasePath=join(dir,'db.sqlite');
+ const m=createCentralManager({databasePath});
+ t.after(async()=>{m.close();await rm(dir,{recursive:true,force:true});});
+ const chrome=m.bridge({type:'HELLO',protocolVersion:1,browser:'Chrome',capabilities:[]});
+ const brave=m.bridge({type:'HELLO',protocolVersion:1,browser:'Brave',capabilities:[]});
+ const profile={id:'Chrome:Profile 2',browser:'Chrome',dicoInstalled:true};
+ let probeId;
+ const service=createBrowserPreparation({
+  manager:{rememberBrowserProfile:m.rememberBrowserProfile,snapshot:()=>({
+   instances:[{id:chrome.instanceId,browser:'Chrome',connected:false}],
+   groups:[{pendingStart:true,members:['c']}],channels:[{id:'c',instanceId:chrome.instanceId}]
+  })},
+  discover:async()=>[profile],launch:async(_p,opts)=>{probeId=opts.probeId;}
+ });
+ await service.tick();assert.match(probeId,/^[a-f0-9]{32}$/);
+ const app=createCentralApplication({manager:m,origin,bridgeToken,browserPreparation:service});
+ t.after(()=>app.close());
+ const headers={authorization:`Bearer ${bridgeToken}`};
+ const send=(connection,opts={})=>{
+  const {requestId,...body}=validatePacket({requestId:'profile-check',instanceId:connection.instanceId,message:{type:'BROWSER_PROFILE_PROBE',sessionId:connection.sessionId,probeId,...opts}});
+  return request(app,'/api/bridge',{method:'POST',headers,body});
+ };
+ assert.equal((await send(chrome,{sessionId:'stale'})).status,409);
+ assert.equal(JSON.parse((await send(brave)).body).recognized,false);
+ assert.equal(JSON.parse((await send(chrome)).body).recognized,true);
+ assert.equal(JSON.parse((await send(chrome)).body).recognized,false);
+ assert.equal(m.snapshot().instances.find(i=>i.id===chrome.instanceId).observedProfileId,profile.id);
+ assert.equal(m.snapshot().instances.find(i=>i.id===brave.instanceId).observedProfileId,undefined);
+ assert.equal(m.snapshot().accounts.length,0);
+ assert.equal(m.snapshot().attempts.length,0);
+ m.close();
+ const reopened=createCentralManager({databasePath,readOnly:true});
+ try{assert.equal(reopened.snapshot().instances.find(i=>i.id===chrome.instanceId).observedProfileId,profile.id);}
+ finally{reopened.close();}
+});

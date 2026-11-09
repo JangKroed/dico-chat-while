@@ -974,6 +974,18 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     event('backup.restored',{messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length});return{restored:true,messageCount:messages.length,channelCount:channels.length,groupCount:state.groups.length};
   }
   function importBackup(backup){return transact(()=>restore(backup));}
+  function rememberBrowserProfile(message,instanceId,profileId){return transact(()=>{
+    const instance=ensureSession(message,instanceId);
+    if(!/^(Chrome|Brave):(Default|Profile \d+)$/.test(profileId)||!profileId.startsWith(instance.browser+':'))return{ok:true,recognized:false};
+    for(const other of state.instances.filter(i=>i.id!==instance.id&&i.observedProfileId===profileId)){
+      delete other.observedProfileId;other.version++;
+    }
+    if(instance.observedProfileId!==profileId){
+      instance.observedProfileId=profileId;instance.version++;
+      event('instance.profile_observed',{instanceId});
+    }
+    return{ok:true,recognized:true};
+  });}
   function attemptPayload(a){return{attemptId:a.id,originSessionId:a.sessionId,groupId:a.groupId,runId:a.runId,bindingId:a.bindingId,accountId:a.accountId,guildId:a.guildId,channelId:a.channelId,tabId:a.tabId,configVersion:a.configVersion,body:a.body,revisionId:a.revisionId,maxSendRetries:normalizeSendRetries(a.maxSendRetries)};}
   /**
    * 확장 프로토콜의 입구입니다. 세션과 시도 식별자를 확인한 뒤 응답에 맞춰 상태를 전이합니다.
@@ -1625,5 +1637,5 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const a of state.attempts.filter(a=>activeAttempt(a)&&a.status!=='unknown'))markUnknown(a,'service_restart');refreshMessageAssignments();restoreConfirmedDeadlines();event('service.started',{reasonCode:'groups_preserved'});
   });
   else if(!readOnly)transact(()=>{state.retryPolicyVersion=3;event('service.started');});
-  return{execute,snapshot,bridge,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
+  return{execute,snapshot,bridge,rememberBrowserProfile,tick,commands,analytics,exportBackup,importBackup,historyPage,supportData,eventPage:options=>({...store.eventPage(options),retentionDays:state.settings.retentionDays}),events:options=>store.events(options),subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},close(){if(!closed){closed=true;listeners.clear();store.close();}}};
 }

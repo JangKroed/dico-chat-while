@@ -313,6 +313,17 @@ async function bindActive(windowId) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id)return false;
+  if(message?.type==='DICO_PROFILE_PROBE'&&sender.tab&&sender.frameId===0&&
+     /^https:\/\/discord\.com\//.test(sender.url||'')&&/^[a-f0-9]{32}$/.test(message.probeId||'')){
+    void (async()=>{
+      await executor.load();
+      if(connecting)await connecting;
+      if(!transport.connected)await connect();
+      if(!executor.state.sessionId||executor.state.emergencyStopped)return;
+      await executor.request({type:'BROWSER_PROFILE_PROBE',probeId:message.probeId});
+    })().then(()=>respond({ok:true}),()=>respond({ok:false}));
+    return true;
+  }
   if(message?.type==='DICO_DELAY'){void executor.load().then(()=>managedPageDelay(message,sender,executor.state,{extensionId:chrome.runtime.id,resolveDocument:async source=>{
     // SPA 이동으로 sender.url이 오래된 경우에만 호출됩니다. Chrome이 부여한
     // documentId를 지정해 새 문서나 다른 프레임의 경로를 대신 읽지 않습니다.

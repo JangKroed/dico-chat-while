@@ -95,6 +95,9 @@ export function createCentralApplication({manager,browserPreparation,origin='htt
           const payload=await body(req);
           if (!payload.message || typeof payload.message.type!=='string')throw fail(400,'브리지 메시지가 필요합니다.');
           if(updates?.isApplying())throw fail(503,'업데이트를 적용하고 있습니다. 관리 화면이 다시 열릴 때까지 기다려 주세요.');
+          if(payload.message.type==='BROWSER_PROFILE_PROBE'){
+            return json(res,200,browserPreparation?.observeProfile(payload.message,payload.instanceId)??{ok:true,recognized:false});
+          }
           manager.tick?.();
           return json(res,200,manager.bridge(payload.message,payload.instanceId));
         }

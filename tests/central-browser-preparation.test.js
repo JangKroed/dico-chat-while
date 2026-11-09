@@ -30,3 +30,27 @@ test('최근 후보에서 계정이 확인되지 않으면 다음 후보를 한 
  assert.deepEqual(r.calls,['Chrome:Default','Chrome:Profile 2']);
  assert.equal(c.status()[0].state,'waiting_account');
 });
+test('다른 브라우저가 대기 중이어도 연결 복구 후 다시 끊긴 프로필을 다시 연다',async()=>{
+ const r=rig();let time=0;r.now=()=>time;
+ r.s.instances.push({id:'b',browser:'Brave',connected:false});
+ r.s.groups[0].members.push('cb');r.s.channels.push({id:'cb',instanceId:'b'});
+ const brave={...r.p,id:'Brave:Default',browser:'Brave',dicoInstalled:true};r.discover=async()=>[r.p,brave];
+ const c=createBrowserPreparation(r);await c.tick();
+ r.s.instances[0].connected=true;time+=5000;await c.tick();
+ r.s.instances[0].connected=false;time+=31000;await c.tick();
+ assert.deepEqual(r.calls,['Chrome:Default','Brave:Default','Chrome:Default']);
+});
+test('현재 계정의 실행기가 확인한 프로필을 브라우저의 최근 사용 프로필보다 먼저 연다',async()=>{
+ const r=rig();delete r.s.instances[0].launchProfileId;r.s.instances[0].observedProfileId='Chrome:Profile 2';
+ const correct={...r.p,id:'Chrome:Profile 2',profile:'Profile 2',dicoInstalled:true};
+ r.discover=async()=>[{...r.p,dicoInstalled:true},correct];
+ const c=createBrowserPreparation(r);await c.tick();
+ assert.deepEqual(r.calls,['Chrome:Profile 2']);
+});
+test('자동 일시정지의 응답을 받기 위해 브라우저를 복원하되 사용자 중지에서는 열지 않는다',async()=>{
+ const r=rig();r.s.groups[0]={status:'pause_pending',controlIntent:'pause',autoResume:{reasonCode:'connection_lost'},members:['c']};
+ const c=createBrowserPreparation(r);await c.tick();
+ assert.deepEqual(r.calls,['Chrome:Default']);
+ const stopped=rig();stopped.s.groups[0]={status:'stop_pending',controlIntent:'stop',members:['c']};
+ await createBrowserPreparation(stopped).tick();assert.deepEqual(stopped.calls,[]);
+});

@@ -2,6 +2,7 @@ import {readdir,readFile,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {homedir} from 'node:os';
 import {spawn} from 'node:child_process';
+import {randomBytes} from 'node:crypto';
 
 const dicoExtensionId='ibkkihhaihlpjcahglnoiphcddcjipgh';
 async function browserJson(file){
@@ -38,9 +39,10 @@ export async function discoverBrowserProfiles({platform=process.platform,home=ho
  }
  return result;
 }
-export function launchBrowserProfile(profile,{spawnProcess=spawn}={}){
+export function launchBrowserProfile(profile,{spawnProcess=spawn,probeId}={}){
  return new Promise((resolve,reject)=>{
-  const child=spawnProcess(profile.executable,[`--user-data-dir=${profile.root}`,`--profile-directory=${profile.profile}`,'https://discord.com/app'],{detached:true,stdio:'ignore',shell:false,windowsHide:false});
+  const url=probeId?'https://discord.com/channels/@me#dico-profile='+probeId:'https://discord.com/app';
+  const child=spawnProcess(profile.executable,[`--user-data-dir=${profile.root}`,`--profile-directory=${profile.profile}`,url],{detached:true,stdio:'ignore',shell:false,windowsHide:false});
   child.once('error',reject);child.once('spawn',()=>{child.unref();resolve();});
  });
 }
@@ -48,10 +50,10 @@ export function launchBrowserProfile(profile,{spawnProcess=spawn}={}){
 // 프로필 이름은 후보의 순서만 정하며, 발송 허가는 실제 계정 확인 뒤에만 나갑니다.
 export function createBrowserPreparation({manager,discover=discoverBrowserProfiles,launch=launchBrowserProfile,now=Date.now}){
  let busy=false,closed=false;
- const jobs=new Map(),tried=new Map(),firstSeen=new Map();
+ const jobs=new Map(),tried=new Map(),firstSeen=new Map(),probes=new Map();
  function missing(snapshot){
   const wanted=new Map();
-  for(const g of snapshot.groups.filter(g=>!g.controlIntent&&(g.pendingStart||g.autoResume||g.status==='running'))){
+  for(const g of snapshot.groups.filter(g=>g.enabled!==false&&(g.controlIntent?g.controlIntent==='pause'&&g.autoResume:g.pendingStart||g.autoResume||g.status==='running'))){
    for(const id of g.members){
     const channel=snapshot.channels.find(c=>c.id===id);
     const instance=snapshot.instances.find(i=>i.id===channel?.instanceId);
@@ -66,14 +68,27 @@ export function createBrowserPreparation({manager,discover=discoverBrowserProfil
  return{
   async list(){return(await discover()).map(({executable,root,...p})=>p);},
   status(){return [...jobs].map(([instanceId,value])=>({instanceId,...value}));},
-  close(){closed=true;},
+  close(){closed=true;probes.clear();},
+  observeProfile(message,instanceId){
+   const probe=probes.get(message.probeId);
+   if(!probe||now()>=probe.expiresAt)return{ok:true,recognized:false};
+   // 프로필 경로는 브라우저가 제출하지 않습니다. 호스트가 직접 연 후보만 저장합니다.
+   const result=manager.rememberBrowserProfile(message,instanceId,probe.profileId);
+   if(result.recognized)probes.delete(message.probeId);
+   return result;
+  },
   async tick(){
    if(busy||closed)return;
    busy=true;
    try{
     const needed=missing(manager.snapshot()),at=now();
-    for(const id of firstSeen.keys())if(!needed.has(id)){firstSeen.delete(id);jobs.delete(id);}
-    if(!needed.size){tried.clear();return;}
+    for(const [id,probe] of probes)if(at>=probe.expiresAt)probes.delete(id);
+    for(const id of firstSeen.keys())if(!needed.has(id)){
+     firstSeen.delete(id);jobs.delete(id);
+     // 연결이 회복된 뒤의 새 장애는 다른 브라우저의 대기와 별개입니다.
+     for(const [profileId,ownerId] of tried)if(ownerId===id)tried.delete(profileId);
+    }
+    if(!needed.size)return;
     for(const id of needed.keys())if(!firstSeen.has(id))firstSeen.set(id,at);
     const due=[...needed.values()].filter(({instance,online})=>{
      const job=jobs.get(instance.id);
@@ -83,20 +98,24 @@ export function createBrowserPreparation({manager,discover=discoverBrowserProfil
     if(!due.length)return;
     const profiles=await discover();
     for(const {instance} of due){
-     const fresh=missing(manager.snapshot()).get(instance.id);
-     if(closed||!fresh||fresh.instance.launchProfileId!==instance.launchProfileId||fresh.online&&now()-firstSeen.get(instance.id)<15000)continue;
-     const candidates=profiles.filter(p=>p.browser===instance.browser&&(p.dicoInstalled||p.id===instance.launchProfileId));
-     const profile=candidates.find(p=>p.id===instance.launchProfileId&&!tried.has(p.id))||
-       candidates.find(p=>!tried.has(p.id));
+     const current=manager.snapshot(),fresh=missing(current).get(instance.id);
+     if(closed||!fresh||fresh.instance.browser!==instance.browser||fresh.online&&now()-firstSeen.get(instance.id)<15000)continue;
+     const {launchProfileId,observedProfileId}=fresh.instance;
+     const candidates=profiles.filter(p=>p.browser===instance.browser&&(p.dicoInstalled||p.id===launchProfileId));
+     const available=candidates.filter(p=>!tried.has(p.id)&&!current.instances.some(i=>
+       i.id!==instance.id&&i.connected&&i.observedProfileId===p.id&&(i.lastSeenAt===undefined||now()-i.lastSeenAt<=15000)));
+     const profile=available.find(p=>p.id===observedProfileId)||available.find(p=>p.id===launchProfileId)||available[0];
      if(!profile){
       const state=candidates.length?'waiting_account':'profile_missing';
       jobs.set(instance.id,{state,at:now()});
       continue;
      }
      jobs.set(instance.id,{state:'opening',profileId:profile.id,at:now()});
-     tried.set(profile.id,now());
-     try{await launch(profile);jobs.set(instance.id,{state:'waiting_connection',profileId:profile.id,at:now()});}
-     catch{tried.delete(profile.id);jobs.set(instance.id,{state:'launch_failed',profileId:profile.id,at:now()});}
+     tried.set(profile.id,instance.id);
+     const probeId=randomBytes(16).toString('hex');
+     probes.set(probeId,{profileId:profile.id,expiresAt:now()+120000});
+     try{await launch(profile,{probeId});jobs.set(instance.id,{state:'waiting_connection',profileId:profile.id,at:now()});}
+     catch{probes.delete(probeId);tried.delete(profile.id);jobs.set(instance.id,{state:'launch_failed',profileId:profile.id,at:now()});}
     }
    }finally{busy=false;}
   }
