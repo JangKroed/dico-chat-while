@@ -259,6 +259,10 @@ export function createCentralExecutor({chrome,transport,openChannel,manageChanne
     } else if(c.type==='CLOSE_CHANNEL') {
       if(typeof manageChannelWindow!=='function')throw Object.assign(Error('채널 연결 해제를 지원하는 확장으로 업데이트하세요.'),{code:'EXTENSION_UPDATE_REQUIRED'});
       if(p.tabId!==undefined&&!Number.isInteger(p.tabId)||!p.accountId||!p.guildId||!p.channelId)throw Object.assign(Error('닫을 전송 탭 정보가 올바르지 않습니다.'),{code:'TARGET_MISMATCH'});
+      // 중앙에서 이미 종료된 준비가 로컬에 남아 연결 해제를 막지 않도록 대조합니다.
+      // 조회 실패나 미확인 결과는 종료로 간주하지 않고 기존 입력 차단 조건을 유지합니다.
+      if(p.bindingId)await synchronizePreviousAttempts({bindingId:p.bindingId});
+      if(c.sessionId!==state.sessionId||c.instanceId!==state.instanceId)return;
       if(Object.values(state.attempts).some(a=>(p.tabId!==undefined?a.tabId===p.tabId:['accountId','guildId','channelId'].every(key=>a[key]===p[key]))&&!['confirmed','not_sent','cancelled'].includes(a.phase)&&!(a.phase==='unknown'&&a.result?.executionBlocked===true)))throw Object.assign(Error('진행 중인 발송 입력 차단을 기다리고 있습니다.'),{code:'ATTEMPT_UNRESOLVED'});
       maintenance=true;
       try{

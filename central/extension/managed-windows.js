@@ -141,12 +141,13 @@ async function closeManagedChannel(chrome,records,record,target){
   if(!tab){await unregister();return{action:'close',tabId:target.tabId,closed:false,alreadyClosed:true};}
   // 중앙의 채널 삭제는 연결 해제까지만 수행하고 사용자가 열었던 탭은 남깁니다.
   if(record?.ownership==='adopted'){await unregister();return{action:'close',tabId:target.tabId,closed:false,detached:true};}
-  if(!channelTab(tab,target)){
-    // A deleted destination must not be recovered, but a user-navigated page is
-    // no longer ours to close. Keep the command rejected until manually resolved.
-    await unregister();fail('TARGET_MISMATCH','전송 탭이 다른 화면으로 이동하여 닫지 않았습니다. 해당 탭을 직접 확인해 주세요.');
+  // 다른 계정/채널이 소유한 탭은 이전 삭제 요청으로 해제하지 않습니다.
+  if(!record&&records.some(item=>item.tabId===target.tabId))fail('WINDOW_NOT_DEDICATED','다른 연결이 사용 중인 탭은 닫지 않습니다.');
+  // 화면 이동 또는 이전 정리로 소유권을 잃었다면 탭은 보존하고 연결 해제만
+  // 완료합니다. 여기서 거절하면 중앙이 같은 삭제를 무한 재요청합니다.
+  if(!record||!channelTab(tab,target)){
+    await unregister();return{action:'close',tabId:target.tabId,closed:false,detached:true};
   }
-  if(!record)fail('WINDOW_NOT_DEDICATED','삭제할 채널의 전송 탭 소유권을 확인하지 못해 닫지 않았습니다. 해당 탭을 직접 확인해 주세요.');
   await chrome.tabs.remove(tab.id);
   await unregister();return{action:'close',tabId:tab.id,closed:true};
 }

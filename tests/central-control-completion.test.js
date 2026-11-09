@@ -148,3 +148,25 @@ test('차단된 미확인 발송의 새 탭 관찰은 검증을 복구하되 원
   f.manager.tick();const cmd=f.manager.commands(o.instanceId).find(c=>c.type==='RECONCILE');assert.ok(cmd);assert.equal(cmd.payload.recoveryTabId,999);assert.equal(f.manager.snapshot().attempts.length,1);
  }finally{f.manager.close();}
 });
+
+ test('중지 ACK 뒤 늦게 도착한 같은 세션의 제출 영수증은 정상 완료로 보존한다',()=>{
+ const f=fixture();try{
+  f.manager.execute('group.stop',{id:f.group.id});f.ack(0);f.ack(1);
+  const o=f.owners[0];
+  f.manager.bridge({type:'DELIVERY_RESULT',sessionId:o.sessionId,attemptId:f.attempt.id,outcome:'confirmed',confirmationBasis:'composer_cleared',deliveryEvidence:{phase:'commit',stage:'observe',submitMethod:'keyboard',enterAttempted:true,expectedDraftSubmitted:true,composerCleared:true,sameEditor:true,targetMatched:true,accountMatched:true}},o.instanceId);
+  const s=f.manager.snapshot();assert.equal(s.attempts[0].status,'confirmed');assert.equal(s.groups[0].status,'stopped');assert.equal(s.groups[0].activeAttemptId,null);
+  assert.equal(s.incidents.filter(i=>i.status==='open'&&i.attemptId===f.attempt.id).length,0);
+  f.manager.tick();assert.equal(f.manager.snapshot().attempts.length,1);
+ }finally{f.manager.close();}
+ });
+
+for(const stopping of [true,false])test(`발송 허가 거절은 실제 중지 요청이 있을 때만 정상 취소로 분류한다 (${stopping})`,()=>{
+ const f=fixture();try{
+  const o=f.owners[0],cmd=f.manager.commands(o.instanceId).find(c=>c.type==='COMMIT_PERMIT');
+  if(stopping)f.manager.execute('group.stop',{id:f.group.id});
+  f.manager.bridge({type:'ACK',sessionId:o.sessionId,commandId:cmd.id,status:'rejected',rejectionCode:'EXECUTION_STOPPED'},o.instanceId);
+  const s=f.manager.snapshot();assert.equal(s.incidents.some(i=>i.code==='command_rejected'&&i.commandId===cmd.id),!stopping);
+  assert.equal(s.attempts[0].status,'unknown');
+  if(stopping){f.ack(0);f.ack(1);assert.equal(f.manager.snapshot().groups[0].status,'stopped');}
+ }finally{f.manager.close();}
+});
