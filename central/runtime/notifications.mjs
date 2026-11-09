@@ -36,6 +36,21 @@ export function createNotificationDispatcher({notify=notifyDesktop,load=async()=
         try{lastStatus=await notify(packet) || {status:'requested'};}catch{lastStatus={status:'failed'};}
       }
     }),
+    update:(snapshot,update)=>run(async()=>{
+      const settings=snapshot.settings||{};
+      if(!settings.notificationsEnabled||inQuietHours(settings.quietHours,new Date(now()))||update?.state!=='available')return;
+      const version=update.latestVersion;
+      if(typeof version!=='string'||!/^\d{1,5}\.\d{1,5}\.\d{1,5}$/.test(version))return;
+      ledger??=await load()||{version:1,incidents:{},roots:{}};
+      if(ledger.version!==1||!ledger.incidents||!ledger.roots)throw Error('알림 이력 복구가 필요합니다.');
+      if(ledger.updates?.[version])return;
+      // 재시작 경계에서 같은 알림이 반복되지 않도록 OS 요청 전에 기록합니다.
+      // OS에서 표시를 막더라도 관리 화면의 업데이트 배너는 별도로 유지됩니다.
+      const next=structuredClone(ledger);next.updates??={};next.updates[version]={at:now(),status:'requested'};
+      await save(next);ledger=next;
+      try{lastStatus=await notify({id:'update:'+version,title:'DICO · 새 업데이트',body:`새 버전 ${version}이 준비되었습니다. 관리 화면의 설정에서 업데이트할 수 있습니다.`,route:'/settings'})||{status:'requested'};}
+      catch{lastStatus={status:'failed'};}
+    }),
     test:()=>run(async()=>{try{return lastStatus=await notify({id:'dico-test',title:'DICO 테스트 알림',body:'알림 연결을 시험했습니다. Discord 메시지는 보내지 않았습니다.',route:'/settings'}) || {status:'requested'};}catch{return lastStatus={status:'failed'};}}),
     status:()=>({...lastStatus}),
   };

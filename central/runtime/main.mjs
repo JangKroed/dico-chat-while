@@ -41,12 +41,12 @@ export async function acquireLock(dir) {
  */
 export async function startCentralRuntime({directory=dataDirectory(),port,uiDirectory=resolve(dirname(fileURLToPath(import.meta.url)),'../ui/dist')}={}) {
   await mkdir(directory,{recursive:true,mode:0o700});if(process.platform!=='win32')await chmod(directory,0o700);const unlock=await acquireLock(directory);
-  let manager,server,app,timer,unsubscribe,updates,lanAccess,supportDelivery,supportCollector,notificationRefresh,closing=false;
+  let manager,server,app,timer,unsubscribe,updates,lanAccess,supportDelivery,supportCollector,notificationRefresh,updateNotifier,closing=false;
   try {
     // The updater holds this same OS lock while replacing application trees.
     // Load replaceable modules only after startup owns the lock.
-    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController,captureLegacyRollback},{selectRuntimePort,createSessionStore},{createLanAccess},{createSupportDelivery},{createSupportCollector},{createCoalescedRefresh}]=await Promise.all([
-      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs'),import('./lan-access.mjs'),import('./support-delivery.mjs'),import('./support-collector.mjs'),import('./coalesced-refresh.mjs')
+    const [{createCentralManager},{inspectInstallation},{createCentralApplication},{createNotificationDispatcher},{createUpdateController,captureLegacyRollback},{selectRuntimePort,createSessionStore},{createLanAccess},{createSupportDelivery},{createSupportCollector},{createCoalescedRefresh},{createUpdateNotifier}]=await Promise.all([
+      import('../core/index.js'),import('./setup-status.mjs'),import('./http.mjs'),import('./notifications.mjs'),import('./updater.mjs'),import('./ui-state.mjs'),import('./lan-access.mjs'),import('./support-delivery.mjs'),import('./support-collector.mjs'),import('./coalesced-refresh.mjs'),import('./update-notifier.mjs')
     ]);
     // 구버전 worker가 health 응답 이후 previous를 지우기 전에 검증된 코드만 보관한다.
     await captureLegacyRollback({directory});
@@ -62,6 +62,7 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
       if(closing)return;closing=true;clearInterval(timer);unsubscribe?.();const notificationDrain=notificationRefresh?.close();let shutdownError;
       if(!forUpdate)try{manager.execute('service.stopAll',{});}catch(error){shutdownError=error;}
       // 먼저 새 발송을 차단하고, 기존 알림 쓰기를 정리한 뒤 프로세스 잠금을 해제합니다.
+      await updateNotifier?.close();
       await notificationDrain;
       try{await atomicJSON(resolve(directory,'shutdown.json'),{intent:forUpdate?'update':'user',at:Date.now()});}catch(error){shutdownError??=error;}
       try{await supportCollector?.close();await supportDelivery?.close();await lanAccess?.close();}catch(error){shutdownError??=error;}
@@ -99,11 +100,12 @@ export async function startCentralRuntime({directory=dataDirectory(),port,uiDire
     // 알림 판단에 필요한 전체 상태 읽기도 발송 이벤트의 동기 응답 경로에서 분리합니다.
     // 알림 저장이 느린 동안에는 중복 처리를 겹치지 않고 마지막 상태를 다시 확인합니다.
     notificationRefresh=createCoalescedRefresh(()=>dispatcher.process(manager.snapshot()));
+    updateNotifier=createUpdateNotifier({check:()=>updates.latest(appVersion),snapshot:()=>manager.snapshot(),dispatch:(snapshot,latest)=>dispatcher.update(snapshot,latest)});
     const report=()=>notificationRefresh.request();
     unsubscribe=manager.subscribe(event=>{report();if(event.type==='incident.opened'&&supportDelivery)void supportDelivery.queue({automatic:true,incidentId:event.incidentId,attemptId:event.attemptId}).catch(()=>{});if(event.type==='settings.reset')void lanAccess.reset().catch(()=>{});});
-    timer=setInterval(()=>{void updates.monitor();try{manager.tick();report();}catch{report();}},1000);timer.unref();
+    timer=setInterval(()=>{void updates.monitor();void updateNotifier.tick();try{manager.tick();report();}catch{report();}},1000);timer.unref();
     return {url,manager,app,updates,lanAccess,supportDelivery,close:closeRuntime};
-  } catch(error) {clearInterval(timer);unsubscribe?.();await notificationRefresh?.close();await supportCollector?.close();await supportDelivery?.close().catch(()=>{});await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
+  } catch(error) {clearInterval(timer);unsubscribe?.();await updateNotifier?.close();await notificationRefresh?.close();await supportCollector?.close();await supportDelivery?.close().catch(()=>{});await lanAccess?.close().catch(()=>{});await app?.close().catch(()=>{});if(server?.listening)await new Promise(accept=>server.close(accept));manager?.close();await unlock();throw error;}
 }
 function openBrowser(url) {
   const command=process.platform==='darwin'?'/usr/bin/open':process.platform==='win32'?'rundll32.exe':'xdg-open';
