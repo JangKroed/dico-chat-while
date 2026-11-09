@@ -91,20 +91,27 @@ async function registerActiveAccount(windowId) {
 async function collectObservation() {
   await executor.load();
   const sessionId=executor.state.sessionId;
-  const saved=currentRegistration(await chrome.storage.local.get(['dicoCentralTabs','dicoCentralAccount']),executor.state.resetEpoch??0);
+  const stored=await chrome.storage.local.get(['dicoCentralTabs','dicoCentralAccount']);
+  const resetEpoch=executor.state.resetEpoch??0,saved=currentRegistration(stored,resetEpoch);
   const records=saved.dicoCentralTabs||[],account=saved.dicoCentralAccount;
+  const canDiscover=executor.state.legacyDeclaration&&(!stored.dicoCentralAccount||account);
   // Channel-limit reads can each wait 1.5 seconds. Independent channel reads
   // run together so a browser with many tabs does not age the first result.
   const [accountResult,channels]=await Promise.all([
-    account?currentAccountResult(account.accountId,account.sourceTabId):null,
+    canDiscover?currentAccountResult(null,account?.sourceTabId):
+      account?currentAccountResult(account.accountId,account.sourceTabId):null,
     Promise.all(records.map(record=>observeManagedChannel(chrome,record,{observe,observeLimit:observeChannelLimit}))),
   ]);
-  return{sessionId,account:account?{accountId:account.accountId,...accountIdentityMetadata(accountResult.seen),verified:Boolean(accountResult.seen),verificationReason:accountResult.verificationReason}:null,channels};
+  const seen=accountResult?.seen,accountId=seen?.accountId||account?.accountId;
+  return{sessionId,account:accountId?{accountId,...accountIdentityMetadata(seen),verified:Boolean(seen),verificationReason:accountResult?.verificationReason,...(resetEpoch>0&&seen?.accountId!==account?.accountId?{knownAccountOnly:true}:{})}:null,channels};
 }
 async function publishObservation(snapshot){
   if(!transport.connected||executor.state.emergencyStopped||snapshot.sessionId!==executor.state.sessionId)return{ignored:true};
   automaticRecovery.observe(snapshot);
-  if(snapshot.account){lastAccountObservation=snapshot.account;await executor.request({type:'ACCOUNT_OBSERVATION',...snapshot.account});}
+  if(snapshot.account){
+    lastAccountObservation=snapshot.account;
+    await executor.request({type:'ACCOUNT_OBSERVATION',...snapshot.account,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
+  }
   if(!transport.connected||executor.state.emergencyStopped||snapshot.sessionId!==executor.state.sessionId)return{ignored:true};
   return executor.request({type:'OBSERVATION',channels:snapshot.channels,legacyFrozen:Boolean(executor.state.legacyDeclaration),legacyPending:false});
 }
@@ -165,7 +172,7 @@ async function connect({explicit=false}={}) {
       // Same-ID developer upgrades must never reactivate an older scheduler.
       if(old?.enabled || old?.pending || old?.channels?.some(c=>c.enabled || c.pending || c.prepared))throw Error('기존 발송을 먼저 중지하고 미확인 결과를 해소하세요.');
       const browser=await detectConnectedBrowser(chrome,navigator);
-      const response=await transport.request({type:'HELLO',protocolVersion:1,explicitReconnect:explicit,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1','close-channel-v1','skip-unknown-v1']});
+      const response=await transport.request({type:'HELLO',protocolVersion:1,explicitReconnect:explicit,instanceId:executor.state.instanceId || undefined,resetEpoch:executor.state.resetEpoch,name:`연결된 ${browser}`,browser,extensionVersion:chrome.runtime.getManifest().version,extensionBuildId:BUILD_ID,capabilities:['central-executor-v1','strict-account-v1','account-registry-v1','open-channel-v1','channel-name-lookup-v1','managed-window-v1','managed-window-separation-v1','managed-update-v1','early-prepare-v1','reset-epoch-v1','close-channel-v1','skip-unknown-v1','automatic-account-routing-v1']});
       if(executor.state.emergencyStopped)return;
       if(response.removed){
         // A deleted browser may reconnect only through an explicit user action.
@@ -222,7 +229,7 @@ async function openManagedChannelNow(p) {
   ensureCurrent();
   const saved=currentRegistration(await chrome.storage.local.get('dicoCentralAccount'),resetEpoch).dicoCentralAccount;
   const login=await currentAccount(p.accountId,saved?.sourceTabId);
-  if(!login)throw Object.assign(Error('이 브라우저의 로그인 계정을 다시 등록해 주세요.'),{code:'ACCOUNT_UNVERIFIED'});
+  if(!login)throw Object.assign(Error('이 브라우저에서 저장된 Discord 계정의 로그인 상태를 확인 중입니다.'),{code:'ACCOUNT_UNVERIFIED'});
   const records=currentRegistration(await chrome.storage.local.get('dicoCentralTabs'),executor.state.resetEpoch??0).dicoCentralTabs;
   ensureCurrent();
   // 주소는 후보 선별에만 사용합니다. 실제 로그인 계정과 화면 채널은 페이지에서
@@ -346,6 +353,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   };
   void action().then(result=>respond({ok:true,result})).catch(error=>respond({ok:false,error:error.message}));return true;
 });
+chrome.runtime.onStartup?.addListener(()=>void connect().catch(()=>{}));
 chrome.alarms.onAlarm.addListener(alarm=>{if(alarm.name==='dico-central-reconnect')void connect().catch(()=>{});});
 chrome.tabs.onRemoved.addListener(()=>{if(transport.connected)void observation().catch(()=>{});});
 chrome.tabs.onUpdated.addListener((id,change)=>{if((change.url || change.status==='complete')&&transport.connected)void observation().catch(()=>{});});

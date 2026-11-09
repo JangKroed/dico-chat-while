@@ -140,7 +140,7 @@ async function closeManagedChannel(chrome,records,record,target){
   const unregister=async()=>{if(record)await chrome.storage.local.set({dicoCentralTabs:records.filter(item=>item!==record)});};
   if(!tab){await unregister();return{action:'close',tabId:target.tabId,closed:false,alreadyClosed:true};}
   // 중앙의 채널 삭제는 연결 해제까지만 수행하고 사용자가 열었던 탭은 남깁니다.
-  if(record?.ownership==='adopted'){await unregister();return{action:'close',tabId:target.tabId,closed:false,detached:true};}
+  if(target.detachOnly||record?.ownership==='adopted'){await unregister();return{action:'close',tabId:target.tabId,closed:false,detached:true};}
   // 다른 계정/채널이 소유한 탭은 이전 삭제 요청으로 해제하지 않습니다.
   if(!record&&records.some(item=>item.tabId===target.tabId))fail('WINDOW_NOT_DEDICATED','다른 연결이 사용 중인 탭은 닫지 않습니다.');
   // 화면 이동 또는 이전 정리로 소유권을 잃었다면 탭은 보존하고 연결 해제만

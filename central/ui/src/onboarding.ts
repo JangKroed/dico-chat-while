@@ -33,11 +33,16 @@ export function groupBlockers(s:Snapshot,g:Group,now=s.serverNow??Date.now()):st
   if(!g.members.length)reasons.push('참여 계정 필요')
   if(g.activeAttemptId||g.status==='needs_review')reasons.push('진행·미확인 시도 확인 필요')
   if(['stop_pending','pause_pending'].includes(g.status))reasons.push('중지·일시정지 확인 대기')
-  for(const id of g.members){const c=s.channels.find(c=>c.id===id);reasons.push(...(c?bindingBlockers(s,c,now):['채널 연결 필요']))}
-  // 자동 실행 프로필을 지정한 그룹은 연결 준비를 서버에 예약할 수 있습니다.
-  const automatic=g.members.length>0&&g.members.every(id=>{const c=s.channels.find(c=>c.id===id);return c&&s.instances.some(i=>i.id===c.instanceId&&typeof i.launchProfileId==='string')})
   const deferred=new Set(['브라우저 연결 필요','계정·채널 검증 필요','계정 등록·검증 필요','확장 적용 확인 대기'])
-  return [...new Set(automatic?reasons.filter(r=>!deferred.has(r)):reasons)]
+  for(const id of g.members){
+    const c=s.channels.find(c=>c.id===id)
+    if(!c){reasons.push('채널 연결 필요');continue}
+    const i=s.instances.find(i=>i.id===c.instanceId)
+    const automatic=i&&(['Chrome','Brave'].includes(i.browser||'')||typeof i.launchProfileId==='string')
+    reasons.push(...bindingBlockers(s,c,now).filter(reason=>!automatic||!deferred.has(reason)&&
+      (reason!=='기존 실행 중지 확인 필요'||browserOnline(i,now))))
+  }
+  return [...new Set(reasons)]
 }
 export function allRunBlockers(s:Snapshot,now=s.serverNow??Date.now()):string[] {
   const reasons=s.groups.filter(g=>g.enabled!==false&&g.status!=='running').flatMap(g=>{

@@ -21,6 +21,8 @@ const MAX_PRE_ENTER_WAIT_MS=21_630_000;
 // 입력 준비나 명시적으로 Enter 전임이 입증된 응답에서만 사용하는 복구 사유입니다.
 // 발송 결과가 불명확한 시도에 이 목록을 적용해 새 Enter를 만들지 않습니다.
 const transientPreparationCodes=new Set(['DISCORD_SEND_FAILED','COMPOSER_EDITOR_MISSING','COMPOSER_EDITOR_CHANGED','COMPOSER_DRAFT_CHANGED','COMPOSER_STATE_UNREADABLE','MANAGED_DELAY_UNAVAILABLE','PREPARE_TIMEOUT','CONTENT_INSPECTION_TIMEOUT','PREPARE_BUSY','PREPARE_EDITOR_UNSTABLE','EDITOR_LOADING','HISTORY_LOADING','CONTENT_UNAVAILABLE','ACCOUNT_UNVERIFIED','ACCOUNT_UNREADABLE','DRAFT_INSPECTION_UNAVAILABLE','COOLDOWN_UNVERIFIED','COOLDOWN_WAIT_TIMEOUT','AUTHORIZATION_EXPIRED','AUTHORIZATION_UNAVAILABLE','NATIVE_REQUEST_TIMEOUT','NATIVE_DISCONNECTED','NATIVE_SEND_FAILED','SERVICE_UNAVAILABLE','CONTENT_EXCEPTION_BEFORE_ENTER']);
+const automaticAccountRouting='automatic-account-routing-v1';
+const autoLaunchBrowser=i=>Boolean(i?.launchProfileId||['Chrome','Brave'].includes(i?.browser));
 const TERMINAL = new Set(['confirmed','not_sent','cancelled']);
 const id = () => randomUUID();
 const verificationReasons=new Set(['awaiting_observation','connection_lost','session_changed','tab_missing','tab_loading','script_unavailable','account_mismatch','target_mismatch','identity_unverified','content_refresh_required','unknown']);
@@ -139,6 +141,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   const removalKey=(...parts)=>JSON.stringify(parts);
   const targetKey=c=>removalKey(c.guildId,c.channelId);
   const accountKey=c=>removalKey(c.instanceId,c.accountId);
+  const wasRemovedAccount=accountId=>state.removals.accounts.some(key=>key.endsWith(','+JSON.stringify(accountId)+']'));
   const bindingKey=c=>removalKey(c.instanceId,c.accountId,c.guildId,c.channelId);
   function rememberRemoval(kind,key){if(!state.removals[kind].includes(key))state.removals[kind].push(key);}
   function removedScope(c){return state.removals.instances.includes(c.instanceId)||state.removals.targets.includes(targetKey(c))||state.removals.accounts.includes(accountKey(c))||state.removals.bindings.includes(bindingKey(c));}
@@ -182,21 +185,21 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     for(const instanceId of new Set(closing.map(c=>c.instanceId)))queuePendingCloses(instanceId);
     event(`${kind}.deleted`,{entityId:entity.id,removedBindings:channels.length,pendingTabCloses:closing.length});return{id:entity.id,deleted:true,removedBindings:channels.length,pendingTabCloses:closing.length};
   }
-  // 명시적으로 저장한 계정은 Discord ID를 기준으로 연결 소유권만 이동합니다.
+  // Discord ID를 기준으로 채널 설정의 실행 연결만 이동합니다.
   // 채널 ID를 유지해 그룹 순서와 문구 설정이 브라우저 교체에도 이어집니다.
-  function transferAccount(instance,accountId){
+  function transferAccount(instance,accountId,{automatic=false}={}){
     const accounts=state.accounts.filter(a=>a.accountId===accountId);
     if(!accounts.some(a=>a.instanceId!==instance.id))return;
     const channels=state.channels.filter(c=>c.accountId===accountId),ids=new Set(channels.map(c=>c.id));
     const groups=state.groups.filter(g=>g.members.some(member=>ids.has(member)));
     // 이전 실행기의 차단 ACK/결과는 그대로 수신합니다. 미확인 게시를 성공으로 바꾸지 않습니다.
-    for(const g of groups)if((g.status==='running'||g.autoResume)&&!g.controlIntent)control(g,'pause',{systemReason:'account_mismatch'});
+    for(const g of groups)if(!automatic&&(g.status==='running'||g.autoResume)&&!g.controlIntent)control(g,'pause',{systemReason:'account_mismatch'});
     for(const a of state.attempts.filter(a=>ids.has(a.bindingId)&&activeAttempt(a)))markUnknown(a,'account_transferred');
     const oldOwners=new Set(accounts.filter(a=>a.instanceId!==instance.id).map(a=>a.instanceId));
-    for(const owner of oldOwners)rememberRemoval('accounts',removalKey(owner,accountId));
+    if(!automatic)for(const owner of oldOwners)rememberRemoval('accounts',removalKey(owner,accountId));
     for(const c of channels.filter(c=>c.instanceId!==instance.id)){
       rememberRemoval('bindings',bindingKey(c));
-      if(!state.removals.closeRequests.some(r=>bindingKey(r)===bindingKey(c)))state.removals.closeRequests.push({removalId:id(),instanceId:c.instanceId,accountId,guildId:c.guildId,channelId:c.channelId,bindingId:c.id,...(Number.isInteger(c.tabId)?{tabId:c.tabId}:{}),accountName:accounts.find(a=>a.instanceId===c.instanceId)?.name||accountId,channelName:c.name,createdAt:now()});
+      if(!state.removals.closeRequests.some(r=>bindingKey(r)===bindingKey(c)))state.removals.closeRequests.push({removalId:id(),instanceId:c.instanceId,accountId,guildId:c.guildId,channelId:c.channelId,bindingId:c.id,...(Number.isInteger(c.tabId)?{tabId:c.tabId}:{}),accountName:accounts.find(a=>a.instanceId===c.instanceId)?.name||accountId,channelName:c.name,createdAt:now(),...(automatic?{detachOnly:true}:{})});
     }
     // 이전 연결에 남은 입력/설정/창 열기 명령이 나중에 되살아나지 않게 합니다.
     for(const cmd of state.commands)if(cmd.type!=='CONTROL'&&cmd.type!=='CLOSE_CHANNEL'&&cmd.type!=='RECONCILE'&&
@@ -253,9 +256,27 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     // 제어 완료는 현재 소유자의 ACK도 요구하므로 이동한 브라우저에도 같은 세대의
     // 중지/일시정지를 전달합니다. 기존 사용자의 중지 의도는 바꾸지 않습니다.
     for(const g of groups)if(g.controlIntent&&!state.commands.some(c=>c.type==='CONTROL'&&c.instanceId===instance.id&&c.payload.groupId===g.id&&c.payload.controlGeneration===g.controlGeneration&&c.status!=='superseded'))command('CONTROL',instance.id,controlPayload(g,instance.id));
+    // 이미 안전하게 일시정지된 자동 복구는 새 실행기의 계정·채널 확인부터
+    // 다시 이어갑니다. 사용자 중지는 autoResume이 없으므로 여기에서 예약되지 않습니다.
+    if(automatic)for(const g of groups)if(g.status==='paused'&&g.autoResume&&!g.controlIntent){
+      g.pendingStart={requestedAt:g.autoResume.requestedAt};g.waitReason='connection_preparing';
+    }
     queueTransferOpens(instance);
     for(const owner of oldOwners)queuePendingCloses(owner);
     event('account.transferred',{accountEntityId:retained.id,instanceId:instance.id,previousInstanceIds:[...oldOwners],channelCount:byTarget.size});
+  }
+  // Discord ID 하나에 실행 연결 하나만 유지합니다. 이미 검증된 소유자는
+  // 같은 계정이 다른 프로필에 열려도 유지하고, 진행 중인 시도에는 손대지 않습니다.
+  function routeObservedAccount(instance,accountId){
+    const accounts=state.accounts.filter(a=>a.accountId===accountId);
+    const channels=state.channels.filter(c=>c.accountId===accountId);
+    if(!accounts.some(a=>a.instanceId!==instance.id))return true;
+    const configuredOwner=accounts.find(a=>channels.some(c=>c.instanceId===a.instanceId&&state.groups.some(g=>g.members.includes(c.id))))||accounts[0];
+    if(configuredOwner.instanceId!==instance.id&&currentAccount(configuredOwner))return false;
+    if(state.attempts.some(a=>a.accountId===accountId&&activeAttempt(a))||
+       state.groups.some(g=>g.controlIntent&&channels.some(c=>g.members.includes(c.id))))return false;
+    transferAccount(instance,accountId,{automatic:true});
+    return true;
   }
   function queueTransferOpens(instance){
     if(!instance.capabilities?.includes('open-channel-v1'))return;
@@ -644,7 +665,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   // 실행 요청은 연결 준비와 분리해 보존합니다. 실제 start가 검증·잠금·runId를 맡습니다.
   function requestStart(g){
     const members=g.members.map(m=>get('channels',m));
-    if(!members.every(c=>get('instances',c.instanceId).launchProfileId))return start(g);
+    if(!members.some(c=>autoLaunchBrowser(get('instances',c.instanceId)))||!members.every(c=>{const i=get('instances',c.instanceId);return autoLaunchBrowser(i)||i.connected;}))return start(g);
     if(g.status==='running')return g;
     ensure(g.enabled!==false,'GROUP_DISABLED','비활성 그룹입니다.',409);
     ensure(!g.activeAttemptId&&!state.attempts.some(a=>a.groupId===g.id&&activeAttempt(a)),'ATTEMPT_UNRESOLVED','이전 발송 결과를 대조 중입니다.',409);
@@ -652,7 +673,6 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     ensure(members.every(c=>c.playlist.length),'PLAYLIST_EMPTY','메시지를 먼저 적용하세요.',409);
     try{members.forEach(eligibleChannel);}catch(error){
       if(!['CONNECTION_LOST','ACCOUNT_UNVERIFIED','CONFIG_PENDING'].includes(error.code))throw error;
-      ensure(members.every(c=>get('instances',c.instanceId).connected||get('instances',c.instanceId).launchProfileId),'CONNECTION_LOST','브라우저 자동 실행 프로필을 지정하세요.',409);
       g.pendingStart={requestedAt:now()};g.waitReason='connection_preparing';
       event('group.connection_preparing',{groupId:g.id});return g;
     }
@@ -1119,7 +1139,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           i.legacyFrozen=message.legacyFrozen;i.legacyPending=message.legacyPending;
         }
         const deletedKey=removalKey(i.id,message.accountId);
-        if(state.removals.accounts.includes(deletedKey)){if(message.explicitRegistration!==true||!message.verified)return{ok:true,account:null,commands:commands(i.id)};state.removals.accounts=state.removals.accounts.filter(key=>key!==deletedKey);}
+        const automatic=message.verified&&message.explicitRegistration!==true&&i.capabilities?.includes(automaticAccountRouting)&&i.legacyFrozen&&!i.legacyPending;
+        if(state.removals.accounts.includes(deletedKey)){
+          if(message.verified&&message.explicitRegistration===true)state.removals.accounts=state.removals.accounts.filter(key=>key!==deletedKey);
+          else if(!automatic||!state.accounts.some(a=>a.accountId===message.accountId))return{ok:true,account:null,commands:commands(i.id)};
+        }
         if(message.verified&&message.explicitRegistration===true)transferAccount(i,message.accountId);
         const affected=accountId=>message.verified?accountId!==message.accountId:accountId===message.accountId;
         const transientReasons=new Set(['tab_loading','tab_missing','script_unavailable','identity_unverified','content_refresh_required','awaiting_observation']);
@@ -1133,6 +1157,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           incident('account_mismatch',{instanceId:i.id});
         }
         for(const c of state.commands.filter(c=>confirmedMismatch&&c.instanceId===i.id&&c.payload.accountId&&affected(c.payload.accountId)&&(['queued','received'].includes(c.status)||c.type==='OPEN_CHANNEL'&&c.status==='applied')&&['OPEN_CHANNEL','PREPARE','COMMIT_PERMIT'].includes(c.type)))c.status='superseded';
+        if(automatic){
+          if((message.knownAccountOnly===true||wasRemovedAccount(message.accountId))&&!state.accounts.some(a=>a.accountId===message.accountId))return{ok:true,account:null,commands:commands(i.id)};
+          if(!routeObservedAccount(i,message.accountId))return{ok:true,account:null,commands:commands(i.id)};
+          state.removals.accounts=state.removals.accounts.filter(key=>key!==deletedKey);
+          // 로컬 탭 등록 정보가 사라져도 활성 그룹에 저장된 채널을 중앙 목록에서 복구합니다.
+          for(const c of state.channels.filter(c=>c.instanceId===i.id&&c.accountId===message.accountId&&!c.verified&&
+            state.groups.some(g=>g.enabled!==false&&!g.controlIntent&&g.members.includes(c.id))))c.pendingTransferOpen=true;
+          queueTransferOpens(i);
+        }
         const account=message.verified?upsertAccount(i.id,message.accountId,{verified:true,sessionId:i.sessionId,accountName:message.accountName,username:message.username}):state.accounts.find(a=>a.instanceId===i.id&&a.accountId===message.accountId);
         event('account.observed',{accountEntityId:account?.id,instanceId:i.id,verified:message.verified});return{ok:true,account:account?publicAccount(account):null,commands:commands(i.id)};
       }
@@ -1146,6 +1179,8 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           ensure(Number.isInteger(observed.tabId)&&observed.tabId>=0&&!seenTabs.has(observed.tabId),'VALIDATION','Each observed channel needs its own dedicated tab.');seenTabs.add(observed.tabId);
           if(removedScope({instanceId:i.id,accountId,guildId,channelId})||state.removals.closeRequests.some(r=>r.instanceId===i.id&&r.accountId===accountId&&r.guildId===guildId&&r.channelId===channelId))continue;
           ensure(!state.attempts.some(a=>a.instanceId===i.id&&a.tabId===observed.tabId&&activeAttempt(a)&&(a.accountId!==accountId||a.channelId!==channelId||a.guildId!==guildId)),'TAB_BUSY','An unresolved attempt owns this execution tab.',409);
+          if(i.capabilities?.includes(automaticAccountRouting)&&!state.accounts.some(a=>a.accountId===accountId&&a.instanceId===i.id)&&
+             (state.accounts.some(a=>a.accountId===accountId)||wasRemovedAccount(accountId)))continue;
           let c=state.channels.find(c=>c.instanceId===i.id&&c.accountId===accountId&&c.guildId===guildId&&c.channelId===channelId);
           if(!c){const candidates=state.channels.filter(x=>x.legacyPlaceholder&&x.accountId===accountId&&x.guildId===guildId&&x.channelId===channelId);if(candidates.length===1&&i.legacyFrozen&&i.legacyPending===false){c=candidates[0];const previousInstance=c.instanceId;c.instanceId=i.id;c.legacyPlaceholder=false;c.version++;if(!state.channels.some(x=>x.instanceId===previousInstance)){
             state.instances=state.instances.filter(x=>x.id!==previousInstance);

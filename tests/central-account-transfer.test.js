@@ -203,3 +203,60 @@ test('이동한 채널 열기의 일시 실패는 30초 뒤 heartbeat로 자동 
   beat();assert.equal(f.manager.commands(f.second.instanceId).filter(c=>c.type==='OPEN_CHANNEL').length,1);
  }finally{f.manager.close();}
 });
+
+test('실제 로그인 계정을 관측하면 기존 중복을 정리하고 그룹과 문구를 자동으로 이동한다',()=>{
+ const f=fixture();try{
+  f.account(f.second,'111');f.observe(f.second,'111',9);
+  const target=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.second.instanceId,capabilities:['open-channel-v1','automatic-account-routing-v1']});
+  f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:f.first.sessionId,accountId:'111',verified:false,verificationReason:'account_mismatch'},f.first.instanceId);
+  f.account(target,'111');
+  let s=f.manager.snapshot();
+  assert.equal(s.accounts.filter(a=>a.accountId==='111').length,1);
+  assert.equal(s.channels.filter(c=>c.accountId==='111').length,1);
+  assert.deepEqual(s.groups[0].members,f.channels.map(c=>c.id));
+  assert.equal(s.channels.find(c=>c.id===f.channels[0].id).instanceId,target.instanceId);
+  assert.equal(s.channels.find(c=>c.id===f.channels[0].id).playlist.length,1);
+  f.observe(f.first,'111',1);
+  s=f.manager.snapshot();
+  assert.equal(s.channels.filter(c=>c.accountId==='111').length,1);
+ }finally{f.manager.close();}
+});
+
+test('같은 계정의 기존 검증된 연결을 재사용하고 다른 브라우저 관측만으로 복제하지 않는다',()=>{
+ const f=fixture();try{
+  const target=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.second.instanceId,capabilities:['open-channel-v1','automatic-account-routing-v1']});
+  f.account(target,'111');f.observe(target,'111',9);
+  const s=f.manager.snapshot();
+  assert.equal(s.accounts.filter(a=>a.accountId==='111').length,1);
+  assert.equal(s.channels.filter(c=>c.accountId==='111').length,1);
+  assert.equal(s.channels.find(c=>c.accountId==='111').instanceId,f.first.instanceId);
+ }finally{f.manager.close();}
+});
+
+test('두 브라우저의 계정이 바뀌어도 모두 실행은 새 연결의 설정 ACK까지 기다린다',()=>{
+ const f=fixture();try{
+  const reload=owner=>f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:owner.instanceId,browser:'Chrome',capabilities:['open-channel-v1','close-channel-v1','automatic-account-routing-v1']});
+  const first=reload(f.first),second=reload(f.second);
+  f.account(first,'444');f.account(second,'111');
+  let s=f.manager.snapshot();
+  assert.deepEqual(s.groups[0].members,f.channels.map(c=>c.id));
+  assert.equal(s.accounts.length,2);
+  assert.equal(s.channels.find(c=>c.accountId==='111').instanceId,second.instanceId);
+  assert.equal(s.channels.find(c=>c.accountId==='444').instanceId,first.instanceId);
+  assert.equal(s.commands.filter(c=>c.type==='CLOSE_CHANNEL'&&c.payload.detachOnly===true).length,2);
+  const result=f.manager.execute('service.startAll',{});
+  assert.equal(result.queuedForRecovery,1);
+  f.manager.tick();
+  assert.equal(f.manager.snapshot().attempts.length,0);
+  f.observe(first,'444',10);f.observe(second,'111',20);
+  for(const owner of [first,second]){
+   const config=f.manager.commands(owner.instanceId).findLast(cmd=>cmd.type==='CONFIG_SYNC');
+   assert.ok(config);
+   f.manager.bridge({type:'ACK',sessionId:owner.sessionId,commandId:config.id,status:'applied'},owner.instanceId);
+  }
+  f.manager.tick();s=f.manager.snapshot();
+  assert.equal(s.groups[0].status,'running');
+  assert.equal(s.attempts[0].instanceId,second.instanceId);
+  assert.equal(s.attempts[0].accountId,'111');
+ }finally{f.manager.close();}
+});

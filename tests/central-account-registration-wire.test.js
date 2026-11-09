@@ -55,3 +55,13 @@ test('초기화 이후 늦게 저장된 이전 세대의 계정·채널은 관�
  const r=rig();await r.registerActiveAccount();r.saved.dicoCentralTabs=[{accountId:'123456789012345678',guildId:'111',channelId:'222',tabId:7}];r.executor.state.resetEpoch=1;
  const snapshot=await r.collectObservation();assert.equal(snapshot.account,null);assert.equal(snapshot.channels.length,0);
 });
+test('이미 로그인한 실제 계정을 저장된 브라우저 계정과 달라도 자동 관측한다',async()=>{
+ const r=rig();
+ await r.registerActiveAccount();
+ r.requests.length=0;
+ r.setSeen({verified:true,accountId:'876543210987654321'});
+ await r.publishObservation(await r.collectObservation());
+ assert.equal(r.requests[0].accountId,'876543210987654321');
+ assert.equal(r.requests[0].verified,true);
+ assert.equal(r.requests[0].explicitRegistration,undefined);
+});

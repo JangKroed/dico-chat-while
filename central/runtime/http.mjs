@@ -154,8 +154,11 @@ export function createCentralApplication({manager,browserPreparation,origin='htt
           return json(res,200,await updates.status());
         }
         if(path==='/api/browser-profiles'&&req.method==='GET'){
-          if(mode!=='local'||!browserPreparation)throw fail(404,'중앙 PC에서 브라우저 프로필을 설정하세요.');
-          return json(res,200,{profiles:await browserPreparation.list(),preparation:browserPreparation.status()});
+          if(!browserPreparation)throw fail(404,'브라우저 자동 연결이 준비되지 않았습니다.');
+          const preparation=browserPreparation.status();
+          if(url.searchParams.get('status')==='1')return json(res,200,{preparation});
+          if(mode!=='local')throw fail(404,'중앙 PC의 브라우저 프로필 목록은 로컬에서만 확인할 수 있습니다.');
+          return json(res,200,{profiles:await browserPreparation.list(),preparation});
         }
         if (path==='/api/snapshot' && req.method==='GET')return json(res,200,manager.snapshot());
         if (path==='/api/support/report' && req.method==='GET'){

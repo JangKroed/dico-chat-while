@@ -53,3 +53,11 @@ test('계정 브라우저 배정은 그룹·메시지 연결을 유지하고 현
  f.manager.execute('account.assignBrowser',{id:a.id,expectedVersion:a.version,instanceId:target.instanceId});const s=f.manager.snapshot();
  assert.equal(s.accounts[0].instanceId,target.instanceId);assert.equal(s.accounts[0].verified,false);assert.equal(s.channels[0].id,before.channels[0].id);assert.equal(s.channels[0].instanceId,target.instanceId);assert.deepEqual(s.channels[0].playlist,before.channels[0].playlist);assert.deepEqual(s.groups[0].members,before.groups[0].members);
 });
+test('수동 프로필을 저장하지 않은 Chrome도 시작 요청을 유지한다',t=>{
+ const f=configured(t),i=f.manager.snapshot().instances[0];
+ f.manager.execute('instance.setLaunchProfile',{id:i.id,expectedVersion:i.version,profileId:null});
+ f.manager.bridge({type:'DISCONNECT',sessionId:f.c.sessionId},f.c.instanceId);
+ f.manager.execute('group.start',{id:f.g.id});
+ assert.ok(f.manager.snapshot().groups[0].pendingStart);
+ assert.equal(f.manager.snapshot().attempts.length,0);
+});

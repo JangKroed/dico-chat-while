@@ -1,9 +1,24 @@
-import {useEffect,useState} from 'react'
-import {getBrowserProfiles,type BrowserProfile,type Instance} from './api'
-export function BrowserLaunchProfile({instance,busy,run}:{instance:Instance;busy:boolean;run:(action:string,payload:Record<string,unknown>,success?:string)=>Promise<unknown>}){
- const [profiles,setProfiles]=useState<BrowserProfile[]>([]),[value,setValue]=useState(String(instance.launchProfileId||'')),[error,setError]=useState(''),[progress,setProgress]=useState('')
- useEffect(()=>{setValue(String(instance.launchProfileId||''))},[instance.launchProfileId])
- useEffect(()=>{let current=true;const load=()=>getBrowserProfiles().then(data=>{if(current){setProfiles(data.profiles);setError('');setProgress(data.preparation.find(p=>p.instanceId===instance.id)?.state||'')}}).catch(()=>{if(current)setError('자동 실행 프로필은 중앙 PC에서 확인할 수 있습니다.')});void load();const timer=setInterval(()=>void load(),10000);return()=>{current=false;clearInterval(timer)}},[instance.id])
- const states:Record<string,string>={opening:'브라우저 여는 중',waiting_connection:'브라우저를 열었습니다. 확장 연결과 등록 계정 확인을 기다립니다.',profile_missing:'저장한 프로필을 찾지 못했습니다. 30초 간격으로 다시 확인합니다.',launch_failed:'브라우저를 열지 못했습니다. 30초 간격으로 자동 재시도합니다.'}
- return <div className="editor-note"><label>자동 실행 프로필<select aria-label={`${instance.name} 자동 실행 프로필`} value={value} disabled={busy||!!error} onChange={e=>setValue(e.target.value)}><option value="">자동 실행 사용 안 함</option>{profiles.filter(p=>p.browser===instance.browser).map(p=><option key={p.id} value={p.id}>{p.browser} · {p.name} ({p.profile})</option>)}</select></label><small>이 연결에 등록한 Discord 계정으로 로그인한 프로필을 선택하세요. 계정이 다르면 발송하지 않습니다.</small><button className="outline small" disabled={busy||!!error||value===String(instance.launchProfileId||'')} onClick={()=>void run('instance.setLaunchProfile',{id:instance.id,expectedVersion:instance.version,profileId:value||null},'자동 실행 프로필을 저장했습니다.')}>프로필 저장</button>{(error||progress)&&<p role="status">{error||states[progress]||'연결 준비 중'}</p>}</div>
+import { useEffect, useState } from 'react'
+import { getBrowserPreparation, type Instance } from './api'
+
+const states: Record<string, string> = {
+  opening: '브라우저 여는 중',
+  waiting_connection: '확장 연결과 로그인 확인 중',
+  waiting_account: '로그인 계정 확인 대기',
+  profile_missing: 'DICO가 설치된 프로필을 찾는 중',
+  launch_failed: '브라우저 열기를 자동으로 다시 시도합니다',
+}
+
+export function BrowserLaunchProfile({instance}: {instance: Instance}) {
+  const [progress, setProgress] = useState('')
+  useEffect(() => {
+    let current = true
+    const refresh = () => void getBrowserPreparation().then(data => {
+      if(current) setProgress(data.preparation.find(item => item.instanceId === instance.id)?.state || '')
+    }).catch(() => {})
+    refresh()
+    const timer = setInterval(refresh, 5000)
+    return () => {current = false; clearInterval(timer)}
+  }, [instance.id])
+  return progress ? <small role="status">{states[progress] || '연결 준비 중'}</small> : null
 }

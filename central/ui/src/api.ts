@@ -178,5 +178,4 @@ export const getSupportInbox=(signal?:AbortSignal)=>request<{items:SupportInboxI
 export const getSupportInboxReport=(id:string,signal?:AbortSignal)=>request<import('./support-report').SupportInspection>(`/api/support/inbox/${encodeURIComponent(id)}`,{signal:signal??AbortSignal.timeout(20000)})
 export const createSupportReceiverKey=(signal?:AbortSignal)=>request<{token:string}>('/api/support/receiver-key',{method:'POST',body:'{}',signal:signal??AbortSignal.timeout(10000)})
 
-export type BrowserProfile={id:string;browser:string;profile:string;name:string}
-export const getBrowserProfiles=()=>request<{profiles:BrowserProfile[];preparation:{instanceId:string;state:string}[]}>("/api/browser-profiles")
+export const getBrowserPreparation=()=>request<{preparation:{instanceId:string;state:string}[]}>("/api/browser-profiles?status=1")
