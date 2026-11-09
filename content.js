@@ -396,15 +396,18 @@
   }
   function slowmode(editor) {
     const form = editor?.closest('form') || editor?.parentElement;
-    // Discord의 카운트다운 텍스트 변형을 같은 입력창 범위에서 함께 읽는다.
-    // 일반 채팅 본문이나 다른 입력창의 시간 표시는 발송 제한으로 사용하지 않는다.
-    const selector = '[class*="slowModeCooldown"], [class*="slowmodeCooldown"], [class*="cooldownText"]';
+    // 전용 카운트다운의 읽기 실패는 보존한다. 일반 cooldown 안내는 시간 표기가 있을 때만 채택한다.
+    const selector = '[class*="slowModeCooldown"], [class*="slowmodeCooldown"]';
     const candidates = [...(form?.querySelectorAll?.(selector) || [])];
+    const alternatives = [...(form?.querySelectorAll?.('[class*="cooldownText"], [class*="cooldownWrapper"]') || [])];
+    for (const node of alternatives) {
+      if (!candidates.includes(node) && /(?:^|\s)\d{1,3}:\d{2}(?:\s|$)/.test((node.textContent || '').trim())) candidates.push(node);
+    }
     const nodes = candidates.filter(node => node.getClientRects().length > 0);
     let seconds = 0,cooldownKnown=true;
     for (const node of nodes) {
       const text = (node.textContent || '').trim();
-      const match = text.match(/^(?:(\d{1,2}):)?(\d{1,3}):(\d{2})$/);
+      const match = text.match(/(?:^|\s)(?:(\d{1,2}):)?(\d{1,3}):(\d{2})(?:\s|$)/);
       if (!match || Number(match[3]) > 59 || (match[1] && Number(match[2]) > 59)) {cooldownKnown=false;continue;}
       seconds = Math.max(seconds, Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     }

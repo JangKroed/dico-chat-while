@@ -1003,3 +1003,13 @@ test('cooldownText 표시를 읽어 제한 종료 전 Enter를 보내지 않고 
  assert.equal(enters.length,1);assert.ok(enters[0].at>=unlock);
  assert.equal(r.events.filter(e=>e.type==='paste').length,1);
 });
+
+
+test('cooldownText의 일반 안내는 판독 실패로 실행을 차단하지 않는다',async()=>{
+ const r=rig({managed:true,cooldownClass:'cooldownText'});
+ r.cooldown('슬로우 모드가 활성화되었습니다.');
+ await r.request('DICO_PREPARE');r.tick(3000);
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');
+ assert.equal(r.events.filter(e=>e.type==='keydown').length,1);
+});
