@@ -992,7 +992,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
         for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a)))markUnknown(a,'connection_lost');
         for(const g of state.groups.filter(g=>g.status==='running'&&g.members.some(m=>get('channels',m).instanceId===i.id))){g.waitReason='connection_lost';incident('connection_lost',{instanceId:i.id});}
-        event('instance.disconnected',{instanceId:i.id});return{ok:true};
+        event('instance.disconnected',{instanceId:i.id,reasonCode:'transport_disconnect'});return{ok:true};
       }
       if(message.type==='ACCOUNT_OBSERVATION'){
         ensure(typeof message.verified==='boolean','VALIDATION','Account verification must be true or false.');
@@ -1278,7 +1278,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       blockInstanceGroups(i.id,'connection_lost');i.connected=false;invalidateAccounts(i.id);for(const c of state.channels.filter(c=>c.instanceId===i.id))c.verified=false;
       for(const a of state.attempts.filter(a=>a.instanceId===i.id&&activeAttempt(a)))markUnknown(a,'connection_lost');
       if(state.groups.some(g=>g.status==='running'&&g.members.some(m=>get('channels',m).instanceId===i.id)))incident('connection_lost',{instanceId:i.id});
-      event('instance.disconnected',{instanceId:i.id});
+      event('instance.disconnected',{instanceId:i.id,reasonCode:'heartbeat_timeout',lastBridgeMessageAgeMs:Math.round(mono-i.lastSeenMono)});
     }
     for(const i of state.instances.filter(i=>i.connected&&mono-(i.stableSinceMono??mono)>=30000)){
       for(const problem of state.incidents.filter(problem=>problem.status==='open'&&problem.instanceId===i.id&&problem.code==='connection_lost')){

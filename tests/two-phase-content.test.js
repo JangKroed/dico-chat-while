@@ -13,15 +13,18 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  let messageScanCount=0,messageRowsVisited=0;
  const nodes=[],events=[],traces=[],requests=[];let traceHook=null,waitHook=null,authorizationHook=null,retryHook=null,runtimeHook=null,tickHook=null,submitHook=null;let editorPresent=true,replacementEditor=null;
+ const keyCapture=new Set(),keyBubble=new Set();
  const form={isConnected:true,querySelector:()=>attachment?{}:null,querySelectorAll:()=>{const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=range.editor||editor;this.focusNode=range.editor||editor;this.isCollapsed=range.collapsed}};
  const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>unsupported?{}:null,closest:()=>form,contains(n){return n===this;},focus(){document.activeElement=this},dispatchEvent(event){
   events.push({type:event.type,at:clock,selectionCollapsed:selection.isCollapsed});
   if(event.type==='paste'){pasteText=event.clipboardData.text;pasteDue=clock+lag;event.defaultPrevented=true;if(prepareDelay)nextDelay=prepareDelay;}
   if(event.type==='keydown'){
+   for(const fn of keyCapture)fn(event);
    if(ignoreEnter||events.filter(e=>e.type==='keydown').length<=ignoreFirstEnters)return true;
    assert.equal(this.innerText.trim(),convertAliases?delivery.text.replaceAll(emojiName,emojiValue):delivery.text);event.defaultPrevented=true;this.innerText='';
    submitHook?.();if(!noPostedMessage)nodes.push({id:'message-content-'+((BigInt(clock)-1420070400000n)<<22n),innerText:renderMessage(delivery.text),closest:()=>({querySelector:()=>null,matches:()=>false,querySelectorAll:()=>[{getAttribute:()=>'/avatars/123456789012345678/a.png'}]})});check?.();
+   for(const fn of keyBubble)fn(event);
   }
   if(event.type==='keyup'&&throwAfterEnter)throw Error('Synthetic post-Enter DOM failure');
  }};
@@ -39,6 +42,9 @@ function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,struc
  if(fault==='selection_outside')selection.anchorNode=null;
  if(fault==='composing')composition();
  if(fault==='editor_detached')editor.isConnected=false;}};
+ const addListener=document.addEventListener;
+ document.addEventListener=(type,fn,capture)=>type==='keydown'?(capture?keyCapture:keyBubble).add(fn):addListener(type,fn);
+ document.removeEventListener=(type,fn,capture)=>{if(type==='keydown')(capture?keyCapture:keyBubble).delete(fn);};
  if(structured){
   let actualText='';Object.defineProperty(editor,'innerText',{get:()=>actualText?'\n'+actualText+'\n':'',set:value=>{actualText=value;}});
   editor.querySelector=selector=>selector.includes('data-slate-void')?{}:null;
@@ -938,6 +944,9 @@ test('같은 초안이 반복해서 남을 때만 재시도 간격을 늘리고 
  assert.equal(dispatched.length,6);
  assert.equal(dispatched[0].data.enterPrevented,false);
  assert.equal(dispatched[0].data.cooldownKnown,true);
+ assert.deepEqual(dispatched.map(({data})=>[data.keyDownDocumentCapture,data.keyDownDocumentBubble]),[
+  [true,false],[true,false],[true,false],[true,false],[true,false],[true,true],
+ ]);
  assert.equal(r.events.filter(x=>x.type==='paste').length,1);
  assert.equal(r.traces.find(x=>x.stage==='finished').data.result,'confirmed');
 

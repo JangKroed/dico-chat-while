@@ -38,3 +38,24 @@ test('계정 또는 직전 발송 간격이 다르면 브라우저 원인을 판
   assert.deepEqual(result.sameAccountChannelComparisons,[]);
  }
 });
+
+test('같은 계정·채널의 직전 POST와 실제 Enter로 지연 구간을 집계한다',()=>{
+ const state={instances:[{id:'brave',browser:'Brave'}],attempts:[]},events=[];
+ for(const [i,post,enter] of [[1,100000,99990],[2,220000,166000],[3,287000,286990]]){
+  const id='private-'+i;
+  state.attempts.push({id,instanceId:'brave',accountId:'account',guildId:'guild',channelId:'channel',status:'confirmed',finalizedAt:post+100});
+  for(const [stage,observedAt,data] of [
+   ['before-enter',enter-500,{retryCount:0,networkObserverReady:true}],
+   ['enter-dispatched',enter,{retryCount:0,keyDownDocumentCapture:true,keyDownDocumentBubble:false}],
+   ['network-start',post,{networkOrdinal:1,retryCount:i===2?17:0}],
+   ['network-result',post+50,{networkOrdinal:1,httpStatus:200}],
+  ])events.push({attemptId:id,stage,observedAt,data});
+ }
+ const result=compareSubmitTraces(state,events);
+ assert.deepEqual(result.observations.Brave.priorPostTiming,{
+  delayed:{samples:1,firstEnterMedianMs:66000,postMedianMs:120000},
+  prompt:{samples:1,firstEnterMedianMs:66990,postMedianMs:67000},
+ });
+ assert.deepEqual(result.observations.Brave.firstKeyRoute,{samples:3,capture:3,bubble:0});
+ assert.doesNotMatch(JSON.stringify(result),/private-/);
+});

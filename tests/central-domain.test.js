@@ -33,6 +33,18 @@ function fixture(options = {}) {
   return { manager, connect, message, apply, group, start, prepared, result, advance, jumpWall: ms => { time += ms; } };
 }
 
+test('연결 진단은 명시적 종료와 중앙 응답 만료를 구분한다',t=>{
+ const f=fixture();t.after(()=>f.manager.close());
+ const a=f.connect('A'),b=f.connect('B');
+ f.manager.bridge({type:'DISCONNECT',sessionId:a.sessionId},a.instanceId);
+ for(let i=0;i<3;i++){f.advance(6000);f.manager.tick();}
+ const events=f.manager.events({type:'instance.disconnected'});
+ assert.equal(events.find(e=>e.instanceId===a.instanceId).reasonCode,'transport_disconnect');
+ const timeout=events.find(e=>e.instanceId===b.instanceId);
+ assert.equal(timeout.reasonCode,'heartbeat_timeout');
+ assert.equal(timeout.lastBridgeMessageAgeMs,18000);
+});
+
 test('message revisions stay immutable, validate content and reject stale editors', () => {
   const f = fixture(); const m = f.message('Original');
   const updated = f.manager.execute('message.update', { id: m.id, expectedVersion: 1, body: 'Updated' });
