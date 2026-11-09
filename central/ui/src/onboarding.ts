@@ -12,10 +12,10 @@ export function browserOnline(i:Instance|undefined,now=Date.now()) {
   const lastSeen=i?.lastSeenAt===undefined?NaN:new Date(i.lastSeenAt).getTime()
   return Boolean(i&&(i.connected||i.status==='connected')&&Number.isFinite(lastSeen)&&now-lastSeen<=15000)
 }
-export function accountReady(s:Snapshot,a:Account,now=Date.now()) {
+export function accountReady(s:Snapshot,a:Account,now=s.serverNow??Date.now()) {
   return a.verified&&browserOnline(s.instances.find(i=>i.id===a.instanceId),now)
 }
-export function bindingBlockers(s:Snapshot,c:Channel,now=Date.now()):string[] {
+export function bindingBlockers(s:Snapshot,c:Channel,now=s.serverNow??Date.now()):string[] {
   const reasons:string[]=[]
   const instance=s.instances.find(i=>i.id===c.instanceId)
   if(!browserOnline(instance,now))reasons.push('브라우저 연결 필요')
@@ -27,7 +27,7 @@ export function bindingBlockers(s:Snapshot,c:Channel,now=Date.now()):string[] {
   if(c.playlist.length&&c.configVersion!==c.appliedVersion)reasons.push('확장 적용 확인 대기')
   return reasons
 }
-export function groupBlockers(s:Snapshot,g:Group,now=Date.now()):string[] {
+export function groupBlockers(s:Snapshot,g:Group,now=s.serverNow??Date.now()):string[] {
   const reasons:string[]=[]
   if(g.enabled===false)reasons.push('비활성 그룹입니다. 먼저 활성화하세요.')
   if(!g.members.length)reasons.push('참여 계정 필요')
@@ -36,7 +36,7 @@ export function groupBlockers(s:Snapshot,g:Group,now=Date.now()):string[] {
   for(const id of g.members){const c=s.channels.find(c=>c.id===id);reasons.push(...(c?bindingBlockers(s,c,now):['채널 연결 필요']))}
   return [...new Set(reasons)]
 }
-export function allRunBlockers(s:Snapshot,now=Date.now()):string[] {
+export function allRunBlockers(s:Snapshot,now=s.serverNow??Date.now()):string[] {
   const reasons=s.groups.filter(g=>g.enabled!==false&&g.status!=='running').flatMap(g=>{
     if(g.autoResume?.reasonCode==='delivery_recovery_requested')return []
     const active=s.attempts?.find(a=>a.id===g.activeAttemptId)
@@ -52,7 +52,7 @@ export function allRunBlockers(s:Snapshot,now=Date.now()):string[] {
   }
   return [...new Set(reasons)]
 }
-export function setupSteps(s:Snapshot,now=Date.now()) {
+export function setupSteps(s:Snapshot,now=s.serverNow??Date.now()) {
   const accounts=registeredAccounts(s),targets=logicalTargets(s)
   const bound=s.channels.filter(c=>c.verified&&browserOnline(s.instances.find(i=>i.id===c.instanceId),now)&&accounts.some(a=>a.instanceId===c.instanceId&&a.accountId===c.accountId&&a.verified))
   const applied=s.channels.filter(c=>bindingBlockers(s,c,now).length===0)
@@ -71,7 +71,7 @@ export function pendingConnection(s:Snapshot,a:Account,t:Target) {
   })
 }
 
-export function selectableConnectionAccountIds(s:Snapshot,target:Target|undefined,now=Date.now()):string[] {
+export function selectableConnectionAccountIds(s:Snapshot,target:Target|undefined,now=s.serverNow??Date.now()):string[] {
   if(!target||target.id.startsWith('legacy:'))return []
   return registeredAccounts(s).filter(a=>!a.id.startsWith('legacy:')&&accountReady(s,a,now)&&!pendingConnection(s,a,target)&&!s.channels.some(c=>c.guildId===target.guildId&&c.channelId===target.channelId&&c.instanceId===a.instanceId&&c.accountId===a.accountId&&c.verified)).map(a=>a.id)
 }

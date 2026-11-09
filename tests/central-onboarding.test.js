@@ -79,3 +79,12 @@ test('실행 차단이 확인된 이전 발송은 모두 실행을 막지 않고
  s.attempts[0].executionBlocked=false;
  assert.ok(allRunBlockers(s,now).includes('진행·미확인 시도 확인 필요'));
 });
+
+test('화면 PC 시간이 달라도 연결 선택은 중앙 시각을 사용한다',async()=>{
+ const {accountReady,selectableConnectionAccountIds}=await import('../central/ui/src/onboarding.ts');
+ const s=snapshot();s.serverNow=now;s.channels=[];
+ assert.equal(accountReady(s,s.accounts[0]),true);
+ assert.deepEqual(selectableConnectionAccountIds(s,s.targets[0]),['a']);
+ s.instances[0].lastSeenAt=now-16000;
+ assert.equal(accountReady(s,s.accounts[0]),false);
+});

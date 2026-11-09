@@ -57,3 +57,10 @@ test('separation is offered only by connected extensions with the separation cap
  s.instances[0].capabilities.push('managed-window-separation-v1');assert.equal(managedWindowSeparationAvailable(s,channel),true);
  s.instances[0].connected=false;assert.equal(managedWindowSeparationAvailable(s,channel),false);
 });
+
+test('전송 창 표시 가능 여부도 중앙의 응답 시각으로 판정한다',()=>{
+ const s=snapshot();s.serverNow=1700000000000;s.instances[0].lastSeenAt=s.serverNow;
+ assert.equal(managedWindowAvailable(s,s.channels[0]),true);
+ s.instances[0].lastSeenAt-=16000;
+ assert.equal(managedWindowAvailable(s,s.channels[0]),false);
+});

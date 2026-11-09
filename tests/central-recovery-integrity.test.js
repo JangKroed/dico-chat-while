@@ -35,6 +35,7 @@ import {readFile} from 'node:fs/promises';
 const background=await readFile(new URL('../central/extension/background.js',import.meta.url),'utf8');
 function backgroundFunction(name,next,deps){
  const source=background.slice(background.indexOf(`async function ${name}(`),background.indexOf(`async function ${next}(`));
+ if(name==='runHeartbeat'&&!deps.maintenance)deps.maintenance=async()=>{await deps.refreshManagedContent?.();try{await deps.observation?.();}catch{}};
  return new Function(...Object.keys(deps),`${source};return ${name};`)(...Object.values(deps));
 }
 test('real background opener cleans up creation completed after emergency stop without persisting tabs',async()=>{
@@ -98,4 +99,31 @@ test('느린 업데이트 조회 중에도 heartbeat와 중지 명령 수신을 
  const running=run();await new Promise(resolve=>setImmediate(resolve));
  const observed={heartbeats,commands};release();await running;
  assert.deepEqual(observed,{heartbeats:1,commands:1});
+});
+
+
+test('느린 탭 관찰 중에도 다음 heartbeat와 중지 명령을 처리한다',async()=>{
+ let release;const gate=new Promise(resolve=>{release=resolve;});let requests=0,commands=0,observations=0;
+ const executor={state:{sessionId:'s',attempts:{}},request:async()=>{requests++;return{commands:[{type:'CONTROL'}]};},save:async()=>{},handleCommand:()=>commands++};
+ const deps={executor,transport:{connected:true,disconnect:()=>{}},updater:{check:async()=>{}},refreshManagedContent:async()=>{},observation:async()=>{observations++;await gate;},automaticRecovery:{run:async()=>{}},lastError:null,connecting:null};
+ // 실제 background 함수로 느린 관찰이 연결 유지 요청을 붙잡는지 확인합니다.
+ const source=background.slice(background.indexOf('async function runHeartbeat()'),background.indexOf('async function connect('));
+ const maintenanceSource=background.includes('async function runMaintenance()')?background.slice(background.indexOf('async function runMaintenance()'),background.indexOf('async function runHeartbeat()')):'';
+ const {createSingleFlight}=await import('../central/extension/observation-queue.js');
+ const run=new Function(...Object.keys(deps),'createSingleFlight',`${maintenanceSource};const maintenance=typeof runMaintenance==='function'?createSingleFlight(runMaintenance):undefined;${source};return createSingleFlight(runHeartbeat);`)(...Object.values(deps),createSingleFlight);
+ const first=run();await new Promise(resolve=>setImmediate(resolve));const second=run();await new Promise(resolve=>setImmediate(resolve));
+ const observed={requests,commands,observations};release();await Promise.all([first,second]);
+ assert.deepEqual(observed,{requests:2,commands:2,observations:1});
+});
+
+test('탭 검사 오류는 정상 Native 연결을 해제하지 않고 다음 관찰을 허용한다',async()=>{
+ let disconnected=0,observed=0;
+ const deps={executor:{state:{sessionId:'s'},isMaintenanceIdle:true},transport:{connected:true,disconnect:()=>disconnected++},connecting:null,lastError:null,refreshManagedContent:async()=>{},observation:async()=>{observed++;throw Error('tab temporarily unavailable');}};
+ const run=backgroundFunction('runMaintenance','runHeartbeat',deps);
+ await run();await run();assert.equal(observed,2);assert.equal(disconnected,0);
+});
+test('탭 확인 도중 세션이 바뀌면 이전 세션의 복구를 실행하지 않는다',async()=>{
+ let repaired=0;const executor={state:{sessionId:'old'},isMaintenanceIdle:true};
+ const run=backgroundFunction('runMaintenance','runHeartbeat',{executor,transport:{connected:true},connecting:null,lastError:null,refreshManagedContent:async()=>{},observation:async()=>{executor.state.sessionId='new';},automaticRecovery:{run:async()=>repaired++}});
+ await run();assert.equal(repaired,0);
 });

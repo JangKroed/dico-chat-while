@@ -1,10 +1,13 @@
+export type ActionPhase='submitting'|'refreshing'
 /**
  * 접수된 명령과 화면 갱신은 서로 다른 작업입니다.
  * 명령 성공 뒤 조회만 실패한 경우 저장/중단을 다시 요청하게 만들지 않습니다.
  * 반환값 refreshed=false는 명령 실패가 아니라 다음 상태 갱신을 기다린다는 뜻입니다.
  */
-export async function submitAndRefresh<T>(submit:()=>Promise<T>,refresh:()=>Promise<void>) {
+export async function submitAndRefresh<T>(submit:()=>Promise<T>,refresh:()=>Promise<void>,onPhase?:(phase:ActionPhase)=>void) {
+  onPhase?.('submitting')
   const response=await submit()
+  onPhase?.('refreshing')
   try{await refresh();return {response,refreshed:true}}
   catch{return {response,refreshed:false}}
 }
