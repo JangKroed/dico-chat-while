@@ -68,7 +68,8 @@ export function compareSubmitTraces(state,events,{since=0}={}) {
   if(typeof build!=='string'||!/^[a-f0-9]{64}$/.test(build))continue;
   if(!prior||!a.accountId||!a.guildId||!a.channelId||!a.revisionId||typeof enter.data.pageHidden!=='boolean'||typeof enter.data.documentFocused!=='boolean')continue;
   const age=enter.observedAt-prior;
-  if(age<0||age>300000||enter.data.cooldownKnown!==true||!Number.isFinite(enter.data.cooldownMs))continue;
+  // 표시 부재를 제한 해제와 동일한 대조 조건으로 집계하지 않는다.
+  if(age<0||age>300000||enter.data.cooldownEvidence!=='countdown'||enter.data.cooldownKnown!==true||!Number.isFinite(enter.data.cooldownMs))continue;
   const condition=JSON.stringify([accountChannel,a.revisionId,build,Math.round(age/5000),enter.data.pageHidden,enter.data.documentFocused,enter.data.cooldownMs,enter.data.slowmodeDetected===true]);
   const strata=matched.get(condition)||{Chrome:[],Brave:[]};
   strata[browser].push(delay);

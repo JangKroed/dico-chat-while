@@ -7,14 +7,14 @@ import {deliveryTraceEvent,appendDiagnostics} from '../diagnostics.js';
 import {createCentralManager} from '../central/core/index.js';
 import {createCentralExecutor} from '../central/extension/executor.js';
 const source=readFileSync(new URL('../emoji-data.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../content.js',import.meta.url),'utf8');
-function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',maxSendRetries=5,emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,noPostedMessage=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,attachment=false,unsupported=false}={}) {
+function rig({guildId='123',channelId='456',lag=0,fault=null,managed=false,structured=false,message='A',maxSendRetries=5,emojiName=null,emojiValue=null,convertAliases=false,loggedUser=null,defaultAvatar=false,authorizationLag=0,confirmation=false,noPostedMessage=false,renderMessage=text=>text,ignoreEnter=false,ignoreFirstEnters=0,throwAfterEnter=false,prepareDelay=0,pageTimerDelay=0,workerDelayFails=false,lateCooldown=null,cooldownClass=null,attachment=false,unsupported=false}={}) {
  let commitAuthorizations=0;
  let nextDelay=0,onDelayed=null,repeatDelay=false;
  let clock=1800000000000,listener,check,allowed=true,pasteDue=null,pasteText='',cooldown='',composition;
  let messageScanCount=0,messageRowsVisited=0;
  const nodes=[],events=[],traces=[],requests=[];let traceHook=null,waitHook=null,authorizationHook=null,retryHook=null,runtimeHook=null,tickHook=null,submitHook=null;let editorPresent=true,replacementEditor=null;
  const keyCapture=new Set(),keyBubble=new Set();
- const form={isConnected:true,querySelector:()=>attachment?{}:null,querySelectorAll:()=>{const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
+ const form={isConnected:true,querySelector:()=>attachment?{}:null,querySelectorAll:selector=>{if(cooldownClass&&!selector.includes(cooldownClass))return [];const current=typeof cooldown==='function'?cooldown(clock):cooldown;return current?(Array.isArray(current)?current:[current]).map(textContent=>({textContent,getClientRects:()=>[1]})):[];}};
  const selection={anchorNode:null,focusNode:null,isCollapsed:true,rangeCount:1,removeAllRanges(){},addRange(range){this.anchorNode=range.editor||editor;this.focusNode=range.editor||editor;this.isCollapsed=range.collapsed}};
  const editor={innerText:'',isConnected:true,getClientRects:()=>[1],getAttribute:()=>null,querySelector:()=>unsupported?{}:null,closest:()=>form,contains(n){return n===this;},focus(){document.activeElement=this},dispatchEvent(event){
   events.push({type:event.type,at:clock,selectionCollapsed:selection.isCollapsed});
@@ -975,4 +975,31 @@ test('읽기 전용 복구는 다른 초안이 있어도 중지 전의 확인된
  assert.notEqual((await query({from:from-1000,until:from-1})).status,'confirmed');
  r.account('999999999999999999');
  assert.notEqual((await query({from,until})).status,'confirmed');
+});
+
+test('슬로우모드 표시 부재와 명시적 0초를 진단 근거에서 구분한다',async()=>{
+ const r=rig({managed:true});
+ const absent=await r.request('DICO_INSPECT');
+ assert.equal(absent.cooldownEvidence,'absent');
+ r.cooldown('00:00');
+ const zero=await r.request('DICO_INSPECT');
+ assert.equal(zero.cooldownEvidence,'countdown');
+ assert.equal(zero.cooldownMs,0);
+ r.cooldown('해석 불가');
+ assert.equal((await r.request('DICO_INSPECT')).cooldownEvidence,'unreadable');
+});
+
+
+test('cooldownText 표시를 읽어 제한 종료 전 Enter를 보내지 않고 종료 후 같은 차례를 진행한다',async()=>{
+ const r=rig({managed:true,cooldownClass:'cooldownText'});
+ r.delivery.strictAuthorization=true;
+ await r.request('DICO_PREPARE');r.tick(3000);
+ const unlock=r.now()+8000;
+ r.cooldown(now=>now<unlock?'00:'+String(Math.ceil((unlock-now)/1000)).padStart(2,'0'):'');
+ assert.equal((await r.request('DICO_INSPECT')).cooldownMs,8000);
+ const result=await r.request('DICO_DELIVER');
+ assert.equal(result.status,'confirmed');
+ const enters=r.events.filter(e=>e.type==='keydown');
+ assert.equal(enters.length,1);assert.ok(enters[0].at>=unlock);
+ assert.equal(r.events.filter(e=>e.type==='paste').length,1);
 });
