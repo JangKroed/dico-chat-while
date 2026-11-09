@@ -5,7 +5,9 @@ import {browserOnline} from './onboarding.ts'
 export function operationalSummary(s:Snapshot,stale=false){
  const running=s.groups.filter(g=>g.status==='running')
  const nextGroup=stale?undefined:[...running].filter(g=>g.nextEligibleAt!=null&&Number.isFinite(new Date(g.nextEligibleAt).getTime())).sort((a,b)=>new Date(a.nextEligibleAt!).getTime()-new Date(b.nextEligibleAt!).getTime())[0]
- return {running:running.length,connectedAccounts:stale?0:(s.accounts||[]).filter(a=>a.verified&&browserOnline(s.instances.find(i=>i.id===a.instanceId),s.serverNow??Date.now())).length,confirmed:s.attempts.filter(a=>a.status==='confirmed').length,nextGroup}
+ const accounts=s.accounts||[],identity=(a:typeof accounts[number])=>a.accountId||a.id
+ const connected=new Set(accounts.filter(a=>a.verified&&browserOnline(s.instances.find(i=>i.id===a.instanceId),s.serverNow??Date.now())).map(identity))
+ return {running:running.length,enabledGroups:s.groups.filter(g=>g.enabled!==false).length,disabledGroups:s.groups.filter(g=>g.enabled===false).length,totalAccounts:new Set(accounts.map(identity)).size,connectedAccounts:stale?0:connected.size,unconfirmed:s.attempts.filter(a=>a.status==='unknown').length,confirmed:s.attempts.filter(a=>a.status==='confirmed').length,nextGroup}
 }
 // 다음 계정은 저장된 순환 순서입니다. 실제 발송 허가나 성공을 뜻하지 않습니다.
 // 현재 차례의 적용된 문구 제목을 보여 주고 메시지 본문은 이 화면에 노출하지 않습니다.
