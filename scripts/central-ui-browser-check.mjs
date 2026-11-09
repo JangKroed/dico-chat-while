@@ -106,15 +106,11 @@ try {
   await visible('발송 작업을 준비하세요');
   assert.equal(await evalJS('location.pathname'),'/');
   await clickText('.nav-item','설정 · 도움말');
-  await visible('개발자 진단 모드');
+  await visible('자동 오류 제보');
   assert.equal(await evalJS(`Boolean(document.querySelector('[aria-label="관리자 제보 수신 주소"]'))`),false);
   assert.equal(await evalJS(`Boolean(document.querySelector('[aria-label="문제 발생 시 자동 제보"]'))`),true);
-  await evalJS(`document.querySelector('[aria-label="개발자 진단 모드"]').click()`);
-  await until(async()=>await evalJS("Boolean([...document.querySelectorAll('.nav-item')].find(x=>x.textContent.includes('실행 기록')))"));
-  await cmd('Page.reload');
-  await visible('개발자 진단 모드');
-  assert.equal(await evalJS(`document.querySelector('[aria-label="개발자 진단 모드"]').checked`),true);
-  console.log('PASS default user mode, direct route guard, simple consent and persistent diagnostic opt-in');
+  assert.equal(await evalJS(`Boolean(document.querySelector('[aria-label="개발자 진단 모드"]'))`),false);
+  console.log('PASS simplified settings and default route protection');
 
   await clickText('.nav-item','메시지 보관함');await visible('메시지 보관함');
   await clickText('button','새 메시지');
@@ -147,17 +143,15 @@ try {
   console.log('PASS message save through browser UI with automatic-sync guidance and collapsed history');
   await screenshot('desktop-messages.png');
 
-  for(const [nav,heading] of [['계정 · 브라우저','계정 · 브라우저'],['채널 설정','채널 설정'],['발송 그룹','발송 그룹'],['실행 기록','실행 기록'],['로그 · 분석','로그 · 분석'],['설정 · 도움말','설정 · 도움말'],['대시보드','대시보드']]) {
+  for(const [nav,heading] of [['계정 · 브라우저','계정 · 브라우저'],['채널 설정','채널 설정'],['발송 그룹','발송 그룹'],['설정 · 도움말','설정 · 도움말'],['대시보드','대시보드']]) {
     await clickText('.nav-item',nav);await until(async()=>await evalJS(`document.querySelector('main h1')?.textContent===${JSON.stringify(heading)}`));
     console.log(`PASS route ${heading}`);
   }
   await checkLongAttemptModal();console.log('PASS desktop long attempt modal scroll');
-  await clickText('.nav-item','설정 · 도움말');await visible('개발자 진단 모드');
-  await evalJS(`document.querySelector('[aria-label="개발자 진단 모드"]').click()`);
   await cmd('Page.navigate',{url:runtime.url+'/history'});
-  await visible('최근 확인된 발송');
+  await visible('발송 작업을 준비하세요');
   assert.equal(await evalJS('location.pathname'),'/');
-  console.log('PASS disabling diagnostic mode protects history route after reload');
+  console.log('PASS internal history route redirects to user dashboard');
   await cmd('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
   await until(async()=>await evalJS('innerWidth===390'));
   await checkLongAttemptModal();console.log('PASS narrow long attempt modal scroll');
@@ -206,11 +200,11 @@ try {
     const dashboardLayout=await evalJS(`(() => ({overflow:document.documentElement.scrollWidth-innerWidth,rows:[...document.querySelectorAll('.op-group')].map(el=>({height:el.getBoundingClientRect().height,right:el.getBoundingClientRect().right})),stats:document.querySelectorAll('.op-stats>div').length,results:document.querySelectorAll('.op-result').length,browsers:document.querySelectorAll('.op-browser').length,bottomTop:document.querySelector('.op-bottom').getBoundingClientRect().top}))()`);
     assert.ok(dashboardLayout.overflow<=2,JSON.stringify({width,dashboardLayout}));assert.equal(dashboardLayout.stats,4);assert.equal(dashboardLayout.results,6);assert.equal(dashboardLayout.browsers,3);
     console.log('LAYOUT '+width+' '+JSON.stringify(dashboardLayout));await screenshot(`populated-dashboard-${width}.png`);
-    if(width===1440){assert.ok(dashboardLayout.rows.every(row=>row.height<115),'Desktop group rows must remain compact');assert.ok(dashboardLayout.bottomTop<700,'Recent results and connections should start within the first screen');}
+    if(width===1440){assert.ok(dashboardLayout.rows.every(row=>row.height<115),'Desktop group rows must remain compact');assert.ok(dashboardLayout.bottomTop<(await evalJS('innerHeight'))-100,'Recent results and connections should start within the first screen');}
     await screenshot(`populated-dashboard-${width}.png`);
-    await cmd('Page.navigate',{url:runtime.url+'/settings'});await visible('개발자 진단 모드');
-    await until(async()=>await evalJS('document.querySelectorAll(".update-browser").length===3'));
-    const settingsLayout=await evalJS(`(() => ({overflow:document.documentElement.scrollWidth-innerWidth,rows:[...document.querySelectorAll('.update-browser')].map(el=>({height:el.getBoundingClientRect().height,overflow:el.scrollWidth-el.clientWidth}))}))()`);
+    await cmd('Page.navigate',{url:runtime.url+'/settings'});await visible('자동 오류 제보');
+    await until(async()=>await evalJS('document.querySelectorAll(".update-browsers > .update-browser").length===9'));
+    const settingsLayout=await evalJS(`(() => ({overflow:document.documentElement.scrollWidth-innerWidth,rows:[...document.querySelectorAll('.update-browsers > .update-browser')].map(el=>({height:el.getBoundingClientRect().height,overflow:el.scrollWidth-el.clientWidth}))}))()`);
     assert.ok(settingsLayout.overflow<=2,JSON.stringify({width,settingsLayout}));assert.ok(settingsLayout.rows.every(row=>row.overflow<=2),JSON.stringify({width,settingsLayout}));
     await screenshot(`populated-settings-${width}.png`);
     await evalJS("document.querySelector('.update-browsers').scrollIntoView({block:'start'})");
