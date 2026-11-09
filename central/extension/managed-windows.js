@@ -152,10 +152,11 @@ async function closeManagedChannel(chrome,records,record,target){
 }
 export function createManagedWindowController({chrome}){
   return async function manageChannelWindow(target){
-    if(!['reveal','hide','consolidate','separate','close'].includes(target.action))fail('INVALID_WINDOW_ACTION','지원하지 않는 창 동작입니다.');
+    if(!['prepare','reveal','hide','consolidate','separate','close'].includes(target.action))fail('INVALID_WINDOW_ACTION','지원하지 않는 창 동작입니다.');
     const records=(await chrome.storage.local.get('dicoCentralTabs')).dicoCentralTabs||[];
     const record=records.find(item=>(target.action==='close'&&target.tabId===undefined||item.tabId===target.tabId)&&item.accountId===target.accountId&&item.guildId===target.guildId&&item.channelId===target.channelId);
     if(target.action==='close')return closeManagedChannel(chrome,records,record,{...target,tabId:record?.tabId??target.tabId});
+    if(!record&&target.action==='prepare')return{action:'prepare',visible:false};
     if(!record)fail('MANAGED_TAB_MISSING','연결된 전송용 탭을 찾을 수 없습니다. 채널 연결 상태를 확인해 주세요.');
     if(target.action==='separate')return separateManagedWindows(chrome,records,target);
     if(target.action==='consolidate'){
@@ -165,6 +166,14 @@ export function createManagedWindowController({chrome}){
     let tab;try{tab=await chrome.tabs.get(record.tabId);}catch{fail('MANAGED_TAB_MISSING','전송용 탭이 닫혔습니다. 채널을 다시 연결해 주세요.');}
     if(!Number.isInteger(tab?.windowId)||!discordTab(tab))fail('TARGET_MISMATCH','연결된 탭이 Discord 화면이 아닙니다. 탭 상태를 확인해 주세요.');
     let win;try{win=await chrome.windows.get(tab.windowId,{populate:true});}catch{fail('MANAGED_TAB_MISSING','전송용 창을 찾을 수 없습니다.');}
+    if(target.action==='prepare'){
+      // 최소화된 전용 창의 Discord 타이머가 늦게 갱신되지 않도록 복원한다.
+      // 사용자가 직접 연결했거나 일반 탭이 섞인 창은 자동으로 변경하지 않는다.
+      if(record.windowId!==tab.windowId||!ownsWindow(win,records))return{action:'prepare',visible:false};
+      await chrome.tabs.update(tab.id,{active:true});
+      if(win.state==='minimized'||win.state===undefined)await chrome.windows.update(tab.windowId,{state:'normal',focused:false});
+      return{action:'prepare',visible:true};
+    }
     if(target.action==='hide'){
       if(record.windowId!==tab.windowId||!ownsWindow(win,records))fail('WINDOW_NOT_DEDICATED','일반 탭이 섞였거나 소유권을 확인할 수 없는 창은 자동으로 숨기지 않습니다. 전송 창 상태를 확인해 주세요.');
       await chrome.windows.update(tab.windowId,{state:'minimized'});
