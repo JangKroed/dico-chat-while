@@ -331,13 +331,23 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
       payload?.accountId||a?.accountId||null,payload?.guildId||a?.guildId||null,payload?.channelId||a?.channelId||null,
       problem.commandType||c?.type||null,payload?.action||null,problem.rejectionCode||problem.verificationReason||null]);
   }
+  function closeIncidentMatches(problem,instanceId,removalId){
+    if(!removalId||problem.code!=='command_rejected'||problem.instanceId!==instanceId)return false;
+    if(problem.removalId)return problem.removalId===removalId;
+    // 이전 상태의 사건은 정리 요청 ID를 연결된 명령에서 찾습니다.
+    return state.commands.some(c=>c.id===problem.commandId&&c.type==='CLOSE_CHANNEL'&&c.instanceId===instanceId&&c.payload.removalId===removalId);
+  }
   function incident(code,details={}){
-    const key=[code,(code==='command_rejected'&&details.commandId)||(['channel_unverified','account_mismatch'].includes(code)&&details.bindingId)||details.attemptId||details.instanceId||details.groupId||'service'].join(':');
-    let i=state.incidents.find(i=>i.key===key&&i.status==='open');
+    // 브라우저 세션과 명령 ID가 바뀌어도 같은 삭제 요청의 정리는 한 사건입니다.
+    const scope=details.removalId?`close:${details.instanceId}:${details.removalId}`:
+      (code==='command_rejected'&&details.commandId)||(['channel_unverified','account_mismatch'].includes(code)&&details.bindingId)||details.attemptId||details.instanceId||details.groupId||'service';
+    const key=[code,scope].join(':');
+    let i=state.incidents.findLast(i=>i.status==='open'&&(i.key===key||closeIncidentMatches(i,details.instanceId,details.removalId)));
     if(i){
       i.count++;i.lastSeenAt=now();
       if(['channel_unverified','account_mismatch'].includes(code)&&details.verificationReason)i.verificationReason=verificationReason(details.verificationReason);
-      if(code==='command_rejected')for(const key of ['commandId','commandType','rejectionCode','attemptId','groupId','instanceId']){if(details[key]!==undefined)i[key]=details[key];else delete i[key];}
+      if(code==='command_rejected')for(const key of ['commandId','commandType','rejectionCode','attemptId','groupId','instanceId','removalId']){if(details[key]!==undefined)i[key]=details[key];else delete i[key];}
+      if(details.removalId)i.key=key;
       return i;
     }
     const recurrenceKey=incidentRecurrenceKey({code,...details});
@@ -348,6 +358,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     i={id:id(),key,code,status:'open',level:'error',createdAt:now(),lastSeenAt:now(),count:1,read:false,...details,...recurrence};state.incidents.push(i);event('incident.opened',{incidentId:i.id,reasonCode:code,...details,...recurrence},'error');return i;
   }
   function resolveIncident(i,details={}){i.status='resolved';i.resolvedAt=now();if(details.reasonCode)i.resolutionReason=details.reasonCode;event('incident.resolved',{incidentId:i.id,...details});}
+  function resolveCloseIncidents(instanceId,removalId){
+    for(const problem of state.incidents.filter(i=>i.status==='open'&&closeIncidentMatches(i,instanceId,removalId)))resolveIncident(problem,{reasonCode:'managed_tab_closed'});
+  }
   function resolveIncidents(attemptId){
     for(const i of state.incidents.filter(i=>i.status==='open')){
       const command=i.code==='command_rejected'?state.commands.find(c=>c.id===i.commandId):null;
@@ -415,7 +428,9 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           else{block='CONNECTION_STALE';message='거절 이후 현재 브라우저 세션에서 연결을 확인한 기록이 필요합니다. 전송용 Discord 창을 열고 채널 관리에서 다시 연결한 뒤 재확인하세요.';}
         }
       }else if(i.code==='command_rejected'&&type==='CLOSE_CHANNEL'){
-        if(c?.payload.removalId&&state.commands.some(done=>done.type==='CLOSE_CHANNEL'&&done.payload.removalId===c.payload.removalId&&done.status==='applied'))reasonCode='managed_tab_closed';
+        const removalId=i.removalId||c?.payload.removalId;
+        const owner=i.instanceId||c?.instanceId;
+        if(removalId&&owner&&state.commands.some(done=>done.type==='CLOSE_CHANNEL'&&done.instanceId===owner&&done.payload.removalId===removalId&&done.status==='applied'))reasonCode='managed_tab_closed';
         else{block='CLOSE_PENDING';message='해당 브라우저의 남은 전송 탭을 확인하세요. 브라우저와 확장을 다시 연결하면 닫기를 재시도합니다. 다른 페이지로 이동한 탭은 직접 닫아 주세요.';page='connections';}
       }else if(i.code==='command_rejected'&&type==='MANAGE_WINDOW'){
         const payload=c?.payload,action=payload?.action;
@@ -1003,7 +1018,11 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         ensure(Array.isArray(completedRemovalIds)&&completedRemovalIds.length<=100&&completedRemovalIds.every(value=>typeof value==='string'&&value.length<=100),'VALIDATION','Invalid completed removal IDs.');
         if(state.removals.instances.includes(message.instanceId)){
           const completed=state.removals.closeRequests.filter(r=>r.instanceId===message.instanceId&&completedRemovalIds.includes(r.removalId));
-          for(const request of completed){for(const c of state.commands.filter(c=>c.type==='CLOSE_CHANNEL'&&c.instanceId===message.instanceId&&c.payload.removalId===request.removalId)){c.status='applied';c.appliedAt=now();for(const problem of state.incidents.filter(i=>i.status==='open'&&i.commandId===c.id))resolveIncident(problem,{reasonCode:'managed_tab_closed'});}event('channel.closed_after_removal',{instanceId:message.instanceId,removalId:request.removalId});}
+          for(const request of completed){
+            for(const c of state.commands.filter(c=>c.type==='CLOSE_CHANNEL'&&c.instanceId===message.instanceId&&c.payload.removalId===request.removalId)){c.status='applied';c.appliedAt=now();}
+            resolveCloseIncidents(message.instanceId,request.removalId);
+            event('channel.closed_after_removal',{instanceId:message.instanceId,removalId:request.removalId});
+          }
           state.removals.closeRequests=state.removals.closeRequests.filter(r=>!completed.includes(r));
           if(message.explicitReconnect!==true)return{removed:true,protocolVersion:1,resetEpoch:state.resetEpoch,closeChannels:state.removals.closeRequests.filter(r=>r.instanceId===message.instanceId)};
           state.removals.instances=state.removals.instances.filter(key=>key!==message.instanceId);
@@ -1235,7 +1254,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         if(['completed','superseded'].includes(c.status)||c.status==='rejected'&&message.status==='rejected'||c.status==='applied'&&message.status==='received')return{ok:true};
         ensure(!(c.status==='rejected'&&message.status!=='rejected'),'COMMAND_REJECTED','Rejected command cannot later be applied.',409);
         c.status=message.status;c[`${message.status}At`]??=now();
-        if(message.status==='applied'&&c.type==='CLOSE_CHANNEL'){state.removals.closeRequests=state.removals.closeRequests.filter(r=>r.removalId!==c.payload.removalId);for(const problem of state.incidents.filter(problem=>problem.status==='open'&&state.commands.some(old=>old.id===problem.commandId&&old.payload.removalId===c.payload.removalId)))resolveIncident(problem,{reasonCode:'managed_tab_closed'});}
+        if(message.status==='applied'&&c.type==='CLOSE_CHANNEL'){
+          state.removals.closeRequests=state.removals.closeRequests.filter(r=>r.removalId!==c.payload.removalId);
+          resolveCloseIncidents(i.id,c.payload.removalId);
+        }
         if(message.status==='applied'&&c.type==='LOOKUP_CHANNEL_NAME'){
           const target=state.targets.find(t=>t.id===c.payload.targetId&&t.guildId===c.payload.guildId&&t.channelId===c.payload.channelId);
           if(target)applyChannelName(target,{observedName:message.channelName});
@@ -1264,7 +1286,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
             // 중지 요청으로 허가 실행을 막은 것은 정상 제어입니다. 실제 게시 결과는
             // 계속 미확인으로 보존하되 명령 실패 사건을 중복 생성하지 않습니다.
             const expectedStop=c.type==='COMMIT_PERMIT'&&rejectionCode==='EXECUTION_STOPPED'&&group?.runId===attempt?.runId&&(Boolean(group?.controlIntent)||['stopped','paused'].includes(group?.status));
-            if(!expectedStop)incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
+            if(!expectedStop)incident('command_rejected',{instanceId:i.id,commandId:c.id,commandType:c.type,groupId:c.payload.groupId,...(c.type==='CLOSE_CHANNEL'&&c.payload.removalId?{removalId:c.payload.removalId}:{}),...(c.payload.attemptId?{attemptId:c.payload.attemptId}:{}),...(rejectionCode?{rejectionCode}:{})});
             if(attempt&&activeAttempt(attempt))markUnknown(attempt,rejectionCode||'command_rejected');
           }
         }

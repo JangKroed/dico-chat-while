@@ -58,6 +58,40 @@ test('탭 정리는 30~60초 경계를 지키고 현재 세션 ACK가 올 때까
  }finally{f.manager.close();}
 });
 
+test('같은 탭 정리의 반복 거절은 세션이 바뀌어도 제보를 한 번만 연다',()=>{
+ let time=1_800_000_000_000;const f=fixture({now:()=>time}),opened=[];
+ f.manager.subscribe(event=>{if(event.type==='incident.opened')opened.push(event);});
+ try{
+  remove(f,'channel.delete',f.channels[0]);
+  const reject=(session,command,rejectionCode)=>f.manager.bridge({type:'ACK',sessionId:session.sessionId,commandId:command.id,status:'rejected',rejectionCode},session.instanceId);
+  const first=f.manager.commands(f.session.instanceId).find(c=>c.type==='CLOSE_CHANNEL');
+  reject(f.session,first,'TARGET_MISMATCH');
+  time+=60000;
+  const session=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId,capabilities:['close-channel-v1']});
+  const retry=session.commands.find(c=>c.type==='CLOSE_CHANNEL');
+  reject(session,retry,'ATTEMPT_UNRESOLVED');
+  reject(session,retry,'ATTEMPT_UNRESOLVED');
+  assert.equal(opened.length,1);
+  const [incident]=f.manager.snapshot().incidents;
+  assert.equal(incident.id,opened[0].incidentId);
+  assert.equal(incident.count,2);
+  assert.equal(incident.commandId,retry.id);
+  assert.equal(incident.rejectionCode,'ATTEMPT_UNRESOLVED');
+
+  remove(f,'channel.delete',f.manager.snapshot().channels[0]);
+  const other=f.manager.commands(session.instanceId).find(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId!==first.payload.removalId);
+  reject(session,other,'TARGET_MISMATCH');
+  assert.equal(opened.length,2);
+
+  time+=60000;
+  f.manager.bridge({type:'HEARTBEAT',sessionId:session.sessionId},session.instanceId);
+  const close=f.manager.commands(session.instanceId).find(c=>c.type==='CLOSE_CHANNEL'&&c.payload.removalId===first.payload.removalId);
+  f.manager.bridge({type:'ACK',sessionId:session.sessionId,commandId:close.id,status:'applied'},session.instanceId);
+  assert.deepEqual(f.manager.snapshot().incidents.map(i=>[i.status,i.count]),[['resolved',2],['open',1]]);
+  assert.equal(f.manager.snapshot().pendingTabCloses.length,1);
+ }finally{f.manager.close();}
+});
+
 test('deleting a target while opening it queues a durable exact-scope close without guessing a tab',()=>{const f=fixture();try{const hello=f.manager.bridge({type:'HELLO',protocolVersion:1,instanceId:f.session.instanceId,capabilities:['open-channel-v1']});f.manager.bridge({type:'ACCOUNT_OBSERVATION',sessionId:hello.sessionId,accountId:'111',verified:true,legacyFrozen:true,legacyPending:false},hello.instanceId);const target=f.manager.execute('target.create',{url:'https://discord.com/channels/222/444'}),account=f.manager.snapshot().accounts.find(a=>a.accountId==='111');const opened=f.manager.execute('channel.connect',{accountId:account.id,targetId:target.id});remove(f,'target.delete',target);const s=f.manager.snapshot();assert.equal(s.commands.find(c=>c.id===opened.command.id).status,'superseded');const close=s.commands.find(c=>c.type==='CLOSE_CHANNEL');assert.equal(close.payload.channelId,'444');assert.equal(close.payload.accountId,'111');assert.equal(close.payload.tabId,undefined);}finally{f.manager.close();}});
 
 test('실행 차단이 확인된 미확인 기록은 보존하면서 중지된 연결을 해제한다',()=>{const f=fixture();try{const msg=f.manager.execute('message.create',{name:'내용',body:'내용'});for(const channel of f.channels){f.manager.execute('channel.applyPlaylist',{id:channel.id,expectedVersion:channel.version,items:[{messageId:msg.id}]});const config=f.manager.commands(f.session.instanceId).findLast(c=>c.type==='CONFIG_SYNC');f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:config.id,status:'applied'},f.session.instanceId);}f.manager.execute('group.start',{id:f.group.id});f.manager.tick();const attempt=f.manager.snapshot().attempts[0];f.manager.bridge({type:'PREPARED',sessionId:f.session.sessionId,attemptId:attempt.id,accountId:attempt.accountId,channelId:attempt.channelId,configVersion:attempt.configVersion,draftClear:true},f.session.instanceId);f.manager.bridge({type:'DELIVERY_RESULT',sessionId:f.session.sessionId,attemptId:attempt.id,outcome:'unknown',executionBlocked:true},f.session.instanceId);f.manager.execute('group.stop',{id:f.group.id});for(const control of f.manager.commands(f.session.instanceId).filter(c=>c.type==='CONTROL'))f.manager.bridge({type:'ACK',sessionId:f.session.sessionId,commandId:control.id,status:'applied',executionBlocked:true,attemptId:attempt.id},f.session.instanceId);assert.equal(f.manager.snapshot().groups[0].status,'stopped');remove(f,'target.delete',f.manager.snapshot().targets[0]);const historical=f.manager.snapshot().attempts[0];assert.equal(historical.status,'unknown');assert.equal(historical.detached,true);assert.equal(historical.groupName,'테스트 그룹');assert.equal(historical.channelName,'공지');assert.equal(historical.accountName,'111');assert.equal(f.manager.snapshot().groups.length,0);}finally{f.manager.close();}});
