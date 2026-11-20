@@ -228,7 +228,7 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
     return receiptJSON(response);
    })(),aborted]);
    if(receipt?.ok===false){
-    const reasons={UNAUTHORIZED:'이메일 중계 연결 키가 일치하지 않습니다. 관리자 수신 연결 설정을 확인하세요.',QUOTA:'이메일 중계의 오늘 전송 한도에 도달했습니다. 대기열을 보존하고 다시 시도합니다.',DELIVERY_UNCERTAIN:'이메일 중계가 발송 결과를 확정하지 못했습니다. 관리자 확인이 필요하며 중계는 중복 메일을 보내지 않습니다.',BUSY:'이메일 중계가 다른 제보를 처리 중입니다. 자동으로 다시 시도합니다.',INVALID:'이메일 중계가 보고서 형식 또는 크기를 거절했습니다.'};
+    const reasons={RATE_LIMIT:'이메일 중계의 짧은 시간 전송 한도에 도달했습니다. 대기열을 보존하고 자동으로 다시 시도합니다.',DISABLED:'이메일 중계가 일시적으로 접수를 중단했습니다. 보고서는 로컬 전송함에 보존됩니다.',STORAGE_LIMIT:'이메일 중계의 접수 기록 저장 공간이 부족합니다. 보고서는 로컬 전송함에 보존됩니다.',UNAUTHORIZED:'이메일 중계 연결 키가 일치하지 않습니다. 관리자 수신 연결 설정을 확인하세요.',QUOTA:'이메일 중계의 오늘 전송 한도에 도달했습니다. 대기열을 보존하고 다시 시도합니다.',DELIVERY_UNCERTAIN:'이메일 중계가 발송 결과를 확정하지 못했습니다. 관리자 확인이 필요하며 중계는 중복 메일을 보내지 않습니다.',BUSY:'이메일 중계가 다른 제보를 처리 중입니다. 자동으로 다시 시도합니다.',INVALID:'이메일 중계가 보고서 형식 또는 크기를 거절했습니다.'};
     const code=Object.hasOwn(reasons,receipt.code)?receipt.code:'UNKNOWN';
     throw fail(`[${code}] ${reasons[code]||'수신 서버가 제보를 거절했습니다.'}`,502,'SUPPORT_RECEIVER_REJECTED');
    }
