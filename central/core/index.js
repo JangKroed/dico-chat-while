@@ -57,6 +57,16 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
   if(!readOnly)for(const c of state.channels)initializeChannelInterval(c);
   const get=(list,key)=>{const item=state[list].find(x=>x.id===key);ensure(item,'NOT_FOUND',`${list} item not found.`,404);return item;};
   const event=(type,details={},level='info')=>{pending.push({type,level,at:now(),stateVersion:state.stateVersion,...details});};
+  // 확인 시각은 매번 갱신하고 로그는 브라우저·계정·채널 상태가 바뀔 때 남깁니다.
+  function connectionObservationKey(source, instanceId) {
+    const instance=source.instances.find(item=>item.id===instanceId);
+    const accounts=source.accounts.filter(item=>item.instanceId===instanceId).map(account=>
+      [account.id,account.verified,account.sessionId,account.version]);
+    const channels=source.channels.filter(item=>item.instanceId===instanceId).map(channel=>
+      [channel.id,channel.sessionId,channel.tabId,channel.verified,channel.verificationReason,
+        channel.version,channel.configVersion,channel.appliedVersion]);
+    return JSON.stringify([instance?.connected,instance?.legacyFrozen,instance?.legacyPending,accounts,channels]);
+  }
   let pending=[];
   /**
    * 상태 복사본에서 변경한 뒤 상태와 이벤트를 저장합니다. 처리 실패 시 이전 상태로 돌아갑니다.
@@ -68,7 +78,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
     ensure(!closed,'CLOSED','Central manager is closed.',503);ensure(!storageFailure,'STORAGE_FAILURE','Storage failed. New commands are blocked.',503);
     const before=state;state=clone(state);state.stateVersion++;pending=[];
     let result;
-    try {result=fn();syncConnectionCatalog();recordIntervals();}catch(error){state=before;pending=[];throw error;}
+    try {result=fn(before);syncConnectionCatalog();recordIntervals();}catch(error){state=before;pending=[];throw error;}
     let committed;
     try{committed=store.commit(state,pending);}catch(error){state=before;storageFailure=error;throw new CentralError('STORAGE_FAILURE','Could not durably save the operation; execution is blocked.',503);}
     pending=[];for(const e of committed)for(const listener of listeners){try{listener(clone(e));}catch{ /* observers cannot undo a committed operation */ }}
@@ -993,7 +1003,7 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
    */
   function bridge(message,instanceId){
     ensure(message&&typeof message==='object'&&!Array.isArray(message),'VALIDATION','Bridge message must be an object.');
-    return transact(()=>{
+    return transact(before=>{
       if(message.type==='HELLO'){
         ensure(message.resetEpoch===undefined||Number.isSafeInteger(message.resetEpoch)&&message.resetEpoch>=0,'VALIDATION','Invalid reset epoch.');
         ensure(message.protocolVersion===1,'PROTOCOL_MISMATCH','Update the extension to central protocol 1.',409);
@@ -1179,7 +1189,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
           queueTransferOpens(i);
         }
         const account=message.verified?upsertAccount(i.id,message.accountId,{verified:true,sessionId:i.sessionId,accountName:message.accountName,username:message.username}):state.accounts.find(a=>a.instanceId===i.id&&a.accountId===message.accountId);
-        event('account.observed',{accountEntityId:account?.id,instanceId:i.id,verified:message.verified});return{ok:true,account:account?publicAccount(account):null,commands:commands(i.id)};
+        if(connectionObservationKey(before,i.id)!==connectionObservationKey(state,i.id)){
+          event('account.observed',{accountEntityId:account?.id,instanceId:i.id,verified:message.verified});
+        }
+        return{ok:true,account:account?publicAccount(account):null,commands:commands(i.id)};
       }
       if(message.type==='OBSERVATION'){
         ensure(Array.isArray(message.channels)&&message.channels.length<=100,'VALIDATION','Invalid channel observations.');
@@ -1227,7 +1240,10 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         for(const g of state.groups.filter(g=>g.status==='running'))for(const bindingId of g.members){const c=get('channels',bindingId);if(c.instanceId===i.id&&!c.verified){g.waitReason='account_unverified';incident(c.verificationReason==='account_mismatch'?'account_mismatch':'channel_unverified',{groupId:g.id,instanceId:i.id,bindingId:c.id,verificationReason:c.verificationReason});}}
         for(const g of state.groups.filter(g=>g.status==='running'&&g.waitReason==='account_unverified'))if(g.members.every(member=>{const c=get('channels',member),owner=get('instances',c.instanceId);return c.verified&&c.sessionId===owner.sessionId&&owner.connected;}))g.waitReason=g.activeAttemptId?'preparing':null;
         for(const problem of state.incidents.filter(p=>p.status==='open'&&['account_mismatch','channel_unverified'].includes(p.code)))if(identityRecovered(problem))resolveIncident(problem,{reasonCode:'connection_reverified'});
-        event('instance.observed',{instanceId:i.id,channelCount:message.channels.length});return{ok:true,channels:state.channels.filter(c=>c.instanceId===i.id).map(c=>publicChannel(c)),commands:commands(i.id)};
+        if(connectionObservationKey(before,i.id)!==connectionObservationKey(state,i.id)){
+          event('instance.observed',{instanceId:i.id,channelCount:message.channels.length});
+        }
+        return{ok:true,channels:state.channels.filter(c=>c.instanceId===i.id).map(c=>publicChannel(c)),commands:commands(i.id)};
       }
       if(message.type==='ACK'){
         const c=get('commands',message.commandId);ensure(c.instanceId===i.id&&c.sessionId===i.sessionId,'STALE_COMMAND','Command belongs to a different instance or session.',409);
