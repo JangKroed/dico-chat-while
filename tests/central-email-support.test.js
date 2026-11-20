@@ -24,16 +24,17 @@ function sender(t,fetchImpl,options={}){
  delivery.configure({enabled:true,autoSend:true,receiverUrl:url,reporterToken:key});return delivery;
 }
 test('central automatic incident reaches fixed email recipient and duplicate receipt does not send twice',async t=>{
- const server=relay();let calls=0;
+ const server=relay();let calls=0,clock=1800000000000;
  const delivery=sender(t,async(target,init)=>{
   calls++;assert.equal(target,url);assert.equal(init.redirect,'manual');assert.equal(init.headers.authorization,undefined);
   const body=JSON.parse(init.body);assert.equal(body.key,key);
   const result=server.post({...body,to:'attacker@example.com'});
   if(calls===1)throw Error('lost receipt');
   return Response.json(result);
- });
+ },{now:()=>clock});
  await delivery.queue({automatic:true,incidentId:'same-incident'});await delivery.flush();
  assert.equal(delivery.status().counts.failed,1);assert.equal(server.sent.length,1);
+ clock+=6*3600000;
  await delivery.flush({force:true});assert.equal(delivery.status().counts.sent,1);assert.equal(server.sent.length,1);
  assert.equal(server.sent[0].to,'didlsdydgh@gmail.com');assert.match(server.sent[0].attachments[0].name,/\.json$/);
 });
@@ -54,11 +55,49 @@ test('email response cannot redirect to an unrelated host',async t=>{
 test('old email reports stop retrying before relay dedup receipts can expire, including forced flush',async t=>{
  let clock=1800000000000,calls=0;
  const delivery=sender(t,async()=>{calls++;throw Error('lost receipt');},{now:()=>clock});
- await delivery.queue({automatic:true});await delivery.flush();assert.equal(calls,1);
+ await delivery.queue();await delivery.flush();assert.equal(calls,1);
  clock+=30*86400000;
  await delivery.flush({force:true});await delivery.flush({force:true});
  assert.equal(calls,1);assert.equal(delivery.status().counts.sent,0);assert.equal(delivery.status().outbox[0].nextAttemptAt,null);
  assert.match(delivery.status().outbox[0].lastError,/30일/);
+});
+
+test('automatic email backlog stays local after 24 hours, even through forced flush',async t=>{
+ let clock=1800000000000,calls=0;
+ const delivery=sender(t,async()=>{calls++;throw Error('unexpected send');},{now:()=>clock});
+ const item=await delivery.queue({automatic:true,incidentId:'old-automatic'});
+ clock+=86400000;
+ await delivery.flush({force:true});
+ assert.equal(calls,0);
+ assert.equal(delivery.status().outbox[0].nextAttemptAt,null);
+ assert.match(delivery.status().outbox[0].lastError,/24시간/);
+ assert.equal(JSON.parse(readFileSync(join(delivery.directory,'outbox',item.id+'.json'),'utf8')).reportId,item.reportId);
+});
+
+test('automatic email uses one persistent slot every six hours and leaves manual sending available',async t=>{
+ let clock=1800000000000;
+ const requested=[];
+ const server=relay();
+ const fetchImpl=async(_url,init)=>{
+  const body=JSON.parse(init.body);
+  requested.push(body.report.reportId);
+  return Response.json(server.post(body));
+ };
+ const options={now:()=>clock};
+ const initial=sender(t,fetchImpl,options);
+ const older=await initial.queue({automatic:true,incidentId:'older'});
+ const newer=await initial.queue({automatic:true,incidentId:'newer'});
+ await initial.flush();
+ assert.deepEqual(requested,[newer.reportId]);
+ await initial.close();
+
+ const restarted=sender(t,fetchImpl,{...options,dir:initial.directory});
+ const manual=await restarted.queue();
+ await restarted.flush({force:true});
+ assert.deepEqual(requested,[newer.reportId,manual.reportId]);
+ clock+=6*3600000;
+ await restarted.flush();
+ assert.deepEqual(requested,[newer.reportId,manual.reportId,older.reportId]);
 });
 test('relay refuses invalid auth, malformed reports, over-quota mail and ambiguous sends',async()=>{
  const server=relay(),report=await createSupportReport({manager:{supportData:sample},appVersion:'test'});

@@ -11,6 +11,7 @@ import {inspectSupportReport,automaticSupportReport,SUPPORT_REPORT_MAX_BYTES} fr
 
 const DEFAULTS={enabled:false,autoSend:false,receiverUrl:'',includeBodies:false,includeNames:false,receiverEnabled:false,retentionDays:30};
 const DAY=86400000;
+const AUTOMATIC_EMAIL_INTERVAL_MS=6*60*60*1000;
 const fail=(message,status=400,code='SUPPORT_DELIVERY_INVALID')=>Object.assign(Error(message),{status,code});
 const copy=value=>structuredClone(value);
 // 이전 버전은 automatic 표식이 없다. 사건 식별자가 있는 구형 제보는 개인정보 최소화를 우선한다.
@@ -196,7 +197,7 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
    if(options.userDescription!==undefined)report.userDescription=options.userDescription;
    if(closed||!state.settings.enabled||options.automatic&&!state.settings.autoSend)return null;
    const clean=restrictPrivacy(options.automatic?automaticSupportReport(report):report,{includeBodies:settings.includeBodies&&state.settings.includeBodies,includeNames:settings.includeNames&&state.settings.includeNames});
-   const item={id:randomUUID(),reportId:clean.reportId,automatic:Boolean(options.automatic),...(options.incidentId?{incidentId:options.incidentId}:{}),createdAt:now(),status:'queued',attempts:0,nextAttemptAt:now(),lastError:null,receiptId:null,sentAt:null};
+   const item={id:randomUUID(),reportId:clean.reportId,automatic:Boolean(options.automatic),...(options.incidentId?{incidentId:options.incidentId}:{}),createdAt:collection?.createdAt??now(),status:'queued',attempts:0,nextAttemptAt:now(),lastError:null,receiptId:null,sentAt:null};
    atomicJSON(journalPath,{item,report:clean});
    atomicJSON(outPath(item.id),clean);state.outbox.unshift(item);save();unlinkSync(journalPath);
    if(collection){state.collections=state.collections.filter(c=>c!==collection);save();}
@@ -259,17 +260,24 @@ export function createSupportDelivery({dir,createReport,connection,now=Date.now,
     if(closed||!state.settings.enabled||!state.settings.receiverUrl||!credentials.reporterToken)break;
     // 저장 당시 동의만 믿지 않고 재전송 직전에 현재 자동 전송 동의를 검사한다.
     if(automaticItem(item)&&!state.settings.autoSend)continue;
-    // Email receipts are retained for 90 days. Stop old retries well before
-    // that boundary, even when the user explicitly flushes a stale queue.
-    if(item.status!=='sent'&&emailRelayURL(state.settings.receiverUrl)&&now()-item.createdAt>=30*DAY){
-     if(item.nextAttemptAt!==null){item.status='failed';item.nextAttemptAt=null;item.lastError='30일이 지난 이메일 제보는 중복 발송 방지를 위해 재전송하지 않습니다.';save();}
-     continue;
-    }
     if(item.status==='sent'||item.nextAttemptAt===null)continue;
+    const email=emailRelayURL(state.settings.receiverUrl),automaticEmail=email&&automaticItem(item);
+    // 오래된 자동 메일은 재시도만 종료하고 진단 파일은 전송함에 보존합니다.
+    if(email&&now()-item.createdAt>=(automaticEmail?DAY:30*DAY)){
+     item.status='failed';item.nextAttemptAt=null;
+     item.lastError=automaticEmail?'24시간이 지난 자동 이메일 제보입니다. 보고서는 로컬 전송함에 보존됩니다.':'30일이 지난 이메일 제보는 중복 발송 방지를 위해 재전송하지 않습니다.';
+     save();continue;
+    }
     // 강제 flush는 대기 시간을 건너뛸 뿐, 종료된 항목이나 누적 시도 한도를 되살리지 않는다.
     // 구형 상태 파일의 이미 초과한 시도 횟수도 실제 요청 전에 종료 처리한다.
     if(item.attempts>=maxAttempts){item.status='failed';item.nextAttemptAt=null;item.lastError=`${maxAttempts}회 전송 시도 후 자동 재시도를 종료했습니다. 보고서는 로컬 전송함에 보존됩니다.`;save();continue;}
     if(!force&&item.nextAttemptAt>now())continue;
+    if(automaticEmail){
+     const startedAt=now();
+     if(Number.isFinite(state.lastAutomaticEmailAttemptAt)&&startedAt-state.lastAutomaticEmailAttemptAt<AUTOMATIC_EMAIL_INTERVAL_MS)continue;
+     // 응답 유실이나 재시작에도 다음 항목이 몰리지 않도록 요청 전에 전송 시각을 저장합니다.
+     state.lastAutomaticEmailAttemptAt=startedAt;
+    }
     await transmit(item);
    }
    return status();

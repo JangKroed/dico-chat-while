@@ -121,17 +121,18 @@ test('an unresponsive receipt stream is bounded and a late receipt cannot mark a
 
 for(const receiverUrl of ['https://receiver.example/report','https://script.google.com/macros/s/test-relay/exec']){
  test(`retry budget persists and forced flush cannot revive terminal failures: ${receiverUrl}`,async t=>{
-  let calls=0;
+  let calls=0,clock=at;
   const fetchImpl=async()=>{calls++;throw Error('offline');};
-  const {delivery,dir}=fixture(t,{maxAttempts:2,fetchImpl});
+  const {delivery,dir}=fixture(t,{maxAttempts:2,fetchImpl,now:()=>clock});
   delivery.configure({enabled:true,autoSend:true,receiverUrl,reporterToken:'x'.repeat(32)});
   await delivery.queue({automatic:true});await delivery.flush();
   assert.equal(calls,1);assert.notEqual(delivery.status().outbox[0].nextAttemptAt,null);
   await delivery.flush();assert.equal(calls,1);
+  if(receiverUrl.startsWith('https://script.google.com/'))clock+=6*3600000;
   await delivery.flush({force:true});
   assert.equal(calls,2);assert.equal(delivery.status().outbox[0].nextAttemptAt,null);
   await delivery.flush({force:true});assert.equal(calls,2);await delivery.close();
-  const restarted=createSupportDelivery({dir,createReport:async()=>report(),now:()=>at+10000000,maxAttempts:2,fetchImpl});t.after(()=>restarted.close());
+  const restarted=createSupportDelivery({dir,createReport:async()=>report(),now:()=>clock+10000000,maxAttempts:2,fetchImpl});t.after(()=>restarted.close());
   await restarted.flush();await restarted.flush({force:true});
   assert.equal(calls,2);assert.equal(restarted.status().counts.failed,1);
   assert.match(restarted.status().outbox[0].lastError,/2회/);
