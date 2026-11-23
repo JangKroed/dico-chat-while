@@ -814,6 +814,24 @@ main {
 .list-caption b {
   color: var(--accent);
 }
+.message-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+}
+.message-list-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding-inline: 6px;
+  white-space: nowrap;
+}
+.message-list-actions small {
+  color: var(--text-subtle);
+  font-size: 12px;
+}
 .message-item {
   display: flex;
   text-align: left;
@@ -821,7 +839,6 @@ main {
   gap: 11px;
   width: 100%;
   border: 0;
-  border-bottom: 1px solid var(--border);
   padding: 17px 18px;
   background: var(--surface);
   color: var(--text);
@@ -2977,6 +2994,17 @@ main {
   border-right: 1px solid var(--border);
   padding: 10px;
 }
+.target-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 5px;
+}
+.target-list-row > .text-danger {
+  padding-inline: 6px;
+  white-space: nowrap;
+}
 .target-item {
   display: block;
   width: 100%;
@@ -2985,7 +3013,6 @@ main {
   border: 1px solid transparent;
   border-radius: 8px;
   padding: 15px 12px;
-  margin-bottom: 5px;
   color: var(--text);
 }
 .target-item:hover {
