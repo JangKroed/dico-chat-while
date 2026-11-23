@@ -1,4 +1,4 @@
-import type {Snapshot,Target} from './api'
+import type {Message,Snapshot,Target} from './api'
 
 type Run=(action:string,payload:Record<string,unknown>,success?:string)=>Promise<boolean>
 type Kind='channel'|'target'|'account'|'instance'
@@ -15,7 +15,17 @@ export function RemovalAction({kind,id,version,name,busy,run,onRemoved}:{kind:Ki
     if(disabled||!confirm(`${name}\n\n${effects[kind]}\n관련 그룹에서 연결을 제외하며, 빈 그룹은 삭제됩니다. 진행 중인 입력은 중지 완료가 필요합니다. 입력 차단이 확인된 미확인 발송은 결과를 바꾸지 않고 기록에 보존합니다. 오프라인 브라우저의 탭은 다음 연결 때 닫습니다.\n\n계속할까요?`))return
     if(await run(`${kind}.delete`,{id,expectedVersion:version},kind==='channel'?'연결을 해제했습니다.':'삭제했습니다.'))onRemoved?.()
   }
-  return <button type="button" className="text-action" disabled={disabled} aria-label={`${name} ${labels[kind]}`} onClick={()=>void remove()}>{labels[kind]}</button>
+  return <button type="button" className={kind==='target'?'text-danger':'text-action'} disabled={disabled} aria-label={`${name} ${labels[kind]}`} onClick={()=>void remove()}>{labels[kind]}</button>
+}
+
+export function MessageRemovalAction({message,busy,blockedReason,dirty,run,onRemoved}:{message:Message;busy:boolean;blockedReason?:string;dirty:boolean;run:Run;onRemoved:()=>void}){
+  const remove=async()=>{
+    if(busy||blockedReason)return
+    const draft=dirty?'\n저장하지 않은 수정 내용도 삭제됩니다.':''
+    if(!confirm(`‘${message.name}’ 메시지를 보관함에서 영구 삭제할까요?${draft}`))return
+    if(await run('message.delete',{id:message.id,expectedVersion:message.version},'메시지를 삭제했습니다.'))onRemoved()
+  }
+  return <button type="button" className="text-danger" disabled={busy||!!blockedReason} aria-label={`${message.name} 메시지 삭제`} title={blockedReason} onClick={()=>void remove()}>메시지 삭제</button>
 }
 
 export function RenameTargetAction({target,busy,run}:{target:Target;busy:boolean;run:Run}){

@@ -8,7 +8,7 @@ const root=resolve(import.meta.dirname,'..'),require=createRequire(join(root,'ce
 let loaded;
 function components(){return loaded??=(async()=>{
   const {build}=require('esbuild');
-  const result=await build({stdin:{contents:"export * from './src/RemovalActions.tsx';export {AccountConnections,ChannelSetup,BrowserConsolidateAction} from './src/App.tsx';export {createElement} from 'react';export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,loader:{'.css':'empty'},plugins:[{name:'expose-components',setup(b){b.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {AccountConnections,ChannelSetup,BrowserConsolidateAction};',loader:'tsx'}));}}]});
+  const result=await build({stdin:{contents:"export * from './src/RemovalActions.tsx';export {AccountConnections,ChannelSetup,BrowserConsolidateAction,Messages} from './src/App.tsx';export {createElement} from 'react';export {renderToStaticMarkup} from 'react-dom/server';",resolveDir:join(root,'central/ui'),loader:'tsx'},bundle:true,platform:'node',format:'cjs',jsx:'automatic',write:false,loader:{'.css':'empty'},plugins:[{name:'expose-components',setup(b){b.onLoad({filter:/\/App\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8'))+'\nexport {AccountConnections,ChannelSetup,BrowserConsolidateAction,Messages};',loader:'tsx'}));}}]});
   const dir=await mkdtemp(join(tmpdir(),'dico-removal-ui-'));try{const file=join(dir,'component.cjs');await writeFile(file,result.outputFiles[0].contents);return require(file);}finally{await rm(dir,{recursive:true,force:true});}
 })();}
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -54,4 +54,45 @@ test('consolidation uses existing managed-window capability and refuses active g
   const {BrowserConsolidateAction}=await components(),s=fixture(),calls=[],props={s,instance:s.instances[0],busy:false,run:async(...args)=>calls.push(args)};
   const button=BrowserConsolidateAction(props);assert.equal(button.props.disabled,false);button.props.onClick();assert.deepEqual(calls[0].slice(0,2),['channel.consolidate',{id:'binding'}]);
   s.groups=[{id:'group',members:['binding'],status:'running'}];assert.equal(BrowserConsolidateAction(props).props.disabled,true);
+});
+
+test('each saved channel can be deleted directly from its row before connecting an account',async()=>{
+  const {ChannelSetup,createElement,renderToStaticMarkup}=await components();
+  const s={...fixture(),accounts:[],channels:[],targets:[
+    {id:'first',guildId:'222',channelId:'333',name:'공지',version:1},
+    {id:'second',guildId:'222',channelId:'444',name:'공지',version:2},
+  ]};
+  const html=renderToStaticMarkup(createElement(ChannelSetup,{s,run:async()=>true,busy:false,go:()=>{}}));
+  const rows=[...html.matchAll(/class="target-list-row">([\s\S]*?)<\/div>/g)].map(match=>match[1]);
+  assert.equal(rows.length,2);
+  for(const [index,channelId] of ['333','444'].entries()){
+    assert.match(rows[index],new RegExp(`aria-label="#공지 · 채널 ID ${channelId} 채널 삭제"`));
+    assert.match(rows[index],/연결 계정 0개<\/span><\/button><button/);
+  }
+});
+
+test('message list exposes deletion and identifies channels that still use a message',async()=>{
+  const {Messages,createElement,renderToStaticMarkup}=await components(),s=fixture();
+  const used={id:'used',name:'사용 중 문구',body:'내용',tags:[],version:1};
+  const spare={id:'spare',name:'보관 문구',body:'내용',tags:[],version:2};
+  s.messages=[used,spare];
+  s.channels[0].pendingPlaylist=[{messageId:used.id}];
+  const html=renderToStaticMarkup(createElement(Messages,{s,run:async()=>true,busy:false,go:()=>{}}));
+  assert.match(html,/<button[^>]*disabled=""[^>]*aria-label="사용 중 문구 메시지 삭제"[^>]*title="[^"]*#공지"/);
+  assert.match(html,/<button type="button" class="text-danger" aria-label="보관 문구 메시지 삭제"/);
+});
+
+test('message deletion confirms and sends only the displayed message version',async()=>{
+  const {MessageRemovalAction}=await components(),before=globalThis.confirm,calls=[];
+  let removed=0;
+  const props={message:{id:'spare',name:'보관 문구',version:2},busy:false,dirty:true,run:async(...args)=>{calls.push(args);return true;},onRemoved:()=>removed++};
+  try{
+    globalThis.confirm=()=>false;
+    MessageRemovalAction(props).props.onClick();await tick();assert.equal(calls.length,0);
+    globalThis.confirm=prompt=>{assert.match(prompt,/보관 문구.*영구 삭제/);assert.match(prompt,/저장하지 않은 수정 내용/);return true;};
+    MessageRemovalAction({...props,blockedReason:'채널에서 사용 중'}).props.onClick();await tick();assert.equal(calls.length,0);
+    MessageRemovalAction(props).props.onClick();await tick();
+    assert.deepEqual(calls[0].slice(0,2),['message.delete',{id:'spare',expectedVersion:2}]);
+    assert.equal(removed,1);
+  }finally{globalThis.confirm=before;}
 });

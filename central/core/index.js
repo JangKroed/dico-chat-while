@@ -782,7 +782,15 @@ export function createCentralManager({databasePath=':memory:',now=Date.now,monot
         }
         c.version++;event('channel.updated',{channelId:c.id});return publicChannel(c);
       }
-      case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length>=1&&p.items.length<=50,'VALIDATION','Select 1–50 messages.');const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId:m.revisionId};});const active=state.attempts.find(a=>a.bindingId===c.id&&activeAttempt(a));ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
+      case 'channel.applyPlaylist':{const c=get('channels',p.id);expected(c,p);ensure(Array.isArray(p.items)&&p.items.length<=50,'VALIDATION','Select up to 50 messages.');
+        const active=state.attempts.find(a=>a.bindingId===c.id&&activeAttempt(a));
+        ensure(active?.status!=='unknown','ATTEMPT_UNRESOLVED','Resolve the unknown attempt before applying messages.',409);
+        if(!p.items.length){
+          const groupInUse=state.groups.some(g=>g.members.includes(c.id)&&
+            (!['stopped','paused'].includes(g.status)||g.pendingStart||g.controlIntent||g.activeAttemptId));
+          ensure(!groupInUse&&!active,'PLAYLIST_CLEAR_BLOCKED','관련 그룹을 중지하고 진행 중인 발송을 정리한 뒤 마지막 메시지를 해제하세요.',409);
+        }
+        const items=p.items.map(item=>{const m=get('messages',item.messageId);const revisionId=item.revisionId||m.revisionId;ensure(m.revisions.some(r=>r.id===revisionId),'VALIDATION','Message revision does not exist.');return{messageId:m.id,revisionId:m.revisionId};});
         if(active){c.pendingPlaylist=items;delete c.pendingPlaylistPreserveIndex;c.version++;control(get('groups',active.groupId),'pause');event('channel.playlist_pending',{channelId:c.id});}else applyPlaylist(c,items);return publicChannel(c);}
       case 'group.create':{const cs=validateMemberChannels(p.members);const g={id:id(),name:text(p.name,'name'),guildId:cs[0].guildId,channelId:cs[0].channelId,members:[...p.members],intervalMs:duration(p.intervalMs??20000),version:1,status:'stopped',cursor:0,activeAttemptId:null,waitReason:null,nextEligibleAt:null,createdAt:now()};state.groups.push(g);event('group.created',{groupId:g.id});return g;}
       case 'group.update':{const g=get('groups',p.id);expected(g,p);ensure(['stopped','paused'].includes(g.status)&&!g.pendingStart&&!g.activeAttemptId&&!g.controlIntent,'GROUP_RUNNING','Stop or pause and resolve pending attempts before editing.',409);if(p.members){const cs=validateMemberChannels(p.members);g.members=[...p.members];g.guildId=cs[0].guildId;g.channelId=cs[0].channelId;g.cursor=0;}if(p.name!==undefined)g.name=text(p.name,'name');if(p.intervalMs!==undefined)g.intervalMs=duration(p.intervalMs);g.version++;release(g);event('group.updated',{groupId:g.id});return g;}

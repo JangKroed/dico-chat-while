@@ -1483,3 +1483,28 @@ test('구버전 준비 거절만으로는 계정 차례를 넘기지 않고 차�
   }
  }
 });
+
+test('clearing the last message requires a stopped group and preserves its channel and group',()=>{
+  const f=fixture(),c=f.connect(),m=f.message();
+  try{
+    f.apply(c,[m]);
+    const group=f.group([c]),channel=f.manager.snapshot().channels[0];
+    const clear={id:channel.id,expectedVersion:channel.version,items:[]};
+    const remove={id:m.id,expectedVersion:m.version};
+    f.manager.execute('group.start',{id:group.id});
+    assert.throws(()=>f.manager.execute('channel.applyPlaylist',clear),{code:'PLAYLIST_CLEAR_BLOCKED'});
+    assert.throws(()=>f.manager.execute('message.delete',remove),{code:'MESSAGE_IN_USE'});
+    f.manager.execute('group.stop',{id:group.id});
+    for(const control of f.manager.commands(c.instanceId).filter(cmd=>cmd.type==='CONTROL')){
+      f.manager.bridge({type:'ACK',sessionId:c.sessionId,commandId:control.id,status:'applied'},c.instanceId);
+    }
+    f.apply(c,[]);
+    f.manager.execute('message.delete',remove);
+    const after=f.manager.snapshot();
+    assert.deepEqual(after.channels[0].playlist,[]);
+    assert.equal(after.channels[0].id,channel.id);
+    assert.equal(after.groups[0].id,group.id);
+    assert.equal(after.messages.length,0);
+    assert.throws(()=>f.manager.execute('group.start',{id:group.id}),{code:'PLAYLIST_EMPTY'});
+  }finally{f.manager.close();}
+});

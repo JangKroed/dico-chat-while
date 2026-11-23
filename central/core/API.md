@@ -54,7 +54,7 @@ Existing editable entities require `expectedVersion`; control actions use curren
 | `instance.delete` / `account.delete` / `target.delete` / `channel.delete` | `{id,expectedVersion}`; removes the selected scope, retains history, queues exact managed-tab closure |
 | `target.update` | `{id,expectedVersion,name}`; preserves the explicit channel alias |
 | `channel.update` | `{id,expectedVersion,name?,intervalMs?}` |
-| `channel.applyPlaylist` | `{id,expectedVersion,items:[{messageId,revisionId?}]}`; 1–50 items |
+| `channel.applyPlaylist` | `{id,expectedVersion,items:[{messageId,revisionId?}]}`; up to 50 items. Clearing requires all related groups to be stopped or paused and no active attempt |
 | `group.create` | `{name,members:[bindingId],intervalMs?}` |
 | `group.update` | `{id,expectedVersion,name?,members?,intervalMs?}`; stopped/paused only |
 | `group.delete` | `{id,expectedVersion}`; stopped only |
